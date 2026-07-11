@@ -2,10 +2,22 @@ import { pathToFileURL } from "node:url";
 import { type ServerType, serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { createDataApp } from "./app.js";
+import { createSupervisor } from "./codex/supervisor.js";
 import { type Config, loadConfig } from "./config.js";
 
 export interface RunningService {
   close(): Promise<void>;
+}
+
+interface SupervisorLifecycle {
+  start(): Promise<unknown>;
+  health(): boolean;
+  ready(): boolean;
+  stop(): Promise<void>;
+}
+
+interface StartDependencies {
+  supervisor?: SupervisorLifecycle;
 }
 
 function closeServer(server: ServerType): Promise<void> {
@@ -37,32 +49,54 @@ function listen(
   });
 }
 
-export async function start(config: Config): Promise<RunningService> {
+export async function start(
+  config: Config,
+  dependencies: StartDependencies = {},
+): Promise<RunningService> {
+  const supervisor = dependencies.supervisor ?? createSupervisor({ config });
+  try {
+    await supervisor.start();
+  } catch (error) {
+    await supervisor.stop();
+    throw error;
+  }
+  let draining = false;
   const dataApp = createDataApp({
-    health: () => true,
-    ready: () => true,
+    health: () => supervisor.health(),
+    ready: () => supervisor.ready(),
+    draining: () => draining,
     bifrostToken: config.bifrostProxyToken,
     metricsToken: config.metricsToken,
   });
   const adminApp = new Hono();
-  const dataServer = await listen(dataApp, config.dataHost, config.dataPort);
+  let dataServer: ServerType;
+  try {
+    dataServer = await listen(dataApp, config.dataHost, config.dataPort);
+  } catch (error) {
+    await supervisor.stop();
+    throw error;
+  }
   let adminServer: ServerType;
   try {
     adminServer = await listen(adminApp, config.adminHost, config.adminPort);
   } catch (error) {
-    await closeServer(dataServer);
+    await Promise.all([closeServer(dataServer), supervisor.stop()]);
     throw error;
   }
 
   let closePromise: Promise<void> | undefined;
   const close = (): Promise<void> => {
     if (!closePromise) {
+      draining = true;
       process.off("SIGINT", handleSignal);
       process.off("SIGTERM", handleSignal);
-      closePromise = Promise.all([
-        closeServer(dataServer),
-        closeServer(adminServer),
-      ]).then(() => undefined);
+      closePromise = supervisor
+        .stop()
+        .then(() =>
+          Promise.all([closeServer(dataServer), closeServer(adminServer)]).then(
+            () => undefined,
+          ),
+        );
     }
     return closePromise;
   };

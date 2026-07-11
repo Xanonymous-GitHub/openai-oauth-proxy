@@ -56,6 +56,7 @@ interface TransportOptions {
 
 export interface CodexTransport {
   readonly host: CodexHost;
+  readonly failure: Promise<void>;
   initialize(
     params: InitializeParams,
     signal?: AbortSignal,
@@ -113,6 +114,7 @@ class AsyncQueue<T> implements AsyncIterable<T> {
 
 class JsonlTransport implements CodexTransport {
   readonly host: CodexHost;
+  readonly failure: Promise<void>;
   readonly #output: Writable;
   readonly #generation: number;
   readonly #pending = new Map<RequestId, PendingRequest>();
@@ -122,8 +124,12 @@ class JsonlTransport implements CodexTransport {
   #nextId = 0;
   #invalidated = false;
   #failed = false;
+  #resolveFailure: (() => void) | undefined;
 
   constructor({ input, output, generation }: TransportOptions) {
+    this.failure = new Promise((resolve) => {
+      this.#resolveFailure = resolve;
+    });
     this.#output = output;
     this.#generation = generation;
     const failProtocol = () => this.protocolFailure();
@@ -342,6 +348,8 @@ class JsonlTransport implements CodexTransport {
   private protocolFailure(): void {
     if (this.#failed || this.#invalidated) return;
     this.#failed = true;
+    this.#resolveFailure?.();
+    this.#resolveFailure = undefined;
     const error = new CodexProtocolError();
     this.rejectPending(error);
     for (const tool of this.#pendingTools) tool.active = false;

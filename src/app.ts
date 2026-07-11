@@ -3,6 +3,7 @@ import { Hono } from "hono";
 export interface DataAppDependencies {
   health(): boolean;
   ready(): boolean;
+  draining(): boolean;
   bifrostToken: string;
   metricsToken: string;
 }
@@ -11,10 +12,14 @@ export function createDataApp(deps: DataAppDependencies): Hono {
   const app = new Hono();
 
   app.get("/healthz", (context) =>
-    deps.health() ? context.body(null, 200) : context.body(null, 500),
+    deps.health() && !deps.draining()
+      ? context.body(null, 200)
+      : context.body(null, 500),
   );
   app.get("/readyz", (context) =>
-    deps.ready() ? context.body(null, 200) : context.body(null, 503),
+    deps.ready() && !deps.draining()
+      ? context.body(null, 200)
+      : context.body(null, 503),
   );
   app.all("/v1/*", (context) =>
     context.json(
