@@ -1,0 +1,12 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+/data/
+auth.json
+.worktrees/
+.superpowers/
+*.log
+*.sqlite-shm
+*.sqlite-wal
