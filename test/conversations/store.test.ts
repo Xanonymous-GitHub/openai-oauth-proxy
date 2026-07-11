@@ -3,13 +3,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
+import { migrateConversations } from "../../src/conversations/migrations.js";
 import {
   type ConversationClock,
   ConversationStore,
+  type ConversationStoreOptions,
 } from "../../src/conversations/store.js";
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
 const TURN_LEASE_MS = 10 * 60 * 1_000;
+const LEASE_OPTIONS: ConversationStoreOptions = {
+  turnLeaseMs: TURN_LEASE_MS,
+  toolLeaseMs: 15 * 60 * 1_000,
+};
 
 let now = 1_700_000_000_000;
 const clock: ConversationClock = { now: () => now };
@@ -22,10 +28,28 @@ function databasePath(): string {
   return join(directory, "proxy.sqlite");
 }
 
-function open(path = databasePath()): ConversationStore {
-  const store = ConversationStore.open(path, clock);
+function open(
+  path = databasePath(),
+  options: ConversationStoreOptions = LEASE_OPTIONS,
+): ConversationStore {
+  const store = ConversationStore.open(path, clock, options);
   stores.add(store);
   return store;
+}
+
+function openPreviousReader(
+  path: string,
+  supportedVersion: number,
+): DatabaseSync {
+  const database = new DatabaseSync(path);
+  try {
+    database.exec("PRAGMA foreign_keys = ON");
+    migrateConversations(database, () => now, supportedVersion);
+    return database;
+  } catch (error) {
+    database.close();
+    throw error;
+  }
 }
 
 function close(store: ConversationStore): void {
@@ -190,6 +214,34 @@ describe("ConversationStore", () => {
     expect(store.deletableLeafThreads()).toEqual(["thr_disposable"]);
   });
 
+  it("does not expose a pending response after its deadline", () => {
+    const store = open();
+    const responseId = store.createPending({
+      threadId: "thr_pending_lookup",
+      stored: true,
+      processGeneration: 1,
+    });
+
+    now += 7 * DAY_MS;
+
+    expect(store.lookup(responseId)).toBeUndefined();
+  });
+
+  it("returns not_found instead of busy for a pending response after its deadline", () => {
+    const store = open();
+    const responseId = store.createPending({
+      threadId: "thr_pending_decide",
+      stored: true,
+      processGeneration: 1,
+    });
+
+    now += 7 * DAY_MS;
+
+    expect(store.decide(responseId, "req-after-deadline")).toEqual({
+      type: "not_found",
+    });
+  });
+
   it("rolls back lineage when creating a response fails", () => {
     const path = databasePath();
     const store = open(path);
@@ -225,6 +277,34 @@ describe("ConversationStore", () => {
     expect(second.acquireLease("thr_lease", "req-2", "turn", 1)).toBe(true);
     expect(first.releaseLease("thr_lease", "req-1")).toBe(false);
     expect(second.releaseLease("thr_lease", "req-2")).toBe(true);
+  });
+
+  it("uses distinct configured durations for turn and tool leases", () => {
+    const path = databasePath();
+    const options = { turnLeaseMs: 100, toolLeaseMs: 300 };
+    const first = open(path, options);
+    const second = open(path, options);
+
+    expect(first.acquireLease("thr_turn", "req-turn-1", "turn", 1)).toBe(true);
+    expect(first.acquireLease("thr_tool", "req-tool-1", "tool", 1)).toBe(true);
+
+    now += 100;
+    expect(second.acquireLease("thr_turn", "req-turn-2", "turn", 1)).toBe(true);
+    expect(second.acquireLease("thr_tool", "req-tool-2", "tool", 1)).toBe(
+      false,
+    );
+
+    now += 200;
+    expect(second.acquireLease("thr_tool", "req-tool-2", "tool", 1)).toBe(true);
+  });
+
+  it.each([
+    ["turnLeaseMs", { turnLeaseMs: 0, toolLeaseMs: 1 }],
+    ["toolLeaseMs", { turnLeaseMs: 1, toolLeaseMs: 1.5 }],
+  ] as const)("rejects an invalid %s", (name, options) => {
+    expect(() =>
+      ConversationStore.open(databasePath(), clock, options),
+    ).toThrow(`${name} must be a positive integer`);
   });
 
   it("returns lost for pending continuations from another process generation", () => {
@@ -327,7 +407,7 @@ describe("conversation migrations", () => {
       },
     };
 
-    const store = ConversationStore.open(path, contextualClock);
+    const store = ConversationStore.open(path, contextualClock, LEASE_OPTIONS);
     store.close();
 
     const database = new DatabaseSync(path);
@@ -377,7 +457,7 @@ describe("conversation migrations", () => {
     const store = open(path);
     close(store);
 
-    const previousApplication = new DatabaseSync(path);
+    const previousApplication = openPreviousReader(path, 1);
     expect(
       previousApplication
         .prepare(`
@@ -411,5 +491,58 @@ describe("conversation migrations", () => {
         .all(),
     ).toEqual([{ name: "thread_leases" }, { name: "thread_lineage" }]);
     previousApplication.close();
+  });
+
+  it("lets the previous reader open a database after a future additive migration", () => {
+    const path = databasePath();
+    const store = open(path);
+    completeResponse(
+      store,
+      { threadId: "thr_future", stored: true, processGeneration: 1 },
+      "turn_future",
+    );
+    close(store);
+
+    const futureApplication = new DatabaseSync(path);
+    futureApplication.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE future_additive_data (
+        id INTEGER PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+      INSERT INTO schema_migrations(version, applied_at) VALUES (3, ${now});
+      COMMIT;
+    `);
+    futureApplication.close();
+
+    const previousApplication = openPreviousReader(path, 2);
+    expect(
+      previousApplication
+        .prepare(
+          "SELECT thread_id, turn_id FROM responses WHERE thread_id = 'thr_future'",
+        )
+        .get(),
+    ).toEqual({ thread_id: "thr_future", turn_id: "turn_future" });
+    previousApplication.close();
+  });
+
+  it("rejects a newer migration row when the known schema is corrupt", () => {
+    const path = databasePath();
+    const database = new DatabaseSync(path);
+    database.exec(`
+      CREATE TABLE schema_migrations (
+        version INTEGER PRIMARY KEY,
+        applied_at INTEGER NOT NULL
+      );
+      INSERT INTO schema_migrations(version, applied_at) VALUES
+        (1, ${now}),
+        (2, ${now}),
+        (3, ${now});
+    `);
+    database.close();
+
+    expect(() => openPreviousReader(path, 2)).toThrow(
+      "Conversation database is incompatible: missing table responses",
+    );
   });
 });

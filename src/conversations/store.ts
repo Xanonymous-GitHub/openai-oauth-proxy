@@ -4,11 +4,14 @@ import { migrateConversations } from "./migrations.js";
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
 const RESPONSE_TTL_MS = 7 * DAY_MS;
-const TURN_LEASE_MS = 10 * 60 * 1_000;
-const TOOL_LEASE_MS = 15 * 60 * 1_000;
 
 export interface ConversationClock {
   now(): number;
+}
+
+export interface ConversationStoreOptions {
+  turnLeaseMs: number;
+  toolLeaseMs: number;
 }
 
 export type LeaseKind = "turn" | "tool";
@@ -99,12 +102,20 @@ interface Statements {
 export class ConversationStore {
   readonly #database: DatabaseSync;
   readonly #clock: ConversationClock;
+  readonly #turnLeaseMs: number;
+  readonly #toolLeaseMs: number;
   readonly #statements: Statements;
   #closed = false;
 
-  private constructor(database: DatabaseSync, clock: ConversationClock) {
+  private constructor(
+    database: DatabaseSync,
+    clock: ConversationClock,
+    options: ConversationStoreOptions,
+  ) {
     this.#database = database;
     this.#clock = clock;
+    this.#turnLeaseMs = options.turnLeaseMs;
+    this.#toolLeaseMs = options.toolLeaseMs;
     this.#statements = {
       insertLineage: database.prepare(`
         INSERT INTO thread_lineage(thread_id, parent_thread_id, forked_at_turn_id)
@@ -143,14 +154,20 @@ export class ConversationStore {
         UPDATE responses
         SET state = 'expired'
         WHERE response_id = ?
-          AND state IN ('complete', 'lost')
-          AND (stored = 0 OR expires_at <= ?)
+          AND state IN ('pending', 'complete', 'lost')
+          AND (
+            expires_at <= ?
+            OR (state IN ('complete', 'lost') AND stored = 0)
+          )
       `),
       expireResponses: database.prepare(`
         UPDATE responses
         SET state = 'expired'
-        WHERE state IN ('complete', 'lost')
-          AND (stored = 0 OR expires_at <= ?)
+        WHERE state IN ('pending', 'complete', 'lost')
+          AND (
+            expires_at <= ?
+            OR (state IN ('complete', 'lost') AND stored = 0)
+          )
       `),
       readResponse: database.prepare(`
         SELECT response_id, thread_id, turn_id, parent_response_id,
@@ -260,7 +277,13 @@ export class ConversationStore {
     };
   }
 
-  static open(path: string, clock: ConversationClock): ConversationStore {
+  static open(
+    path: string,
+    clock: ConversationClock,
+    options: ConversationStoreOptions,
+  ): ConversationStore {
+    assertDuration("turnLeaseMs", options.turnLeaseMs);
+    assertDuration("toolLeaseMs", options.toolLeaseMs);
     const database = new DatabaseSync(path, { timeout: 5_000 });
     try {
       database.exec(`
@@ -269,7 +292,7 @@ export class ConversationStore {
         PRAGMA busy_timeout = 5000;
       `);
       migrateConversations(database, () => clock.now());
-      return new ConversationStore(database, clock);
+      return new ConversationStore(database, clock, options);
     } catch (error) {
       database.close();
       throw error;
@@ -321,6 +344,7 @@ export class ConversationStore {
   complete(responseId: string, turnId: string): void {
     const now = this.#clock.now();
     this.#transaction(() => {
+      this.#statements.expireResponse.run(responseId, now);
       const result = this.#statements.completeResponse.run(
         turnId,
         now,
@@ -364,7 +388,7 @@ export class ConversationStore {
     processGeneration: number,
   ): boolean {
     const now = this.#clock.now();
-    const leaseMs = kind === "tool" ? TOOL_LEASE_MS : TURN_LEASE_MS;
+    const leaseMs = kind === "tool" ? this.#toolLeaseMs : this.#turnLeaseMs;
     return this.#transaction(() => {
       this.#statements.deleteStaleLease.run(threadId, now);
       return (
@@ -388,6 +412,7 @@ export class ConversationStore {
   markContinuationLost(currentProcessGeneration: number): number {
     const now = this.#clock.now();
     return this.#transaction(() => {
+      this.#statements.expireResponses.run(now);
       const result = this.#statements.losePendingResponses.run(
         now,
         now + RESPONSE_TTL_MS,
@@ -442,7 +467,7 @@ export class ConversationStore {
         ownerRequestId,
         "turn",
         response.process_generation,
-        now + TURN_LEASE_MS,
+        now + this.#turnLeaseMs,
       );
       if (acquired.changes !== 1) return { type: "busy" };
 
@@ -488,6 +513,12 @@ export class ConversationStore {
       this.#database.exec("ROLLBACK");
       throw error;
     }
+  }
+}
+
+function assertDuration(name: string, value: number): void {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive integer`);
   }
 }
 
