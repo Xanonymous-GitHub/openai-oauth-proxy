@@ -31,14 +31,22 @@ export interface SupervisorChild {
   stdin: ChildProcessWithoutNullStreams["stdin"];
   stdout: ChildProcessWithoutNullStreams["stdout"];
   stderr: ChildProcessWithoutNullStreams["stderr"];
-  once(event: "error", listener: (error: Error) => void): unknown;
+  on(event: "error", listener: (error: Error) => void): unknown;
   once(
     event: "exit",
+    listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+  ): unknown;
+  once(
+    event: "close",
     listener: (code: number | null, signal: NodeJS.Signals | null) => void,
   ): unknown;
   off(event: "error", listener: (error: Error) => void): unknown;
   off(
     event: "exit",
+    listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+  ): unknown;
+  off(
+    event: "close",
     listener: (code: number | null, signal: NodeJS.Signals | null) => void,
   ): unknown;
   kill(signal?: NodeJS.Signals | number): boolean;
@@ -77,11 +85,12 @@ interface Generation {
   attempt: number;
   child: SupervisorChild;
   transport: CodexTransport;
-  exited: boolean;
-  exit: Promise<void>;
+  closed: boolean;
+  close: Promise<void>;
   termination: Promise<void> | undefined;
   onError: (error: Error) => void;
   onExit: (code: number | null, signal: NodeJS.Signals | null) => void;
+  onClose: (code: number | null, signal: NodeJS.Signals | null) => void;
 }
 
 const systemClock: Clock = {
@@ -182,16 +191,19 @@ export class CodexSupervisor {
       output: child.stdin,
       generation,
     });
-    let resolveExit: (() => void) | undefined;
-    const exit = new Promise<void>((resolve) => {
-      resolveExit = resolve;
+    let resolveClose: (() => void) | undefined;
+    const close = new Promise<void>((resolve) => {
+      resolveClose = resolve;
     });
     let current: Generation;
     const onError = (): void => this.failGeneration(generation, true);
-    const onExit = (): void => {
-      current.exited = true;
-      resolveExit?.();
-      resolveExit = undefined;
+    const onExit = (): void => this.failGeneration(generation, false);
+    const onClose = (): void => {
+      current.closed = true;
+      resolveClose?.();
+      resolveClose = undefined;
+      child.off("error", onError);
+      child.off("exit", onExit);
       this.failGeneration(generation, false);
     };
     current = {
@@ -199,15 +211,17 @@ export class CodexSupervisor {
       attempt,
       child,
       transport,
-      exited: false,
-      exit,
+      closed: false,
+      close,
       termination: undefined,
       onError,
       onExit,
+      onClose,
     };
     this.#current = current;
-    child.once("error", onError);
+    child.on("error", onError);
     child.once("exit", onExit);
+    child.once("close", onClose);
 
     const controller = new AbortController();
     this.#initializationTimer = this.#clock.setTimeout(() => {
@@ -256,10 +270,9 @@ export class CodexSupervisor {
     this.#state = { type: "recovering", attempt: failed.attempt + 1 };
     this.clearTimer("initialization");
     this.clearTimer("stable");
-    failed.child.off("error", failed.onError);
     failed.transport.invalidateGeneration();
     this.#retiring = failed;
-    const retirement = terminate ? this.terminateChild(failed) : failed.exit;
+    const retirement = terminate ? this.terminateChild(failed) : failed.close;
     void retirement.then(() => {
       if (this.#retiring !== failed) return;
       this.#retiring = undefined;
@@ -333,7 +346,6 @@ export class CodexSupervisor {
     this.clearTimer("recovery");
     this.clearTimer("stable");
     const generation = this.#current ?? this.#retiring;
-    generation?.child.off("error", generation.onError);
     if (!this.#startSettled && this.#startPromise) {
       this.#startSettled = true;
       this.#rejectStart?.(new CodexGenerationChangedError());
@@ -351,21 +363,21 @@ export class CodexSupervisor {
   private terminateChild(generation: Generation): Promise<void> {
     if (generation.termination) return generation.termination;
     generation.termination = (async () => {
-      if (generation.exited) return;
+      if (generation.closed) return;
       generation.child.kill("SIGTERM");
-      if (generation.exited) return;
-      const exitedGracefully = await this.waitForExit(
+      if (generation.closed) return;
+      const closedGracefully = await this.waitForClose(
         generation,
         TERMINATION_GRACE_MS,
       );
-      if (exitedGracefully) return;
+      if (closedGracefully) return;
       generation.child.kill("SIGKILL");
-      await generation.exit;
+      await generation.close;
     })();
     return generation.termination;
   }
 
-  private waitForExit(
+  private waitForClose(
     generation: Generation,
     timeout: number,
   ): Promise<boolean> {
@@ -378,7 +390,7 @@ export class CodexSupervisor {
         resolve(exited);
       };
       const timer = this.#clock.setTimeout(() => finish(false), timeout);
-      void generation.exit.then(() => finish(true));
+      void generation.close.then(() => finish(true));
     });
   }
 

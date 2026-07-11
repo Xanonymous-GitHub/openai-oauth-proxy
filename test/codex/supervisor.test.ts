@@ -33,6 +33,7 @@ class FakeChild extends EventEmitter {
   readonly killSignals: Array<NodeJS.Signals | number | undefined> = [];
   autoExitOnKill = true;
   killCount = 0;
+  #closed = false;
   #exited = false;
 
   constructor() {
@@ -55,9 +56,20 @@ class FakeChild extends EventEmitter {
   }
 
   finish(code: number | null = 0, signal: NodeJS.Signals | null = null): void {
-    if (this.#exited) return;
-    this.#exited = true;
-    this.emit("exit", code, signal);
+    if (!this.#exited) {
+      this.#exited = true;
+      this.emit("exit", code, signal);
+    }
+    this.close(code, signal);
+  }
+
+  close(
+    code: number | null = null,
+    signal: NodeJS.Signals | null = null,
+  ): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.emit("close", code, signal);
   }
 
   kill(signal?: NodeJS.Signals | number): boolean {
@@ -142,6 +154,7 @@ afterEach(async () => {
   for (const child of children) {
     expect(child.listenerCount("error")).toBe(0);
     expect(child.listenerCount("exit")).toBe(0);
+    expect(child.listenerCount("close")).toBe(0);
   }
   for (const directory of workingDirectories) {
     expect(existsSync(directory)).toBe(false);
@@ -330,6 +343,92 @@ describe("CodexSupervisor", () => {
     expect(second.sent).toHaveLength(0);
     await vi.advanceTimersByTimeAsync(1);
     expect(second.sent[0]).toMatchObject({ method: "initialize" });
+  });
+
+  it("recovers when a child errors and closes without exiting", async () => {
+    const first = fakeChild();
+    first.autoExitOnKill = false;
+    const second = fakeChild();
+    const supervisor = createSupervisor({
+      config,
+      childFactory: factoryFor([first, second]),
+      clock,
+      random: () => 0,
+    });
+    const started = supervisor.start();
+    void started.catch(() => undefined);
+
+    first.emit("error", new Error("spawn failed"));
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(first.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(second.sent).toHaveLength(0);
+    first.close();
+    await flush();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await makeReady(supervisor, second, started);
+
+    await expect(started).resolves.toBeDefined();
+  });
+
+  it("settles stop for a failed spawn that closes without exiting", async () => {
+    const child = fakeChild();
+    child.autoExitOnKill = false;
+    const supervisor = createSupervisor({
+      config,
+      childFactory: factoryFor([child]),
+      clock,
+      random: () => 0,
+    });
+    const started = supervisor.start();
+    void started.catch(() => undefined);
+    child.emit("error", new Error("spawn failed"));
+    let stopped = false;
+
+    const stopping = supervisor.stop().then(() => {
+      stopped = true;
+    });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(stopped).toBe(false);
+    child.close();
+    await flush();
+    const settledAfterClose = stopped;
+    if (!settledAfterClose) {
+      child.finish();
+      await stopping;
+    }
+
+    expect(settledAfterClose).toBe(true);
+    await expect(started).rejects.toBeInstanceOf(CodexGenerationChangedError);
+  });
+
+  it("handles late child errors without overlapping recovery generations", async () => {
+    const first = fakeChild();
+    first.autoExitOnKill = false;
+    const second = fakeChild();
+    const childFactory = vi.fn(factoryFor([first, second]));
+    const supervisor = createSupervisor({
+      config,
+      childFactory,
+      clock,
+      random: () => 0,
+    });
+    const started = supervisor.start();
+    void started.catch(() => undefined);
+
+    first.emit("error", new Error("spawn failed"));
+    await flush();
+    expect(() =>
+      first.emit("error", new Error("late kill error")),
+    ).not.toThrow();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(childFactory).toHaveBeenCalledOnce();
+    first.close();
+    await flush();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(childFactory).toHaveBeenCalledTimes(2);
+    await makeReady(supervisor, second, started);
+
+    await expect(started).resolves.toBeDefined();
   });
 
   it("does not consume host notifications while monitoring protocol health", async () => {
