@@ -14,7 +14,10 @@
     "test": "vitest run",
     "check": "biome check . && bun run typecheck && bun run test && bun run build",
     "start": "node dist/main.js",
-    "deps:check": "bunx npm-check-updates --errorLevel 2"
+    "deps:check": "bunx npm-check-updates --errorLevel 2",
+    "protocol:generate": "mkdir -p src/codex/generated && codex app-server generate-ts --experimental --out src/codex/generated && codex app-server generate-json-schema --experimental --out src/codex/generated",
+    "postprotocol:generate": "node -e \"const fs=require('node:fs');const sort=(value)=>Array.isArray(value)?value.map(sort):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).sort(([a],[b])=>a.localeCompare(b)).map(([key,item])=>[key,sort(item)])):value;for(const file of ['src/codex/generated/codex_app_server_protocol.schemas.json','src/codex/generated/codex_app_server_protocol.v2.schemas.json'])fs.writeFileSync(file,JSON.stringify(sort(JSON.parse(fs.readFileSync(file,'utf8'))),null,2)+'\\n')\"",
+    "protocol:check": "bun run protocol:generate && git diff --exit-code -- src/codex/generated"
   },
   "dependencies": {
     "@hono/node-server": "2.0.8",
