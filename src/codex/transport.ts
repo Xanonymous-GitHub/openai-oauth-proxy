@@ -93,15 +93,16 @@ class AsyncQueue<T> implements AsyncIterable<T> {
   fail(error: Error): void {
     if (this.#error) return;
     this.#error = error;
+    this.#values.length = 0;
     for (const waiter of this.#waiters.splice(0)) waiter.reject(error);
   }
 
   [Symbol.asyncIterator](): AsyncIterator<T> {
     return {
       next: () => {
+        if (this.#error) return Promise.reject(this.#error);
         const value = this.#values.shift();
         if (value !== undefined) return Promise.resolve({ value, done: false });
-        if (this.#error) return Promise.reject(this.#error);
         return new Promise<IteratorResult<T>>((resolve, reject) => {
           this.#waiters.push({ resolve, reject });
         });
@@ -125,6 +126,10 @@ class JsonlTransport implements CodexTransport {
   constructor({ input, output, generation }: TransportOptions) {
     this.#output = output;
     this.#generation = generation;
+    const failProtocol = () => this.protocolFailure();
+    input.on("error", failProtocol);
+    input.once("close", failProtocol);
+    output.on("error", failProtocol);
     this.host = {
       generation,
       accountRead: (refreshToken, signal) =>
@@ -170,6 +175,8 @@ class JsonlTransport implements CodexTransport {
           this.handleLine(line);
         }
       } catch {
+        this.protocolFailure();
+      } finally {
         this.protocolFailure();
       }
     })();

@@ -132,6 +132,19 @@ function createHarness(generation = 7) {
   };
 }
 
+function within<T>(promise: Promise<T>): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      setTimeout(() => reject(new Error("Transport did not terminate")), 100);
+    }),
+  ]);
+}
+
+function waitForIo(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
 function spawnFakeAppServer(environment: NodeJS.ProcessEnv = process.env) {
   const child = spawn(
     process.execPath,
@@ -385,6 +398,41 @@ describe("JSONL transport", () => {
     await expect(pending).rejects.not.toThrow("secret-token");
   });
 
+  it("rejects a pending request on clean input EOF", async () => {
+    const harness = createHarness();
+    const pending = harness.transport.host.accountRead(false);
+    await harness.nextOutgoing();
+
+    harness.fromServer.end();
+
+    await expect(within(pending)).rejects.toBeInstanceOf(CodexProtocolError);
+  });
+
+  it.each([
+    "input",
+    "output",
+  ] as const)("rejects pending requests and queues on %s stream error", async (streamName) => {
+    const harness = createHarness();
+    const pending = harness.transport.host.accountRead(false);
+    await harness.nextOutgoing();
+    const nextEvent = harness.transport.host
+      .events()
+      [Symbol.asyncIterator]()
+      .next();
+    const nextTool = harness.transport.host
+      .toolCalls()
+      [Symbol.asyncIterator]()
+      .next();
+    const stream =
+      streamName === "input" ? harness.fromServer : harness.toServer;
+
+    expect(() => stream.emit("error", new Error("secret-token"))).not.toThrow();
+
+    await expect(within(pending)).rejects.toBeInstanceOf(CodexProtocolError);
+    await expect(within(nextEvent)).rejects.toBeInstanceOf(CodexProtocolError);
+    await expect(within(nextTool)).rejects.toBeInstanceOf(CodexProtocolError);
+  });
+
   it("rejects pending requests when a response has an unknown ID", async () => {
     const harness = createHarness();
     const pending = harness.transport.host.accountRead(false);
@@ -432,6 +480,33 @@ describe("JSONL transport", () => {
     expect(() => tool?.reject(-32_000, "late")).toThrow(
       CodexGenerationChangedError,
     );
+  });
+
+  it("does not yield a buffered notification after generation invalidation", async () => {
+    const harness = createHarness();
+    harness.send({
+      method: "thread/started",
+      params: { thread: { id: "thread-1" } },
+    });
+    await waitForIo();
+
+    harness.transport.invalidateGeneration();
+
+    await expect(
+      harness.transport.host.events()[Symbol.asyncIterator]().next(),
+    ).rejects.toBeInstanceOf(CodexGenerationChangedError);
+  });
+
+  it("does not yield a buffered tool call after generation invalidation", async () => {
+    const harness = createHarness();
+    harness.send(await generatedServerRequest("item/tool/call", 77));
+    await waitForIo();
+
+    harness.transport.invalidateGeneration();
+
+    await expect(
+      harness.transport.host.toolCalls()[Symbol.asyncIterator]().next(),
+    ).rejects.toBeInstanceOf(CodexGenerationChangedError);
   });
 
   it("sends initialized as the only transport notification", async () => {
