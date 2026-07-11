@@ -2,15 +2,17 @@ import { pathToFileURL } from "node:url";
 import { type ServerType, serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { createDataApp } from "./app.js";
+import type { CodexHost } from "./codex/host.js";
 import { createSupervisor } from "./codex/supervisor.js";
 import { type Config, loadConfig } from "./config.js";
 
 export interface RunningService {
+  readonly host: Promise<CodexHost>;
   close(): Promise<void>;
 }
 
 interface SupervisorLifecycle {
-  start(): Promise<unknown>;
+  start(): Promise<CodexHost>;
   health(): boolean;
   ready(): boolean;
   stop(): Promise<void>;
@@ -54,12 +56,6 @@ export async function start(
   dependencies: StartDependencies = {},
 ): Promise<RunningService> {
   const supervisor = dependencies.supervisor ?? createSupervisor({ config });
-  try {
-    await supervisor.start();
-  } catch (error) {
-    await supervisor.stop();
-    throw error;
-  }
   let draining = false;
   const dataApp = createDataApp({
     health: () => supervisor.health(),
@@ -107,7 +103,15 @@ export async function start(
   process.once("SIGINT", handleSignal);
   process.once("SIGTERM", handleSignal);
 
-  return { close };
+  let host: Promise<CodexHost>;
+  try {
+    host = supervisor.start();
+  } catch (error) {
+    host = Promise.reject(error);
+  }
+  void host.catch(() => undefined);
+
+  return { close, host };
 }
 
 if (

@@ -16,6 +16,7 @@ import {
 const INITIALIZATION_TIMEOUT_MS = 30_000;
 const STABLE_RESET_MS = 600_000;
 const DRAIN_TIMEOUT_MS = 30_000;
+const TERMINATION_GRACE_MS = 5_000;
 const RECOVERY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000] as const;
 
 type Timer = ReturnType<typeof setTimeout>;
@@ -76,6 +77,9 @@ interface Generation {
   attempt: number;
   child: SupervisorChild;
   transport: CodexTransport;
+  exited: boolean;
+  exit: Promise<void>;
+  termination: Promise<void> | undefined;
   onError: (error: Error) => void;
   onExit: (code: number | null, signal: NodeJS.Signals | null) => void;
 }
@@ -99,6 +103,7 @@ export class CodexSupervisor {
   readonly #facade: CodexHost;
   #state: SupervisorState = { type: "stopped" };
   #current: Generation | undefined;
+  #retiring: Generation | undefined;
   #generation = 0;
   #startPromise: Promise<CodexHost> | undefined;
   #resolveStart: ((host: CodexHost) => void) | undefined;
@@ -177,13 +182,26 @@ export class CodexSupervisor {
       output: child.stdin,
       generation,
     });
+    let resolveExit: (() => void) | undefined;
+    const exit = new Promise<void>((resolve) => {
+      resolveExit = resolve;
+    });
+    let current: Generation;
     const onError = (): void => this.failGeneration(generation, true);
-    const onExit = (): void => this.failGeneration(generation, false);
-    const current: Generation = {
+    const onExit = (): void => {
+      current.exited = true;
+      resolveExit?.();
+      resolveExit = undefined;
+      this.failGeneration(generation, false);
+    };
+    current = {
       number: generation,
       attempt,
       child,
       transport,
+      exited: false,
+      exit,
+      termination: undefined,
       onError,
       onExit,
     };
@@ -238,10 +256,15 @@ export class CodexSupervisor {
     this.#state = { type: "recovering", attempt: failed.attempt + 1 };
     this.clearTimer("initialization");
     this.clearTimer("stable");
-    this.detach(failed);
+    failed.child.off("error", failed.onError);
     failed.transport.invalidateGeneration();
-    if (terminate) failed.child.kill();
-    this.recoverAfter(failed.attempt);
+    this.#retiring = failed;
+    const retirement = terminate ? this.terminateChild(failed) : failed.exit;
+    void retirement.then(() => {
+      if (this.#retiring !== failed) return;
+      this.#retiring = undefined;
+      if (!this.#stopping) this.recoverAfter(failed.attempt);
+    });
   }
 
   private recoverAfter(failedAttempt: number): void {
@@ -304,26 +327,58 @@ export class CodexSupervisor {
     return this.#current.transport.host;
   }
 
-  private performStop(): Promise<void> {
+  private async performStop(): Promise<void> {
     this.#stopping = true;
     this.clearTimer("initialization");
     this.clearTimer("recovery");
     this.clearTimer("stable");
-    const current = this.#current;
-    if (current) {
-      this.detach(current);
-    }
+    const generation = this.#current ?? this.#retiring;
+    generation?.child.off("error", generation.onError);
     if (!this.#startSettled && this.#startPromise) {
       this.#startSettled = true;
       this.#rejectStart?.(new CodexGenerationChangedError());
     }
 
-    return this.waitForDrain().then(() => {
-      this.#current = undefined;
-      this.#state = { type: "stopped" };
-      current?.transport.invalidateGeneration();
-      current?.child.kill();
-      rmSync(this.#workingDirectory, { recursive: true, force: true });
+    await this.waitForDrain();
+    generation?.transport.invalidateGeneration();
+    if (generation) await this.terminateChild(generation);
+    this.#current = undefined;
+    this.#retiring = undefined;
+    this.#state = { type: "stopped" };
+    rmSync(this.#workingDirectory, { recursive: true, force: true });
+  }
+
+  private terminateChild(generation: Generation): Promise<void> {
+    if (generation.termination) return generation.termination;
+    generation.termination = (async () => {
+      if (generation.exited) return;
+      generation.child.kill("SIGTERM");
+      if (generation.exited) return;
+      const exitedGracefully = await this.waitForExit(
+        generation,
+        TERMINATION_GRACE_MS,
+      );
+      if (exitedGracefully) return;
+      generation.child.kill("SIGKILL");
+      await generation.exit;
+    })();
+    return generation.termination;
+  }
+
+  private waitForExit(
+    generation: Generation,
+    timeout: number,
+  ): Promise<boolean> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (exited: boolean): void => {
+        if (settled) return;
+        settled = true;
+        this.#clock.clearTimeout(timer);
+        resolve(exited);
+      };
+      const timer = this.#clock.setTimeout(() => finish(false), timeout);
+      void generation.exit.then(() => finish(true));
     });
   }
 
@@ -345,11 +400,6 @@ export class CodexSupervisor {
           },
         );
     });
-  }
-
-  private detach(generation: Generation): void {
-    generation.child.off("error", generation.onError);
-    generation.child.off("exit", generation.onExit);
   }
 
   private clearTimer(timer: "initialization" | "recovery" | "stable"): void {

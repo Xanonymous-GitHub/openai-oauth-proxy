@@ -1,11 +1,12 @@
 import { EventEmitter } from "node:events";
+import { existsSync } from "node:fs";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   type ChildFactory,
   type Clock,
   type CodexSupervisor,
-  createSupervisor,
+  createSupervisor as createCodexSupervisor,
 } from "../../src/codex/supervisor.js";
 import { CodexGenerationChangedError } from "../../src/codex/transport.js";
 
@@ -20,12 +21,19 @@ const clock: Clock = {
   clearTimeout: (timer) => clearTimeout(timer),
 };
 
+const supervisors = new Set<CodexSupervisor>();
+const children = new Set<FakeChild>();
+const workingDirectories = new Set<string>();
+
 class FakeChild extends EventEmitter {
   readonly stdin = new PassThrough();
   readonly stdout = new PassThrough();
   readonly stderr = new PassThrough();
   readonly sent: Array<Record<string, unknown>> = [];
+  readonly killSignals: Array<NodeJS.Signals | number | undefined> = [];
+  autoExitOnKill = true;
   killCount = 0;
+  #exited = false;
 
   constructor() {
     super();
@@ -43,17 +51,47 @@ class FakeChild extends EventEmitter {
   }
 
   crash(): void {
-    this.emit("exit", 1, null);
+    this.finish(1);
   }
 
-  kill(): boolean {
+  finish(code: number | null = 0, signal: NodeJS.Signals | null = null): void {
+    if (this.#exited) return;
+    this.#exited = true;
+    this.emit("exit", code, signal);
+  }
+
+  kill(signal?: NodeJS.Signals | number): boolean {
     this.killCount += 1;
+    this.killSignals.push(signal);
+    if (this.autoExitOnKill) {
+      this.finish(null, typeof signal === "string" ? signal : null);
+    }
     return true;
   }
 }
 
 function fakeChild(): FakeChild {
-  return new FakeChild();
+  const child = new FakeChild();
+  children.add(child);
+  return child;
+}
+
+function createSupervisor(
+  options: Parameters<typeof createCodexSupervisor>[0],
+): CodexSupervisor {
+  const childFactory = options.childFactory;
+  if (!childFactory) throw new Error("Tests require a child factory");
+  const supervisor = createCodexSupervisor({
+    ...options,
+    childFactory: (command, args, spawnOptions) => {
+      if (typeof spawnOptions.cwd === "string") {
+        workingDirectories.add(spawnOptions.cwd);
+      }
+      return childFactory(command, args, spawnOptions);
+    },
+  });
+  supervisors.add(supervisor);
+  return supervisor;
 }
 
 function factoryFor(children: FakeChild[]): ChildFactory {
@@ -94,7 +132,23 @@ beforeEach(() => {
   vi.setSystemTime(0);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  for (const child of children) child.autoExitOnKill = true;
+  const stops = [...supervisors].map((supervisor) => supervisor.stop());
+  for (const child of children) child.finish();
+  await vi.runAllTimersAsync();
+  await Promise.all(stops);
+  expect(vi.getTimerCount()).toBe(0);
+  for (const child of children) {
+    expect(child.listenerCount("error")).toBe(0);
+    expect(child.listenerCount("exit")).toBe(0);
+  }
+  for (const directory of workingDirectories) {
+    expect(existsSync(directory)).toBe(false);
+  }
+  supervisors.clear();
+  children.clear();
+  workingDirectories.clear();
   vi.useRealTimers();
 });
 
@@ -247,6 +301,37 @@ describe("CodexSupervisor", () => {
     expect(second.sent[0]).toMatchObject({ method: "initialize" });
   });
 
+  it("waits for child exit before recovery and escalates termination", async () => {
+    const first = fakeChild();
+    first.autoExitOnKill = false;
+    const second = fakeChild();
+    const supervisor = createSupervisor({
+      config,
+      childFactory: factoryFor([first, second]),
+      clock,
+      random: () => 0,
+    });
+    await makeReady(supervisor, first);
+
+    first.stdout.write("malformed\n");
+    await flush();
+    expect(first.killSignals).toEqual(["SIGTERM"]);
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(first.killSignals).toEqual(["SIGTERM"]);
+    expect(second.sent).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(first.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(second.sent).toHaveLength(0);
+
+    first.finish(null, "SIGKILL");
+    await flush();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(second.sent).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(second.sent[0]).toMatchObject({ method: "initialize" });
+  });
+
   it("does not consume host notifications while monitoring protocol health", async () => {
     const child = fakeChild();
     const supervisor = createSupervisor({
@@ -362,6 +447,33 @@ describe("CodexSupervisor", () => {
 
     await expect(pending).rejects.toBeInstanceOf(CodexGenerationChangedError);
     expect(child.killCount).toBe(1);
+  });
+
+  it("does not finish stop until the child exits after escalation", async () => {
+    const child = fakeChild();
+    child.autoExitOnKill = false;
+    const supervisor = createSupervisor({
+      config,
+      childFactory: factoryFor([child]),
+      clock,
+      random: () => 0,
+    });
+    await makeReady(supervisor, child);
+    let stopped = false;
+
+    const stopping = supervisor.stop().then(() => {
+      stopped = true;
+    });
+    await flush();
+    expect(child.killSignals).toEqual(["SIGTERM"]);
+    expect(stopped).toBe(false);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(child.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(stopped).toBe(false);
+
+    child.finish(null, "SIGKILL");
+    await stopping;
+    expect(stopped).toBe(true);
   });
 
   it("terminates the child when the drain hook throws", async () => {
