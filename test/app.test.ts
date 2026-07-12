@@ -1,4 +1,10 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { type AddressInfo, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -177,6 +183,9 @@ it("serves the admin app, not the data app, on the admin listener", async () => 
 });
 
 it("starts two listeners and removes shutdown handlers when closed", async () => {
+  const databasePath = join(testDataDir, "proxy.sqlite");
+  writeFileSync(databasePath, "", { flag: "a" });
+  chmodSync(databasePath, 0o666);
   const sigintListeners = process.listenerCount("SIGINT");
   const sigtermListeners = process.listenerCount("SIGTERM");
   let starts = 0;
@@ -217,8 +226,9 @@ it("starts two listeners and removes shutdown handlers when closed", async () =>
   );
 
   expect(starts).toBe(1);
+  expect(statSync(databasePath).mode & 0o777).toBe(0o600);
   expect(openStore).toHaveBeenCalledWith(
-    join(testDataDir, "proxy.sqlite"),
+    databasePath,
     expect.objectContaining({ now: expect.any(Function) }),
     {
       responseTtlMs: 604_800_000,

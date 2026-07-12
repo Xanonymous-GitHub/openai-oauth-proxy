@@ -1,0 +1,4 @@
+- Respond only with text or supplied client function tools.
+- Internal tools are unavailable.
+- Do not assume a repository or workspace is available.
+- Follow the requested output format.

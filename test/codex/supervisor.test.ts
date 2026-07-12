@@ -166,6 +166,29 @@ afterEach(async () => {
 });
 
 describe("CodexSupervisor", () => {
+  it("fails closed before spawn when runtime config verification fails", async () => {
+    const childFactory = vi.fn(factoryFor([]));
+    const supervisor = createSupervisor({
+      config,
+      childFactory,
+      clock,
+      random: () => 0,
+      beforeSpawn: () => {
+        throw new Error("Codex configuration verification failed");
+      },
+    });
+
+    const started = supervisor.start();
+    void started.catch(() => undefined);
+    await flush();
+
+    expect(childFactory).not.toHaveBeenCalled();
+    expect(supervisor.health()).toBe(false);
+    await expect(started).rejects.toThrow(
+      "Codex configuration verification failed",
+    );
+  });
+
   it("handshakes with experimental API enabled", async () => {
     const child = fakeChild();
     const childFactory = vi.fn(factoryFor([child]));

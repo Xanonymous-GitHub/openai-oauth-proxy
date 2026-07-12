@@ -71,6 +71,7 @@ interface SupervisorOptions {
   clock?: Clock;
   random?: () => number;
   drain?: () => Promise<void>;
+  beforeSpawn?: () => void;
 }
 
 export interface SupervisorRestartEvent {
@@ -115,6 +116,7 @@ export class CodexSupervisor {
   readonly #clock: Clock;
   readonly #random: () => number;
   readonly #drain: (() => Promise<void>) | undefined;
+  readonly #beforeSpawn: (() => void) | undefined;
   readonly #workingDirectory: string;
   readonly #facade: CodexHost;
   readonly #restartListeners = new Set<SupervisorRestartListener>();
@@ -138,6 +140,7 @@ export class CodexSupervisor {
     this.#clock = options.clock ?? systemClock;
     this.#random = options.random ?? Math.random;
     this.#drain = options.drain;
+    this.#beforeSpawn = options.beforeSpawn;
     this.#workingDirectory = mkdtempSync(
       join(tmpdir(), "openai-oauth-proxy-codex-"),
     );
@@ -184,6 +187,20 @@ export class CodexSupervisor {
     if (this.#stopping) return;
     this.clearTimer("recovery");
     this.#state = { type: "starting", attempt };
+    try {
+      this.#beforeSpawn?.();
+    } catch (error) {
+      this.#state = { type: "unhealthy", failures: 5 };
+      if (!this.#startSettled) {
+        this.#startSettled = true;
+        this.#rejectStart?.(
+          error instanceof Error
+            ? error
+            : new Error("Codex configuration verification failed"),
+        );
+      }
+      return;
+    }
     const generation = ++this.#generation;
     if (generation > 1) {
       const event: SupervisorRestartEvent = { generation, reason: "recovery" };

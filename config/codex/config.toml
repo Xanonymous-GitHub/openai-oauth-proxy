@@ -1,0 +1,18 @@
+cli_auth_credentials_store = "file"
+forced_login_method = "chatgpt"
+approval_policy = "never"
+sandbox_mode = "read-only"
+model_instructions_file = "/app/config/codex/neutral-instructions.md"
+web_search = "disabled"
+check_for_update_on_startup = false
+
+[features]
+apps = false
+hooks = false
+memories = false
+multi_agent = false
+remote_plugin = false
+shell_tool = false
+skill_mcp_dependency_install = false
+unified_exec = false
+network_proxy = false

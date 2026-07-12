@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { chmodSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { type ServerType, serve } from "@hono/node-server";
@@ -23,12 +24,15 @@ import { TurnCapacity } from "./operations/capacity.js";
 import { TurnDrainRegistry } from "./operations/drain.js";
 import { type Logger, log } from "./operations/log.js";
 import { Metrics } from "./operations/metrics.js";
+import {
+  assertCodexConfiguration,
+  prepareRuntimeFilesystem,
+  readNeutralInstructions,
+} from "./runtime-security.js";
 import { TurnRunner } from "./turns/runner.js";
 
 const EMPTY_WORKING_DIRECTORY = "/tmp/work";
 const RESPONSE_OPERATION_DIRECTORY = "/tmp/response-operations";
-const NEUTRAL_INSTRUCTIONS =
-  "Respond only through supplied text or client function tools. Internal tools and a local repository are unavailable. Follow the requested output format.";
 const DRAIN_TIMEOUT_MS = 30_000;
 
 export interface RunningService {
@@ -117,7 +121,17 @@ export async function start(
   config: Config,
   dependencies: StartDependencies = {},
 ): Promise<RunningService> {
-  const supervisor = dependencies.supervisor ?? createSupervisor({ config });
+  prepareRuntimeFilesystem({
+    codexHome: config.codexHome,
+    dataDir: config.dataDir,
+    workingDirectories: [EMPTY_WORKING_DIRECTORY, RESPONSE_OPERATION_DIRECTORY],
+  });
+  const supervisor =
+    dependencies.supervisor ??
+    createSupervisor({
+      config,
+      beforeSpawn: () => assertCodexConfiguration(config.codexHome),
+    });
   const capacity =
     dependencies.capacity ??
     new TurnCapacity(config.maxActiveTurns, config.queueCapacity);
@@ -125,15 +139,13 @@ export async function start(
   const drain = dependencies.drain ?? new TurnDrainRegistry();
   const logger = dependencies.logger ?? log;
   const clock = { now: () => Date.now() };
-  const conversationStore = ConversationStore.open(
-    join(config.dataDir, "proxy.sqlite"),
-    clock,
-    {
-      responseTtlMs: config.responseTtlMs,
-      turnLeaseMs: config.turnTimeoutMs,
-      toolLeaseMs: config.toolTimeoutMs,
-    },
-  );
+  const databasePath = join(config.dataDir, "proxy.sqlite");
+  const conversationStore = ConversationStore.open(databasePath, clock, {
+    responseTtlMs: config.responseTtlMs,
+    turnLeaseMs: config.turnTimeoutMs,
+    toolLeaseMs: config.toolTimeoutMs,
+  });
+  chmodSync(databasePath, 0o600);
   const unsubscribeRestart = supervisor.onRestart?.(
     (event: SupervisorRestartEvent) =>
       metrics.recordAppServerRestart(event.generation, event.reason),
@@ -149,7 +161,7 @@ export async function start(
   const turnRunner = new TurnRunner({
     host: lazyHost,
     emptyWorkingDirectory: EMPTY_WORKING_DIRECTORY,
-    neutralInstructions: NEUTRAL_INSTRUCTIONS,
+    neutralInstructions: readNeutralInstructions(),
     timeoutMs: config.turnTimeoutMs,
     toolTimeoutMs: config.toolTimeoutMs,
   });
