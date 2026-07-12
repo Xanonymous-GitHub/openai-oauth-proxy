@@ -13,9 +13,19 @@ export class ProxyError extends Error {
     readonly code: string,
     message: string,
     readonly param: string | null = null,
+    readonly isPublic = false,
   ) {
     super(message);
     this.name = "ProxyError";
+  }
+
+  static public(
+    status: number,
+    code: string,
+    message: string,
+    param: string | null = null,
+  ): ProxyError {
+    return new ProxyError(status, code, message, param, true);
   }
 }
 
@@ -26,7 +36,13 @@ function errorType(status: number): OpenAIErrorBody["error"]["type"] {
 }
 
 function publicMessage(error: ProxyError): string {
-  if (error.status < 500) return error.message;
+  if (error.isPublic) return error.message;
+  if (error.status === 400) return "Invalid request";
+  if (error.status === 401) return "Authentication failed";
+  if (error.status === 404) return "Resource not found";
+  if (error.status === 409) return "Request conflict";
+  if (error.status === 413) return "Request too large";
+  if (error.status === 429) return "Rate limit exceeded";
   if (error.status === 502) return "Upstream service error";
   if (error.status === 503) return "Service unavailable";
   if (error.status === 504) return "Request timed out";
@@ -42,7 +58,7 @@ export function toOpenAIError(error: unknown, requestId: string): Response {
     error: {
       message: publicMessage(proxyError),
       type: errorType(proxyError.status),
-      param: proxyError.param,
+      param: proxyError.isPublic ? proxyError.param : null,
       code: proxyError.code,
     },
   };

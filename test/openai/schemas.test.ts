@@ -12,6 +12,22 @@ const chatRequest = {
   messages: [{ role: "user" as const, content: "hello" }],
 };
 
+const nestedJsonObject = {
+  type: "object",
+  properties: {
+    tags: { type: "array", items: { type: "string" } },
+    optional: { type: ["string", "null"], default: null },
+  },
+  required: ["tags"],
+  additionalProperties: false,
+};
+
+const invalidJsonObjectRoots = [
+  ["primitive", "not-an-object"],
+  ["array", []],
+  ["null", null],
+] as const;
+
 describe("parseChatRequest", () => {
   it("accepts supported roles, content, tools, and output format", () => {
     const request = {
@@ -56,10 +72,7 @@ describe("parseChatRequest", () => {
           function: {
             name: "lookup",
             description: "Look up a record",
-            parameters: {
-              type: "object",
-              properties: { id: { type: "number" } },
-            },
+            parameters: nestedJsonObject,
           },
         },
       ],
@@ -71,7 +84,7 @@ describe("parseChatRequest", () => {
         json_schema: {
           name: "answer",
           strict: true,
-          schema: { type: "object" },
+          schema: nestedJsonObject,
         },
       },
     };
@@ -200,6 +213,40 @@ describe("parseChatRequest", () => {
       parseChatRequest({ ...chatRequest, reasoning_effort: "extreme" }),
     ).toThrowError(expect.objectContaining({ param: "reasoning_effort" }));
   });
+
+  it.each(
+    invalidJsonObjectRoots,
+  )("rejects a %s function parameters root", (_name, parameters) => {
+    expect(() =>
+      parseChatRequest({
+        ...chatRequest,
+        tools: [
+          {
+            type: "function",
+            function: { name: "lookup", parameters },
+          },
+        ],
+      }),
+    ).toThrowError(
+      expect.objectContaining({ param: "tools.0.function.parameters" }),
+    );
+  });
+
+  it.each(
+    invalidJsonObjectRoots,
+  )("rejects a %s structured-output schema root", (_name, schema) => {
+    expect(() =>
+      parseChatRequest({
+        ...chatRequest,
+        response_format: {
+          type: "json_schema",
+          json_schema: { name: "answer", schema },
+        },
+      }),
+    ).toThrowError(
+      expect.objectContaining({ param: "response_format.json_schema.schema" }),
+    );
+  });
 });
 
 describe("parseResponsesRequest", () => {
@@ -208,6 +255,16 @@ describe("parseResponsesRequest", () => {
       model: "gpt-5.4",
       instructions: "Answer tersely",
       input: [
+        {
+          type: "message",
+          role: "system",
+          content: [{ type: "input_text", text: "system" }],
+        },
+        {
+          type: "message",
+          role: "developer",
+          content: [{ type: "input_text", text: "developer" }],
+        },
         {
           type: "message",
           role: "user",
@@ -219,6 +276,11 @@ describe("parseResponsesRequest", () => {
               detail: "high",
             },
           ],
+        },
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "input_text", text: "prior answer" }],
         },
         {
           type: "function_call",
@@ -244,13 +306,16 @@ describe("parseResponsesRequest", () => {
           name: "answer",
           description: "An answer",
           strict: true,
-          schema: { type: "object" },
+          schema: nestedJsonObject,
         },
       },
       tools: [
         {
           type: "function",
-          function: { name: "lookup", parameters: { type: "object" } },
+          name: "lookup",
+          description: "Look up a record",
+          parameters: nestedJsonObject,
+          strict: true,
         },
       ],
       tool_choice: "none",
@@ -323,7 +388,8 @@ describe("parseResponsesRequest", () => {
         tools: [
           {
             type: "function",
-            function: { name: "lookup", parameters: { type: "object" } },
+            name: "lookup",
+            parameters: { type: "object" },
           },
         ],
       }),
@@ -334,6 +400,69 @@ describe("parseResponsesRequest", () => {
         status: 400,
       }),
     );
+  });
+
+  it.each([
+    "system",
+    "developer",
+    "user",
+    "assistant",
+  ] as const)("rejects output_text in %s request messages", (role) => {
+    expect(() =>
+      parseResponsesRequest({
+        model: "gpt-5.4",
+        input: [
+          {
+            type: "message",
+            role,
+            content: [{ type: "output_text", text: "output-only" }],
+          },
+        ],
+      }),
+    ).toThrowError(
+      expect.objectContaining({ param: "input.0.content.0.type" }),
+    );
+  });
+
+  it("rejects the nested Chat tool shape in Responses", () => {
+    expect(() =>
+      parseResponsesRequest({
+        model: "gpt-5.4",
+        input: "hi",
+        tools: [
+          {
+            type: "function",
+            function: { name: "lookup", parameters: { type: "object" } },
+          },
+        ],
+      }),
+    ).toThrowError(expect.objectContaining({ status: 400 }));
+  });
+
+  it.each(
+    invalidJsonObjectRoots,
+  )("rejects a %s function parameters root", (_name, parameters) => {
+    expect(() =>
+      parseResponsesRequest({
+        model: "gpt-5.4",
+        input: "hi",
+        tools: [{ type: "function", name: "lookup", parameters }],
+      }),
+    ).toThrowError(expect.objectContaining({ param: "tools.0.parameters" }));
+  });
+
+  it.each(
+    invalidJsonObjectRoots,
+  )("rejects a %s structured-output schema root", (_name, schema) => {
+    expect(() =>
+      parseResponsesRequest({
+        model: "gpt-5.4",
+        input: "hi",
+        text: {
+          format: { type: "json_schema", name: "answer", schema },
+        },
+      }),
+    ).toThrowError(expect.objectContaining({ param: "text.format.schema" }));
   });
 });
 
@@ -364,7 +493,7 @@ describe("shared HTTP boundary", () => {
 
   it("renders proxy errors and sanitizes unknown errors", async () => {
     const response = toOpenAIError(
-      new ProxyError(400, "invalid_request", "Bad field", "model"),
+      ProxyError.public(400, "invalid_request", "Bad field", "model"),
       "req_123",
     );
     expect(response.status).toBe(400);
@@ -389,5 +518,24 @@ describe("shared HTTP boundary", () => {
       "req_789",
     );
     expect(JSON.stringify(await upstream.json())).not.toContain(secret);
+
+    const rateLimited = toOpenAIError(
+      new ProxyError(
+        429,
+        "upstream_rate_limit",
+        `Authorization: ${secret}`,
+        "/data/codex/auth.json",
+      ),
+      "req_429",
+    );
+    expect(rateLimited.status).toBe(429);
+    expect(await rateLimited.json()).toEqual({
+      error: {
+        message: "Rate limit exceeded",
+        type: "invalid_request_error",
+        param: null,
+        code: "upstream_rate_limit",
+      },
+    });
   });
 });

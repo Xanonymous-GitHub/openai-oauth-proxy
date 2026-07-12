@@ -31,10 +31,9 @@ function messageContent(
 
   return content.map((part): ResponseContent => {
     if (part.type === "text" || part.type === "input_text") {
-      return { type: "input_text", text: part.text };
-    }
-    if (part.type === "output_text") {
-      return { type: "output_text", text: part.text };
+      return role === "assistant"
+        ? { type: "output_text", text: part.text }
+        : { type: "input_text", text: part.text };
     }
     if (part.type === "image_url") {
       return {
@@ -114,9 +113,6 @@ export function translateTurnInput(input: TurnInput): UserInput[] {
 
   return input.map((part): UserInput => {
     if (part.type === "text" || part.type === "input_text") {
-      return { type: "text", text: part.text, text_elements: [] };
-    }
-    if (part.type === "output_text") {
       return { type: "text", text: part.text, text_elements: [] };
     }
     if (part.type === "image_url") {

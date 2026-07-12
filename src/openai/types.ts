@@ -4,7 +4,11 @@ export type JsonValue =
   | boolean
   | null
   | JsonValue[]
-  | { [key: string]: JsonValue };
+  | JsonObject;
+
+export interface JsonObject {
+  [key: string]: JsonValue;
+}
 
 export type ImageMediaType = "image/png" | "image/jpeg" | "image/webp";
 

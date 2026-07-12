@@ -9,7 +9,7 @@ export const MAX_IMAGES = 8;
 
 export function assertRequestSize(encodedBytes: number): void {
   if (encodedBytes > MAX_REQUEST_BYTES) {
-    throw new ProxyError(
+    throw ProxyError.public(
       413,
       "request_too_large",
       "Request body exceeds the 32 MiB limit",

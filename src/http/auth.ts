@@ -13,7 +13,7 @@ export function authenticateBearer(
   const expected = createHash("sha256").update(expectedToken).digest();
 
   if (!timingSafeEqual(supplied, expected)) {
-    throw new ProxyError(
+    throw ProxyError.public(
       401,
       "invalid_api_key",
       "Missing or invalid bearer token",

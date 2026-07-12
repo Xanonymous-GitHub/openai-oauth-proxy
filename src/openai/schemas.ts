@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { ProxyError } from "../http/errors.js";
-import type { JsonValue } from "./types.js";
+import type { JsonObject, JsonValue } from "./types.js";
 
 const nonEmptyString = z.string().min(1);
 const imageDetailSchema = z.enum(["auto", "low", "high"]);
@@ -24,6 +24,10 @@ const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
     z.array(jsonValueSchema),
     z.record(z.string(), jsonValueSchema),
   ]),
+);
+const jsonObjectSchema: z.ZodType<JsonObject> = z.record(
+  z.string(),
+  jsonValueSchema,
 );
 
 const chatTextPartSchema = z.strictObject({
@@ -100,19 +104,27 @@ export const chatMessageSchema = z.discriminatedUnion("role", [
   toolMessageSchema,
 ]);
 
-const functionToolSchema = z.strictObject({
+const chatFunctionToolSchema = z.strictObject({
   type: z.literal("function"),
   function: z.strictObject({
     name: nonEmptyString,
     description: z.string().optional(),
-    parameters: jsonValueSchema,
+    parameters: jsonObjectSchema,
   }),
+});
+
+const responsesFunctionToolSchema = z.strictObject({
+  type: z.literal("function"),
+  name: nonEmptyString,
+  description: z.string().optional(),
+  parameters: jsonObjectSchema,
+  strict: z.boolean().optional(),
 });
 
 const jsonSchemaDefinition = z.strictObject({
   name: nonEmptyString,
   description: z.string().optional(),
-  schema: jsonValueSchema,
+  schema: jsonObjectSchema,
   strict: z.boolean().optional(),
 });
 
@@ -125,7 +137,7 @@ const chatRequestSchema = z.strictObject({
   model: nonEmptyString,
   messages: z.array(chatMessageSchema).min(1),
   stream: z.boolean().optional(),
-  tools: z.array(functionToolSchema).optional(),
+  tools: z.array(chatFunctionToolSchema).optional(),
   tool_choice: z.enum(["auto", "none"]).optional(),
   parallel_tool_calls: z.literal(true).optional(),
   reasoning_effort: reasoningEffortSchema.optional(),
@@ -136,27 +148,51 @@ const responseInputTextSchema = z.strictObject({
   type: z.literal("input_text"),
   text: z.string(),
 });
-const responseOutputTextSchema = z.strictObject({
-  type: z.literal("output_text"),
-  text: z.string(),
-});
 const responseInputImageSchema = z.strictObject({
   type: z.literal("input_image"),
   file_id: z.never().optional(),
   image_url: dataImageUrlSchema,
   detail: imageDetailSchema.optional(),
 });
-const responseContentPartSchema = z.discriminatedUnion("type", [
+const responseUserContentPartSchema = z.discriminatedUnion("type", [
   responseInputTextSchema,
-  responseOutputTextSchema,
   responseInputImageSchema,
 ]);
 
-const responseMessageSchema = z.strictObject({
+const responseTextContentSchema = z.union([
+  z.string(),
+  z.array(responseInputTextSchema),
+]);
+const responseUserContentSchema = z.union([
+  z.string(),
+  z.array(responseUserContentPartSchema),
+]);
+const responseSystemMessageSchema = z.strictObject({
   type: z.literal("message").optional(),
-  role: z.enum(["system", "developer", "user", "assistant"]),
-  content: z.union([z.string(), z.array(responseContentPartSchema)]),
+  role: z.literal("system"),
+  content: responseTextContentSchema,
 });
+const responseDeveloperMessageSchema = z.strictObject({
+  type: z.literal("message").optional(),
+  role: z.literal("developer"),
+  content: responseTextContentSchema,
+});
+const responseUserMessageSchema = z.strictObject({
+  type: z.literal("message").optional(),
+  role: z.literal("user"),
+  content: responseUserContentSchema,
+});
+const responseAssistantMessageSchema = z.strictObject({
+  type: z.literal("message").optional(),
+  role: z.literal("assistant"),
+  content: responseTextContentSchema,
+});
+const responseMessageSchema = z.discriminatedUnion("role", [
+  responseSystemMessageSchema,
+  responseDeveloperMessageSchema,
+  responseUserMessageSchema,
+  responseAssistantMessageSchema,
+]);
 const responseFunctionCallSchema = z.strictObject({
   type: z.literal("function_call"),
   id: nonEmptyString.optional(),
@@ -185,7 +221,7 @@ const responsesRequestSchema = z
     stream: z.boolean().optional(),
     previous_response_id: nonEmptyString.optional(),
     store: z.boolean().optional(),
-    tools: z.array(functionToolSchema).optional(),
+    tools: z.array(responsesFunctionToolSchema).optional(),
     tool_choice: z.enum(["auto", "none"]).optional(),
     parallel_tool_calls: z.literal(true).optional(),
     reasoning: z
@@ -197,7 +233,7 @@ const responsesRequestSchema = z
           type: z.literal("json_schema"),
           name: nonEmptyString,
           description: z.string().optional(),
-          schema: jsonValueSchema,
+          schema: jsonObjectSchema,
           strict: z.boolean().optional(),
         }),
       })
@@ -231,6 +267,9 @@ function nestedIssues(
 ): ZodIssue[] {
   const path = [...parentPath, ...issue.path];
   if (issue.code !== "invalid_union") {
+    return [{ ...issue, path } as ZodIssue];
+  }
+  if (issue.errors.length === 0) {
     return [{ ...issue, path } as ZodIssue];
   }
   return issue.errors.flatMap((issues) =>
@@ -272,7 +311,7 @@ function parseWithSchema<T>(schema: z.ZodType<T>, value: unknown): T {
       ? `Unsupported field: ${param ?? "unknown"}`
       : issue.message;
 
-  throw new ProxyError(400, code, message, param);
+  throw ProxyError.public(400, code, message, param);
 }
 
 export function parseChatRequest(value: unknown): ChatRequest {

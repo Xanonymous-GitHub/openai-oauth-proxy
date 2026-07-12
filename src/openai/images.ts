@@ -50,7 +50,7 @@ export function decodeImages(
   parts: readonly InlineImagePart[],
 ): DecodedImage[] {
   if (parts.length > MAX_IMAGES) {
-    throw new ProxyError(
+    throw ProxyError.public(
       400,
       "too_many_images",
       `Requests may contain at most ${MAX_IMAGES} images`,
@@ -66,7 +66,7 @@ export function decodeImages(
     const mediaType = match?.[1] as ImageMediaType | undefined;
     const encoded = match?.[2];
     if (!mediaType || !encoded || !isBase64(encoded)) {
-      throw new ProxyError(
+      throw ProxyError.public(
         400,
         "invalid_image",
         "Image must be a non-empty canonical PNG, JPEG, or WebP base64 data URL",
@@ -79,7 +79,7 @@ export function decodeImages(
       bytes.toString("base64") !== encoded ||
       !hasSignature(mediaType, bytes)
     ) {
-      throw new ProxyError(
+      throw ProxyError.public(
         400,
         "invalid_image",
         "Image signature does not match its declared media type",
@@ -87,7 +87,7 @@ export function decodeImages(
       );
     }
     if (bytes.byteLength > MAX_IMAGE_BYTES) {
-      throw new ProxyError(
+      throw ProxyError.public(
         413,
         "image_too_large",
         "Decoded image exceeds the 10 MiB limit",
@@ -97,7 +97,7 @@ export function decodeImages(
 
     totalBytes += bytes.byteLength;
     if (totalBytes > MAX_TOTAL_IMAGE_BYTES) {
-      throw new ProxyError(
+      throw ProxyError.public(
         413,
         "image_aggregate_too_large",
         "Decoded images exceed the 24 MiB aggregate limit",
