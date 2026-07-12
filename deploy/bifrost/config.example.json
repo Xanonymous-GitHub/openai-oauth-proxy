@@ -1,0 +1,18 @@
+{
+  "providers": {
+    "openai": {
+      "keys": [
+        {
+          "name": "oauth-proxy",
+          "value": "env.OPENAI_PROXY_TOKEN",
+          "models": ["*"],
+          "weight": 1
+        }
+      ],
+      "network_config": {
+        "base_url": "http://openai-oauth-proxy.namespace.svc.cluster.local:8080/v1",
+        "allow_private_network": true
+      }
+    }
+  }
+}

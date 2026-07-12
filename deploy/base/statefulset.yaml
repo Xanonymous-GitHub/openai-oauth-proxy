@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: openai-oauth-proxy
+  labels:
+    app.kubernetes.io/name: openai-oauth-proxy
+spec:
+  serviceName: openai-oauth-proxy
+  replicas: 1
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: openai-oauth-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: openai-oauth-proxy
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: proxy
+          # Release builds replace this immutable digest only after the image is built and published.
+          image: ghcr.io/xanonymous/openai-oauth-proxy@sha256:8fe334910f67b204e35aebbc173dea29a4678f5038bb1d7f7e2fc2b8336a306e
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          env:
+            - name: DATA_DIR
+              value: /data
+            - name: CODEX_HOME
+              value: /data/codex
+            - name: BIFROST_PROXY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: openai-oauth-proxy
+                  key: BIFROST_PROXY_TOKEN
+            - name: METRICS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: openai-oauth-proxy
+                  key: METRICS_TOKEN
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            # The process binds this port to 127.0.0.1; no Service or Ingress exposes it.
+            - name: admin
+              containerPort: 8081
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 24
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: openai-oauth-proxy-data
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi

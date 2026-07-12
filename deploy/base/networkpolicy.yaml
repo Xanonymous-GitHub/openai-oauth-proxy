@@ -1,0 +1,49 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: openai-oauth-proxy
+  labels:
+    app.kubernetes.io/name: openai-oauth-proxy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: openai-oauth-proxy
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: bifrost
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: bifrost
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Plain NetworkPolicy cannot select FQDNs. This TCP 443 fallback lets App Server
+    # reach required OpenAI HTTPS endpoints. Production should replace it with an
+    # FQDN-aware CNI policy or route HTTPS through a controlled egress proxy.
+    - ports:
+        - protocol: TCP
+          port: 443

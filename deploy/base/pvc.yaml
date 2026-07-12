@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: openai-oauth-proxy-data
+  labels:
+    app.kubernetes.io/name: openai-oauth-proxy
+spec:
+  # The cluster default or an overlay must select an encryption-at-rest StorageClass.
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
