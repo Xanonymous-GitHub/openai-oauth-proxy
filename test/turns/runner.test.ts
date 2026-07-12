@@ -1,0 +1,502 @@
+import { describe, expect, it, vi } from "vitest";
+import {
+  fakeThread,
+  fakeThreadStartResponse,
+  fakeTurn,
+} from "../../src/codex/fake.js";
+import type { CodexHost, HostNotification } from "../../src/codex/host.js";
+import type { ProxyStreamEvent, TurnCommand } from "../../src/turns/events.js";
+import { TurnRunner } from "../../src/turns/runner.js";
+
+const emptyWorkingDirectory = "/tmp/openai-oauth-proxy-empty";
+const neutralInstructions = "Respond only through the supplied interface.";
+
+class EventQueue implements AsyncIterable<HostNotification> {
+  readonly #values: HostNotification[] = [];
+  readonly #waiters: Array<{
+    resolve(value: IteratorResult<HostNotification>): void;
+    reject(error: unknown): void;
+  }> = [];
+  #failure: unknown;
+
+  push(event: Omit<HostNotification, "generation">): void {
+    const value = { ...event, generation: 1 } as HostNotification;
+    const waiter = this.#waiters.shift();
+    if (waiter) waiter.resolve({ done: false, value });
+    else this.#values.push(value);
+  }
+
+  fail(error: unknown): void {
+    this.#failure = error;
+    for (const waiter of this.#waiters.splice(0)) waiter.reject(error);
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<HostNotification> {
+    return {
+      next: async () => {
+        const value = this.#values.shift();
+        if (value) return { done: false, value };
+        if (this.#failure !== undefined) throw this.#failure;
+        return new Promise((resolve, reject) => {
+          this.#waiters.push({ resolve, reject });
+        });
+      },
+    };
+  }
+}
+
+function command(overrides: Partial<TurnCommand> = {}): TurnCommand {
+  return {
+    action: { type: "start" },
+    model: "gpt-5.4",
+    history: [],
+    input: [{ type: "text", text: "hello", text_elements: [] }],
+    ...overrides,
+  };
+}
+
+function createHost() {
+  const events = new EventQueue();
+  const host = {
+    generation: 1,
+    threadStart: vi.fn(async () => fakeThreadStartResponse()),
+    threadResume: vi.fn(async ({ threadId }: { threadId: string }) =>
+      fakeThreadStartResponse({ thread: fakeThread({ id: threadId }) }),
+    ),
+    threadFork: vi.fn(async () =>
+      fakeThreadStartResponse({ thread: fakeThread({ id: "thread-fork" }) }),
+    ),
+    threadInjectItems: vi.fn(async () => ({})),
+    threadDelete: vi.fn(async () => ({})),
+    turnStart: vi.fn(async () => ({ turn: fakeTurn() })),
+    turnInterrupt: vi.fn(async () => ({})),
+    events: vi.fn(() => events),
+  } as unknown as CodexHost;
+
+  return { events, host };
+}
+
+function createRunner(host: CodexHost, overrides = {}) {
+  return new TurnRunner({
+    host,
+    emptyWorkingDirectory,
+    neutralInstructions,
+    ...overrides,
+  });
+}
+
+async function collect(
+  source: AsyncIterable<ProxyStreamEvent>,
+): Promise<ProxyStreamEvent[]> {
+  const events: ProxyStreamEvent[] = [];
+  for await (const event of source) events.push(event);
+  return events;
+}
+
+function emitCompletedTurn(
+  events: EventQueue,
+  threadId: string,
+  turnId: string,
+  text: string,
+  usage = true,
+): void {
+  events.push({
+    method: "item/agentMessage/delta",
+    params: { threadId, turnId, itemId: "item-1", delta: "streamed " },
+  });
+  events.push({
+    method: "item/completed",
+    params: {
+      threadId,
+      turnId,
+      completedAtMs: 1,
+      item: {
+        type: "commandExecution",
+        id: "internal-command",
+        command: "pwd",
+      },
+    },
+  } as never);
+  events.push({
+    method: "item/completed",
+    params: {
+      threadId,
+      turnId,
+      completedAtMs: 2,
+      item: {
+        type: "reasoning",
+        id: "internal-reasoning",
+        summary: ["hidden"],
+        content: ["hidden"],
+      },
+    },
+  });
+  events.push({
+    method: "item/agentMessage/delta",
+    params: { threadId, turnId, itemId: "item-1", delta: "delta" },
+  });
+  events.push({
+    method: "item/completed",
+    params: {
+      threadId,
+      turnId,
+      completedAtMs: 3,
+      item: {
+        type: "agentMessage",
+        id: "item-1",
+        text,
+        phase: null,
+        memoryCitation: null,
+      },
+    },
+  });
+  if (usage) {
+    events.push({
+      method: "thread/tokenUsage/updated",
+      params: {
+        threadId,
+        turnId,
+        tokenUsage: {
+          total: {
+            totalTokens: 99,
+            inputTokens: 88,
+            cachedInputTokens: 0,
+            outputTokens: 11,
+            reasoningOutputTokens: 0,
+          },
+          last: {
+            totalTokens: 12,
+            inputTokens: 7,
+            cachedInputTokens: 0,
+            outputTokens: 5,
+            reasoningOutputTokens: 0,
+          },
+          modelContextWindow: 128_000,
+        },
+      },
+    });
+  }
+  events.push({
+    method: "turn/completed",
+    params: {
+      threadId,
+      turn: fakeTurn({
+        id: turnId,
+        status: "completed",
+        completedAt: 2,
+      }),
+    },
+  });
+}
+
+describe("TurnRunner", () => {
+  it("projects deltas in order and uses completed items as final authority", async () => {
+    const { events, host } = createHost();
+    vi.mocked(host.turnStart).mockImplementation(async () => {
+      emitCompletedTurn(events, "thread-1", "turn-1", "authoritative final");
+      return { turn: fakeTurn() };
+    });
+
+    const projected = await collect(createRunner(host).stream(command()));
+
+    expect(projected).toEqual([
+      { type: "text.delta", delta: "streamed " },
+      { type: "text.delta", delta: "delta" },
+      {
+        type: "usage",
+        usage: { inputTokens: 7, outputTokens: 5, totalTokens: 12 },
+      },
+      {
+        type: "completed",
+        result: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          text: "authoritative final",
+          finishReason: "stop",
+          usage: { inputTokens: 7, outputTokens: 5, totalTokens: 12 },
+        },
+      },
+    ]);
+    expect(host.events).toHaveBeenCalledTimes(1);
+    expect(host.turnInterrupt).not.toHaveBeenCalled();
+  });
+
+  it("omits usage when Codex supplies no token event", async () => {
+    const { events, host } = createHost();
+    vi.mocked(host.turnStart).mockImplementation(async () => {
+      emitCompletedTurn(events, "thread-1", "turn-1", "final", false);
+      return { turn: fakeTurn() };
+    });
+
+    await expect(createRunner(host).run(command())).resolves.toEqual({
+      threadId: "thread-1",
+      turnId: "turn-1",
+      text: "final",
+      finishReason: "stop",
+    });
+  });
+
+  it("hardens new threads and injects history plus newest developer instructions", async () => {
+    const { events, host } = createHost();
+    vi.mocked(host.turnStart).mockImplementation(async () => {
+      emitCompletedTurn(events, "thread-1", "turn-1", "final", false);
+      return { turn: fakeTurn() };
+    });
+    const history = [
+      {
+        type: "message" as const,
+        role: "user",
+        content: [{ type: "input_text" as const, text: "earlier" }],
+      },
+    ];
+
+    await createRunner(host).run(
+      command({ history, instructions: "newest developer instruction" }),
+    );
+
+    expect(host.threadStart).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "gpt-5.4",
+        cwd: emptyWorkingDirectory,
+        approvalPolicy: "never",
+        sandbox: "read-only",
+        baseInstructions: neutralInstructions,
+        developerInstructions: null,
+        ephemeral: false,
+        serviceName: "openai_oauth_proxy",
+        environments: [],
+        selectedCapabilityRoots: [],
+      }),
+      expect.anything(),
+    );
+    expect(host.threadInjectItems).toHaveBeenCalledWith(
+      {
+        threadId: "thread-1",
+        items: [
+          ...history,
+          {
+            type: "message",
+            role: "developer",
+            content: [
+              { type: "input_text", text: "newest developer instruction" },
+            ],
+          },
+        ],
+      },
+      expect.anything(),
+    );
+    expect(host.threadInjectItems).toHaveBeenCalledBefore(
+      vi.mocked(host.turnStart),
+    );
+  });
+
+  it("does not inject an empty history", async () => {
+    const { events, host } = createHost();
+    vi.mocked(host.turnStart).mockImplementation(async () => {
+      emitCompletedTurn(events, "thread-1", "turn-1", "final", false);
+      return { turn: fakeTurn() };
+    });
+
+    await createRunner(host).run(command());
+
+    expect(host.threadInjectItems).not.toHaveBeenCalled();
+  });
+
+  it("resumes and forks with the requested lineage", async () => {
+    const { events, host } = createHost();
+    vi.mocked(host.turnStart).mockImplementation(async ({ threadId }) => {
+      emitCompletedTurn(events, threadId, "turn-1", "final", false);
+      return { turn: fakeTurn() };
+    });
+    const runner = createRunner(host);
+
+    await runner.run(
+      command({ action: { type: "resume", threadId: "thread-existing" } }),
+    );
+    await runner.run(
+      command({
+        action: {
+          type: "fork",
+          threadId: "thread-existing",
+          lastTurnId: "turn-parent",
+        },
+      }),
+    );
+
+    expect(host.threadResume).toHaveBeenCalledWith(
+      { threadId: "thread-existing" },
+      expect.anything(),
+    );
+    expect(host.threadFork).toHaveBeenCalledWith(
+      { threadId: "thread-existing", lastTurnId: "turn-parent" },
+      expect.anything(),
+    );
+  });
+
+  it("routes immediate notifications for concurrent turns through one dispatcher", async () => {
+    const { events, host } = createHost();
+    vi.mocked(host.turnStart).mockImplementation(async ({ threadId }) => {
+      const turnId = `turn-${threadId}`;
+      emitCompletedTurn(events, threadId, turnId, `answer-${threadId}`, false);
+      return { turn: fakeTurn({ id: turnId }) };
+    });
+    const runner = createRunner(host);
+
+    const [first, second] = await Promise.all([
+      runner.run(command({ action: { type: "resume", threadId: "a" } })),
+      runner.run(command({ action: { type: "resume", threadId: "b" } })),
+    ]);
+
+    expect(first.text).toBe("answer-a");
+    expect(second.text).toBe("answer-b");
+    expect(host.events).toHaveBeenCalledTimes(1);
+  });
+
+  it("reconnects the central dispatcher for a later host generation", async () => {
+    const firstGeneration = new EventQueue();
+    const secondGeneration = new EventQueue();
+    const { host } = createHost();
+    vi.mocked(host.events)
+      .mockReturnValueOnce(firstGeneration)
+      .mockReturnValue(secondGeneration);
+    vi.mocked(host.turnStart)
+      .mockResolvedValueOnce({ turn: fakeTurn() })
+      .mockImplementationOnce(async () => {
+        emitCompletedTurn(
+          secondGeneration,
+          "thread-1",
+          "turn-1",
+          "after restart",
+          false,
+        );
+        return { turn: fakeTurn() };
+      });
+    const runner = createRunner(host, { timeoutMs: 1_000, interruptWaitMs: 5 });
+
+    const failedGeneration = expect(
+      runner.run(command()),
+    ).rejects.toMatchObject({
+      code: "codex_host_error",
+    });
+    await vi.waitFor(() => expect(host.turnStart).toHaveBeenCalledOnce());
+    expect(host.events).toHaveReturnedWith(firstGeneration);
+    firstGeneration.fail(new Error("generation changed"));
+    await failedGeneration;
+
+    const nextRunner = createRunner(host, {
+      timeoutMs: 10,
+      interruptWaitMs: 5,
+    });
+    await expect(nextRunner.run(command())).resolves.toMatchObject({
+      text: "after restart",
+    });
+    expect(host.events).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["failed", 502, "codex_turn_failed"],
+    ["interrupted", 499, "codex_turn_interrupted"],
+  ] as const)("maps %s turns to a stable error", async (status, httpStatus, code) => {
+    const { events, host } = createHost();
+    vi.mocked(host.turnStart).mockImplementation(async () => {
+      events.push({
+        method: "turn/completed",
+        params: {
+          threadId: "thread-1",
+          turn: fakeTurn({
+            status,
+            error:
+              status === "failed"
+                ? {
+                    message: "sensitive upstream failure",
+                    codexErrorInfo: null,
+                    additionalDetails: null,
+                  }
+                : null,
+          }),
+        },
+      });
+      return { turn: fakeTurn() };
+    });
+
+    await expect(createRunner(host).run(command())).rejects.toMatchObject({
+      status: httpStatus,
+      code,
+    });
+  });
+
+  it("interrupts once on abort and runs release and cleanup once", async () => {
+    const { events, host } = createHost();
+    const release = vi.fn(async () => undefined);
+    const cleanup = vi.fn(async () => undefined);
+    vi.mocked(host.turnInterrupt).mockImplementation(
+      async ({ threadId, turnId }) => {
+        events.push({
+          method: "turn/completed",
+          params: {
+            threadId,
+            turn: fakeTurn({ id: turnId, status: "interrupted" }),
+          },
+        });
+        return {};
+      },
+    );
+    const controller = new AbortController();
+    const result = createRunner(host, { release, cleanup })
+      .run(command(), controller.signal)
+      .catch((error: unknown) => error);
+
+    await vi.waitFor(() => expect(host.turnStart).toHaveBeenCalledOnce());
+    controller.abort();
+    const error = await result;
+
+    expect(error).toMatchObject({ code: "request_aborted", status: 499 });
+    expect(host.turnInterrupt).toHaveBeenCalledTimes(1);
+    expect(host.turnInterrupt).toHaveBeenCalledWith({
+      threadId: "thread-1",
+      turnId: "turn-1",
+    });
+    expect(release).toHaveBeenCalledOnce();
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(cleanup).toHaveBeenCalledWith("thread-1");
+  });
+
+  it("bounds the wait when interrupted completion is not emitted", async () => {
+    const { host } = createHost();
+    const controller = new AbortController();
+    const result = createRunner(host, { interruptWaitMs: 5 }).run(
+      command(),
+      controller.signal,
+    );
+
+    await vi.waitFor(() => expect(host.turnStart).toHaveBeenCalledOnce());
+    controller.abort();
+
+    await expect(result).rejects.toMatchObject({
+      code: "request_aborted",
+      status: 499,
+    });
+    expect(host.turnInterrupt).toHaveBeenCalledOnce();
+  });
+
+  it("interrupts a timed-out turn and reports a timeout", async () => {
+    const { events, host } = createHost();
+    vi.mocked(host.turnInterrupt).mockImplementation(
+      async ({ threadId, turnId }) => {
+        events.push({
+          method: "turn/completed",
+          params: {
+            threadId,
+            turn: fakeTurn({ id: turnId, status: "interrupted" }),
+          },
+        });
+        return {};
+      },
+    );
+
+    await expect(
+      createRunner(host, { timeoutMs: 5 }).run(command()),
+    ).rejects.toMatchObject({ status: 504, code: "turn_timeout" });
+    expect(host.turnInterrupt).toHaveBeenCalledTimes(1);
+  });
+});
