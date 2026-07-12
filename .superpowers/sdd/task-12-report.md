@@ -77,5 +77,24 @@ Complete. Task 12 adds one global turn-capacity gate shared by Chat and Response
 ## Concerns
 
 - No blocking implementation concern remains.
-- App Server restart counts are observed when `/metrics` sees a higher process generation; multiple unseen generations are reconstructed, but no sample is emitted until the first scrape establishes a baseline.
+- The independent-review restart concern is resolved by direct supervisor lifecycle events, as recorded below.
 - Graphify reports the existing non-blocking version warning: installed skill `0.4.3`, package `0.9.4`.
+
+## Independent Review Remediation
+
+Implementation commit: `1daa039` (`fix: harden proxy drain telemetry`).
+
+- Added one shared admitted-turn registry. Chat and Responses register immediately after capacity acquisition, forced drain aborts registry signals, and shutdown waits for handler lifecycle settlement before closing SQLite, the supervisor, or listeners. The Responses stream checks the combined abort signal before reservation and again after its initial SSE write before runner work.
+- Moved SSE request finalization to a once-only response-body observer. Success, projected midstream failure, read failure, and consumer cancellation now record terminal duration, HTTP status, stable error code, stream outcome, queue outcome, lease outcome, and process generation. Model remains log-only and the logger still reconstructs its strict field whitelist.
+- Added narrow supervisor restart events and direct metrics subscription. Every recovery generation increments exactly once when launched, independent of scrape timing; scrape-time generation inference was removed.
+- Added regressions for a backpressured initial Responses write during forced drain, terminal Chat success/failure/cancellation and redaction, released Responses leases, queue outcomes, and multiple supervisor restarts before the first scrape.
+
+Verification after remediation:
+
+- Focused operations, Chat, Responses, supervisor, and app suites: `123` tests passed.
+- Full Vitest suite: `353` tests passed.
+- `bun run protocol:check`, `bun run typecheck`, and `bun run build` exited `0`.
+- `bunx biome check src test .superpowers/sdd/task-12-report.md` exited `0`; Biome processed `src` and `test` and ignored the report path by repository configuration.
+- `graphify update .` completed; `graphify-out/` remains untracked and excluded from commits.
+
+Remaining concern: Graphify still reports the non-blocking installed-skill/package version mismatch (`0.4.3` versus `0.9.4`). No implementation blocker remains.
