@@ -18,12 +18,14 @@ const DEFAULT_INTERRUPT_WAIT_MS = 5_000;
 const DEFAULT_LIFECYCLE_WAIT_MS = 5_000;
 
 type LifecycleCallback = () => void | Promise<void>;
+type OpenedCallback = (threadId: string) => void | Promise<void>;
 type CleanupCallback = (
   threadId: string,
   signal?: AbortSignal,
 ) => void | Promise<void>;
 
 export interface TurnLifecycleCallbacks {
+  opened?: OpenedCallback;
   release?: LifecycleCallback;
   cleanup?: CleanupCallback;
 }
@@ -291,6 +293,9 @@ export class TurnRunner {
     try {
       signal?.throwIfAborted();
       threadId = await this.openThread(command, generation, signal);
+      this.assertGeneration(generation);
+      signal?.throwIfAborted();
+      await lifecycle?.opened?.(threadId);
       this.assertGeneration(generation);
       signal?.throwIfAborted();
 

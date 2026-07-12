@@ -13,6 +13,7 @@ import {
 const DAY_MS = 24 * 60 * 60 * 1_000;
 const TURN_LEASE_MS = 10 * 60 * 1_000;
 const LEASE_OPTIONS: ConversationStoreOptions = {
+  responseTtlMs: 7 * DAY_MS,
   turnLeaseMs: TURN_LEASE_MS,
   toolLeaseMs: 15 * 60 * 1_000,
 };
@@ -199,6 +200,21 @@ describe("ConversationStore", () => {
     });
   });
 
+  it("uses the configured response TTL", () => {
+    const store = open(databasePath(), {
+      responseTtlMs: 1_234,
+      turnLeaseMs: TURN_LEASE_MS,
+      toolLeaseMs: 15 * 60 * 1_000,
+    });
+    const responseId = completeResponse(
+      store,
+      { threadId: "thr_custom_ttl", stored: true, processGeneration: 1 },
+      "turn_custom_ttl",
+    );
+
+    expect(store.lookup(responseId)?.expiresAt).toBe(now + 1_234);
+  });
+
   it("makes store=false responses non-resumable as soon as they complete", () => {
     const store = open();
     const responseId = completeResponse(
@@ -281,7 +297,7 @@ describe("ConversationStore", () => {
 
   it("uses distinct configured durations for turn and tool leases", () => {
     const path = databasePath();
-    const options = { turnLeaseMs: 100, toolLeaseMs: 300 };
+    const options = { responseTtlMs: 700, turnLeaseMs: 100, toolLeaseMs: 300 };
     const first = open(path, options);
     const second = open(path, options);
 
@@ -299,8 +315,9 @@ describe("ConversationStore", () => {
   });
 
   it.each([
-    ["turnLeaseMs", { turnLeaseMs: 0, toolLeaseMs: 1 }],
-    ["toolLeaseMs", { turnLeaseMs: 1, toolLeaseMs: 1.5 }],
+    ["responseTtlMs", { responseTtlMs: 0, turnLeaseMs: 1, toolLeaseMs: 1 }],
+    ["turnLeaseMs", { responseTtlMs: 1, turnLeaseMs: 0, toolLeaseMs: 1 }],
+    ["toolLeaseMs", { responseTtlMs: 1, turnLeaseMs: 1, toolLeaseMs: 1.5 }],
   ] as const)("rejects an invalid %s", (name, options) => {
     expect(() =>
       ConversationStore.open(databasePath(), clock, options),

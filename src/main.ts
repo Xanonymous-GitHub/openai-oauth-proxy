@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { type ServerType, serve } from "@hono/node-server";
 import { Hono } from "hono";
@@ -5,6 +6,11 @@ import { createDataApp } from "./app.js";
 import type { CodexHost } from "./codex/host.js";
 import { createSupervisor } from "./codex/supervisor.js";
 import { type Config, loadConfig } from "./config.js";
+import { ConversationStore } from "./conversations/store.js";
+import {
+  type RunningResponseSweeper,
+  startResponseSweeper,
+} from "./openai/responses.js";
 import { TurnRunner } from "./turns/runner.js";
 
 const EMPTY_WORKING_DIRECTORY = "/tmp/work";
@@ -71,9 +77,20 @@ export async function start(
   dependencies: StartDependencies = {},
 ): Promise<RunningService> {
   const supervisor = dependencies.supervisor ?? createSupervisor({ config });
+  const clock = { now: () => Date.now() };
+  const conversationStore = ConversationStore.open(
+    join(config.dataDir, "proxy.sqlite"),
+    clock,
+    {
+      responseTtlMs: config.responseTtlMs,
+      turnLeaseMs: config.turnTimeoutMs,
+      toolLeaseMs: config.toolTimeoutMs,
+    },
+  );
   let draining = false;
   let host: Promise<CodexHost> | undefined;
   let activeHost: CodexHost | undefined;
+  let responseSweeper: RunningResponseSweeper | undefined;
   const lazyHost = createLazyHost(() => {
     if (!activeHost) throw new Error("Codex host not ready");
     return activeHost;
@@ -97,20 +114,31 @@ export async function start(
         await lazyHost.threadDelete({ threadId }, signal);
       },
     },
+    responses: {
+      runner: turnRunner,
+      store: conversationStore,
+      clock,
+      processGeneration: () => lazyHost.generation,
+      deleteThread: async (threadId, signal) => {
+        await lazyHost.threadDelete({ threadId }, signal);
+      },
+    },
   });
   const adminApp = new Hono();
   let dataServer: ServerType;
   try {
     dataServer = await listen(dataApp, config.dataHost, config.dataPort);
   } catch (error) {
-    await supervisor.stop();
+    await Promise.allSettled([supervisor.stop()]);
+    conversationStore.close();
     throw error;
   }
   let adminServer: ServerType;
   try {
     adminServer = await listen(adminApp, config.adminHost, config.adminPort);
   } catch (error) {
-    await Promise.all([closeServer(dataServer), supervisor.stop()]);
+    await Promise.allSettled([closeServer(dataServer), supervisor.stop()]);
+    conversationStore.close();
     throw error;
   }
 
@@ -120,13 +148,24 @@ export async function start(
       draining = true;
       process.off("SIGINT", handleSignal);
       process.off("SIGTERM", handleSignal);
-      closePromise = supervisor
-        .stop()
-        .then(() =>
-          Promise.all([closeServer(dataServer), closeServer(adminServer)]).then(
-            () => undefined,
-          ),
-        );
+      closePromise = (async () => {
+        let failure: unknown;
+        try {
+          await responseSweeper?.stop();
+        } catch (error) {
+          failure = error;
+        }
+        const settled = await Promise.allSettled([
+          supervisor.stop(),
+          closeServer(dataServer),
+          closeServer(adminServer),
+        ]);
+        conversationStore.close();
+        if (failure !== undefined) throw failure;
+        for (const result of settled) {
+          if (result.status === "rejected") throw result.reason;
+        }
+      })();
     }
     return closePromise;
   };
@@ -144,7 +183,16 @@ export async function start(
   }
   void host.then(
     (value) => {
+      if (draining) return;
       activeHost = value;
+      conversationStore.markContinuationLost(value.generation);
+      responseSweeper = startResponseSweeper({
+        store: conversationStore,
+        deleteThread: async (threadId) => {
+          await value.threadDelete({ threadId });
+        },
+      });
+      void responseSweeper.startup.catch(() => undefined);
     },
     () => undefined,
   );

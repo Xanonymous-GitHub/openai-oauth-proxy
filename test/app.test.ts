@@ -1,5 +1,8 @@
+import { mkdtempSync, rmSync } from "node:fs";
 import { type AddressInfo, createServer } from "node:net";
-import { expect, it, vi } from "vitest";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, expect, it, vi } from "vitest";
 import { createDataApp } from "../src/app.js";
 import {
   fakeModel,
@@ -8,7 +11,12 @@ import {
   fakeTurn,
 } from "../src/codex/fake.js";
 import type { CodexHost, HostNotification } from "../src/codex/host.js";
+import { ConversationStore } from "../src/conversations/store.js";
 import { start } from "../src/main.js";
+
+const testDataDir = mkdtempSync(join(tmpdir(), "app-start-"));
+
+afterAll(() => rmSync(testDataDir, { recursive: true, force: true }));
 
 async function availablePort(): Promise<number> {
   const server = createServer();
@@ -90,13 +98,16 @@ it("starts two listeners and removes shutdown handlers when closed", async () =>
   let starts = 0;
   let stops = 0;
   const host = new Promise<never>(() => undefined);
+  const openStore = vi.spyOn(ConversationStore, "open");
+  const closeStore = vi.spyOn(ConversationStore.prototype, "close");
+  const startSupervisor = vi.fn(() => {
+    starts += 1;
+    return host;
+  });
   const supervisor = {
     health: () => true,
     ready: () => true,
-    start: () => {
-      starts += 1;
-      return host;
-    },
+    start: startSupervisor,
     stop: async () => {
       stops += 1;
     },
@@ -107,8 +118,8 @@ it("starts two listeners and removes shutdown handlers when closed", async () =>
       dataPort: 0,
       adminHost: "127.0.0.1",
       adminPort: 0,
-      dataDir: "/data",
-      codexHome: "/data/codex",
+      dataDir: testDataDir,
+      codexHome: join(testDataDir, "codex"),
       codexBin: "codex",
       bifrostProxyToken: "b".repeat(32),
       metricsToken: "m".repeat(32),
@@ -122,6 +133,18 @@ it("starts two listeners and removes shutdown handlers when closed", async () =>
   );
 
   expect(starts).toBe(1);
+  expect(openStore).toHaveBeenCalledWith(
+    join(testDataDir, "proxy.sqlite"),
+    expect.objectContaining({ now: expect.any(Function) }),
+    {
+      responseTtlMs: 604_800_000,
+      turnLeaseMs: 600_000,
+      toolLeaseMs: 900_000,
+    },
+  );
+  expect(openStore.mock.invocationCallOrder[0]).toBeLessThan(
+    startSupervisor.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+  );
   expect(process.listenerCount("SIGINT")).toBe(sigintListeners + 1);
   expect(process.listenerCount("SIGTERM")).toBe(sigtermListeners + 1);
   const firstClose = service.close();
@@ -129,8 +152,57 @@ it("starts two listeners and removes shutdown handlers when closed", async () =>
   expect(firstClose).toBe(secondClose);
   await firstClose;
   expect(stops).toBe(1);
+  expect(closeStore).toHaveBeenCalledOnce();
   expect(process.listenerCount("SIGINT")).toBe(sigintListeners);
   expect(process.listenerCount("SIGTERM")).toBe(sigtermListeners);
+  openStore.mockRestore();
+  closeStore.mockRestore();
+});
+
+it("closes the conversation store when listener startup and supervisor cleanup fail", async () => {
+  const blocker = createServer();
+  await new Promise<void>((resolve) => blocker.listen(0, "0.0.0.0", resolve));
+  const port = (blocker.address() as AddressInfo).port;
+  const closeStore = vi.spyOn(ConversationStore.prototype, "close");
+  const supervisor = {
+    health: () => true,
+    ready: () => false,
+    start: vi.fn(() => new Promise<never>(() => undefined)),
+    stop: vi.fn(async () => {
+      throw new Error("supervisor cleanup failed");
+    }),
+  };
+
+  try {
+    await expect(
+      start(
+        {
+          dataHost: "0.0.0.0",
+          dataPort: port,
+          adminHost: "127.0.0.1",
+          adminPort: 0,
+          dataDir: testDataDir,
+          codexHome: join(testDataDir, "codex"),
+          codexBin: "codex",
+          bifrostProxyToken: "b".repeat(32),
+          metricsToken: "m".repeat(32),
+          maxActiveTurns: 4,
+          queueCapacity: 32,
+          turnTimeoutMs: 600_000,
+          toolTimeoutMs: 900_000,
+          responseTtlMs: 604_800_000,
+        },
+        { supervisor },
+      ),
+    ).rejects.toMatchObject({ code: "EADDRINUSE" });
+    expect(supervisor.start).not.toHaveBeenCalled();
+    expect(closeStore).toHaveBeenCalledOnce();
+  } finally {
+    closeStore.mockRestore();
+    await new Promise<void>((resolve, reject) =>
+      blocker.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
 });
 
 it("serves probes during initial recovery and after terminal exhaustion", async () => {
@@ -155,8 +227,8 @@ it("serves probes during initial recovery and after terminal exhaustion", async 
       dataPort,
       adminHost: "127.0.0.1",
       adminPort: 0,
-      dataDir: "/data",
-      codexHome: "/data/codex",
+      dataDir: testDataDir,
+      codexHome: join(testDataDir, "codex"),
       codexBin: "codex",
       bifrostProxyToken: "b".repeat(32),
       metricsToken: "m".repeat(32),
@@ -209,8 +281,8 @@ it("rejects model requests before the first host is ready without a generation-z
       dataPort,
       adminHost: "127.0.0.1",
       adminPort: 0,
-      dataDir: "/data",
-      codexHome: "/data/codex",
+      dataDir: testDataDir,
+      codexHome: join(testDataDir, "codex"),
       codexBin: "codex",
       bifrostProxyToken: "b".repeat(32),
       metricsToken: "m".repeat(32),
@@ -259,7 +331,7 @@ it("rejects model requests before the first host is ready without a generation-z
   }
 });
 
-it("serves Chat through the production listener after host readiness", async () => {
+it("serves Chat and Responses through the production listener after host readiness", async () => {
   const dataPort = await availablePort();
   const events = new EventQueue();
   let resolveHost!: (host: CodexHost) => void;
@@ -317,8 +389,8 @@ it("serves Chat through the production listener after host readiness", async () 
       dataPort,
       adminHost: "127.0.0.1",
       adminPort: 0,
-      dataDir: "/data",
-      codexHome: "/data/codex",
+      dataDir: testDataDir,
+      codexHome: join(testDataDir, "codex"),
       codexBin: "codex",
       bifrostProxyToken: "b".repeat(32),
       metricsToken: "m".repeat(32),
@@ -356,6 +428,27 @@ it("serves Chat through the production listener after host readiness", async () 
       model: "gpt-5.4",
       choices: [
         { message: { role: "assistant", content: "production answer" } },
+      ],
+    });
+    const responses = await fetch(`http://127.0.0.1:${dataPort}/v1/responses`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${"b".repeat(32)}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ model: "gpt-5.4", input: "hello" }),
+    });
+
+    expect(responses.status).toBe(200);
+    expect(await responses.json()).toMatchObject({
+      object: "response",
+      status: "completed",
+      model: "gpt-5.4",
+      output: [
+        {
+          role: "assistant",
+          content: [{ type: "output_text", text: "production answer" }],
+        },
       ],
     });
     expect(threadDelete).toHaveBeenCalledOnce();

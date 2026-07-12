@@ -2,14 +2,12 @@ import { randomBytes } from "node:crypto";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { migrateConversations } from "./migrations.js";
 
-const DAY_MS = 24 * 60 * 60 * 1_000;
-const RESPONSE_TTL_MS = 7 * DAY_MS;
-
 export interface ConversationClock {
   now(): number;
 }
 
 export interface ConversationStoreOptions {
+  responseTtlMs: number;
   turnLeaseMs: number;
   toolLeaseMs: number;
 }
@@ -97,11 +95,16 @@ interface Statements {
   deleteOldGenerationLeases: StatementSync;
   hasCompleteDescendant: StatementSync;
   deletableThreads: StatementSync;
+  deletePendingResponse: StatementSync;
+  countThreadResponses: StatementSync;
+  deleteThreadResponses: StatementSync;
+  deleteThreadLineage: StatementSync;
 }
 
 export class ConversationStore {
   readonly #database: DatabaseSync;
   readonly #clock: ConversationClock;
+  readonly #responseTtlMs: number;
   readonly #turnLeaseMs: number;
   readonly #toolLeaseMs: number;
   readonly #statements: Statements;
@@ -114,6 +117,7 @@ export class ConversationStore {
   ) {
     this.#database = database;
     this.#clock = clock;
+    this.#responseTtlMs = options.responseTtlMs;
     this.#turnLeaseMs = options.turnLeaseMs;
     this.#toolLeaseMs = options.toolLeaseMs;
     this.#statements = {
@@ -274,6 +278,20 @@ export class ConversationStore {
         )
         ORDER BY COALESCE(depths.depth, 0) DESC, expired_threads.thread_id
       `),
+      deletePendingResponse: database.prepare(`
+        DELETE FROM responses
+        WHERE response_id = ? AND state = 'pending'
+        RETURNING thread_id
+      `),
+      countThreadResponses: database.prepare(`
+        SELECT COUNT(*) AS count FROM responses WHERE thread_id = ?
+      `),
+      deleteThreadResponses: database.prepare(`
+        DELETE FROM responses WHERE thread_id = ?
+      `),
+      deleteThreadLineage: database.prepare(`
+        DELETE FROM thread_lineage WHERE thread_id = ?
+      `),
     };
   }
 
@@ -282,6 +300,7 @@ export class ConversationStore {
     clock: ConversationClock,
     options: ConversationStoreOptions,
   ): ConversationStore {
+    assertDuration("responseTtlMs", options.responseTtlMs);
     assertDuration("turnLeaseMs", options.turnLeaseMs);
     assertDuration("toolLeaseMs", options.toolLeaseMs);
     const database = new DatabaseSync(path, { timeout: 5_000 });
@@ -307,8 +326,28 @@ export class ConversationStore {
 
   createPending(input: CreatePendingResponse): string {
     const responseId = `resp_${randomBytes(24).toString("base64url")}`;
+    this.beginPending(responseId, input);
+    return responseId;
+  }
+
+  beginPending(
+    responseId: string,
+    input: CreatePendingResponse,
+    leaseOwnerRequestId?: string,
+  ): boolean {
     const now = this.#clock.now();
     return this.#transaction(() => {
+      if (leaseOwnerRequestId !== undefined) {
+        this.#statements.deleteStaleLease.run(input.threadId, now);
+        const lease = this.#statements.insertLease.run(
+          input.threadId,
+          leaseOwnerRequestId,
+          "turn",
+          input.processGeneration,
+          now + this.#turnLeaseMs,
+        );
+        if (lease.changes !== 1) return false;
+      }
       const inserted = this.#statements.insertLineage.run(
         input.threadId,
         input.parentThreadId ?? null,
@@ -335,9 +374,9 @@ export class ConversationStore {
         input.processGeneration,
         now,
         now,
-        now + RESPONSE_TTL_MS,
+        now + this.#responseTtlMs,
       );
-      return responseId;
+      return true;
     });
   }
 
@@ -348,7 +387,7 @@ export class ConversationStore {
       const result = this.#statements.completeResponse.run(
         turnId,
         now,
-        now + RESPONSE_TTL_MS,
+        now + this.#responseTtlMs,
         now,
         responseId,
       );
@@ -374,7 +413,7 @@ export class ConversationStore {
       return (
         this.#statements.touchResponse.run(
           now,
-          now + RESPONSE_TTL_MS,
+          now + this.#responseTtlMs,
           responseId,
         ).changes === 1
       );
@@ -415,7 +454,7 @@ export class ConversationStore {
       this.#statements.expireResponses.run(now);
       const result = this.#statements.losePendingResponses.run(
         now,
-        now + RESPONSE_TTL_MS,
+        now + this.#responseTtlMs,
         currentProcessGeneration,
       );
       this.#statements.deleteOldGenerationLeases.run(currentProcessGeneration);
@@ -440,6 +479,30 @@ export class ConversationStore {
       return (
         this.#statements.deletableThreads.all() as unknown as ThreadRow[]
       ).map((row) => row.thread_id);
+    });
+  }
+
+  abandon(responseId: string): boolean {
+    return this.#transaction(() => {
+      const deleted = this.#statements.deletePendingResponse.get(
+        responseId,
+      ) as unknown as { thread_id: string } | undefined;
+      if (!deleted) return false;
+      const remaining = this.#statements.countThreadResponses.get(
+        deleted.thread_id,
+      ) as unknown as { count: number };
+      if (remaining.count === 0) {
+        this.#statements.deleteThreadLineage.run(deleted.thread_id);
+      }
+      return true;
+    });
+  }
+
+  removeThread(threadId: string): boolean {
+    return this.#transaction(() => {
+      const responses = this.#statements.deleteThreadResponses.run(threadId);
+      const lineage = this.#statements.deleteThreadLineage.run(threadId);
+      return responses.changes > 0 || lineage.changes > 0;
     });
   }
 
@@ -473,7 +536,7 @@ export class ConversationStore {
 
       this.#statements.touchResponse.run(
         now,
-        now + RESPONSE_TTL_MS,
+        now + this.#responseTtlMs,
         response.response_id,
       );
       const descendant = this.#statements.hasCompleteDescendant.get(

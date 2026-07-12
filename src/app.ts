@@ -8,6 +8,10 @@ import {
   createChatHandler,
 } from "./openai/chat.js";
 import { ModelCatalog } from "./openai/models.js";
+import {
+  createResponsesHandler,
+  type ResponsesHandlerDependencies,
+} from "./openai/responses.js";
 
 export interface DataAppDependencies {
   health(): boolean;
@@ -17,6 +21,7 @@ export interface DataAppDependencies {
   metricsToken: string;
   host: Pick<CodexHost, "generation" | "modelList">;
   chat?: Omit<ChatHandlerDependencies, "models">;
+  responses?: Omit<ResponsesHandlerDependencies, "models">;
 }
 
 export function createDataApp(deps: DataAppDependencies): Hono {
@@ -63,6 +68,12 @@ export function createDataApp(deps: DataAppDependencies): Hono {
     app.post(
       "/v1/chat/completions",
       createChatHandler({ models, ...deps.chat }),
+    );
+  }
+  if (deps.responses) {
+    app.post(
+      "/v1/responses",
+      createResponsesHandler({ models, ...deps.responses }),
     );
   }
   app.all("/v1/*", (context) =>
