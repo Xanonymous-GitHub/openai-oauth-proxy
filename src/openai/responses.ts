@@ -98,12 +98,13 @@ function removeOperationDirectory(cwd: string | undefined): void {
 async function loseResponseOperation(
   deps: Pick<ResponsesHandlerDependencies, "store" | "deleteThread">,
   responseId: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   const operationCwd = deps.store.lookupOperation(responseId)?.operationCwd;
   const cleanupThreadId = deps.store.loseOperation(responseId);
   try {
     if (cleanupThreadId !== undefined) {
-      await deps.deleteThread(cleanupThreadId);
+      await deps.deleteThread(cleanupThreadId, signal);
       deps.store.finishAbandonedThread(cleanupThreadId);
     }
   } finally {
@@ -492,13 +493,20 @@ export function createResponsesHandler(
           "input",
         );
       }
+      const cleanupSignal = continuation.signal
+        ? AbortSignal.any([context.req.raw.signal, continuation.signal])
+        : context.req.raw.signal;
       const finishContinuation = (): void => continuation.finish?.();
       let result: TurnResult;
       try {
         result = await continuation.result;
       } catch (error) {
         try {
-          await loseResponseOperation(deps, request.previous_response_id);
+          await loseResponseOperation(
+            deps,
+            request.previous_response_id,
+            cleanupSignal,
+          );
           deps.observe?.(context.req.raw, { leaseOutcome: "released" });
         } finally {
           finishContinuation();
@@ -520,7 +528,11 @@ export function createResponsesHandler(
           deps.observe?.(context.req.raw, { leaseOutcome: "released" });
         } catch (error) {
           try {
-            await loseResponseOperation(deps, identity.responseId);
+            await loseResponseOperation(
+              deps,
+              identity.responseId,
+              cleanupSignal,
+            );
             deps.observe?.(context.req.raw, { leaseOutcome: "released" });
           } finally {
             finishContinuation();
@@ -832,7 +844,11 @@ export function createResponsesHandler(
               },
               lost: async () => {
                 try {
-                  await loseResponseOperation(deps, identity.responseId);
+                  await loseResponseOperation(
+                    deps,
+                    identity.responseId,
+                    turnSignal,
+                  );
                   finalized = true;
                   deps.observe?.(context.req.raw, {
                     leaseOutcome: "released",
@@ -860,7 +876,7 @@ export function createResponsesHandler(
       }
       cleanupAttempted = true;
       try {
-        await deps.deleteThread(threadId);
+        await deps.deleteThread(threadId, turnSignal);
         cleanupSucceeded = true;
       } catch (error) {
         cleanupError = error;

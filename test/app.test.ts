@@ -13,6 +13,8 @@ import {
 import type { CodexHost, HostNotification } from "../src/codex/host.js";
 import { ConversationStore } from "../src/conversations/store.js";
 import { start } from "../src/main.js";
+import { recoverResponseOperations } from "../src/openai/responses.js";
+import { TurnCapacity } from "../src/operations/capacity.js";
 
 const testDataDir = mkdtempSync(join(tmpdir(), "app-start-"));
 
@@ -566,5 +568,195 @@ it("serves Chat and Responses through the production listener after host readine
     expect(threadDelete).toHaveBeenCalledOnce();
   } finally {
     await service.close();
+  }
+});
+
+it("aborts hung Responses cleanup at the drain deadline and retains reconciliation identity", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "responses-cleanup-drain-"));
+  const dataPort = await availablePort();
+  const adminPort = await availablePort();
+  const events = new EventQueue();
+  const capacity = new TurnCapacity(1, 0);
+  const logger = vi.fn();
+  const stopSupervisor = vi.fn(async () => undefined);
+  const closeStore = vi.spyOn(ConversationStore.prototype, "close");
+  const sigintListeners = process.listenerCount("SIGINT");
+  const sigtermListeners = process.listenerCount("SIGTERM");
+  let releaseDelete = (): void => undefined;
+  let allowDelete = false;
+  let deletionSignal: AbortSignal | undefined;
+  const threadDelete = vi.fn(
+    async (_params: { threadId: string }, signal?: AbortSignal) => {
+      if (allowDelete) return {};
+      deletionSignal = signal;
+      await new Promise<void>((resolve, reject) => {
+        releaseDelete = resolve;
+        signal?.addEventListener(
+          "abort",
+          () =>
+            reject(signal.reason ?? new DOMException("Aborted", "AbortError")),
+          { once: true },
+        );
+      });
+      return {};
+    },
+  );
+  const host = {
+    generation: 1,
+    accountRead: vi.fn(async () => ({
+      account: {
+        type: "chatgpt" as const,
+        email: "person@example.com",
+        planType: "plus" as const,
+      },
+      requiresOpenaiAuth: true,
+    })),
+    modelList: vi.fn(async () =>
+      fakeModelListResponse({
+        data: [fakeModel({ id: "gpt-5.4", model: "gpt-5.4" })],
+      }),
+    ),
+    threadStart: vi.fn(async () => fakeThreadStartResponse()),
+    threadList: vi.fn(async () => ({
+      data: [],
+      nextCursor: null,
+      backwardsCursor: null,
+    })),
+    threadInjectItems: vi.fn(async () => ({})),
+    threadDelete,
+    turnStart: vi.fn(async () => {
+      events.push({
+        method: "item/completed",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          completedAtMs: 1,
+          item: {
+            type: "agentMessage",
+            id: "message-1",
+            text: "disposable answer",
+            phase: null,
+            memoryCitation: null,
+          },
+        },
+      });
+      events.push({
+        method: "turn/completed",
+        params: {
+          threadId: "thread-1",
+          turn: fakeTurn({ id: "turn-1", status: "completed" }),
+        },
+      });
+      return { turn: fakeTurn() };
+    }),
+    turnInterrupt: vi.fn(async () => ({})),
+    events: vi.fn(() => events),
+  } as unknown as CodexHost;
+  const supervisor = {
+    health: () => true,
+    ready: () => true,
+    start: async () => host,
+    stop: stopSupervisor,
+  };
+  const service = await start(
+    {
+      dataHost: "0.0.0.0",
+      dataPort,
+      adminHost: "127.0.0.1",
+      adminPort,
+      dataDir,
+      codexHome: join(dataDir, "codex"),
+      codexBin: "codex",
+      bifrostProxyToken: "b".repeat(32),
+      metricsToken: "m".repeat(32),
+      maxActiveTurns: 1,
+      queueCapacity: 0,
+      turnTimeoutMs: 600_000,
+      toolTimeoutMs: 900_000,
+      responseTtlMs: 604_800_000,
+    },
+    { supervisor, capacity, logger, drainTimeoutMs: 30_000 },
+  );
+  let request: Promise<Response> | undefined;
+
+  try {
+    await service.host;
+    await nextTurn();
+    request = fetch(`http://127.0.0.1:${dataPort}/v1/responses`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${"b".repeat(32)}`,
+        connection: "close",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "gpt-5.4",
+        input: "disposable",
+        store: false,
+      }),
+    });
+    await vi.waitFor(() => expect(threadDelete).toHaveBeenCalledOnce());
+    expect(deletionSignal).toBeInstanceOf(AbortSignal);
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const closing = service.close();
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(stopSupervisor).not.toHaveBeenCalled();
+    expect(closeStore).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    await closing;
+    vi.useRealTimers();
+    const response = await request;
+
+    expect(response.status).toBe(500);
+    expect(deletionSignal?.aborted).toBe(true);
+    expect(capacity.active).toBe(0);
+    expect(logger).toHaveBeenCalledWith(
+      expect.objectContaining({
+        route: "responses",
+        queueOutcome: "admitted",
+        leaseOutcome: "released",
+      }),
+    );
+    expect(stopSupervisor).toHaveBeenCalledOnce();
+    expect(closeStore).toHaveBeenCalledOnce();
+    expect(process.listenerCount("SIGINT")).toBe(sigintListeners);
+    expect(process.listenerCount("SIGTERM")).toBe(sigtermListeners);
+    expect(await probe(dataPort, "/healthz")).toBe(0);
+    expect(await probe(adminPort, "/")).toBe(0);
+
+    closeStore.mockRestore();
+    const store = ConversationStore.open(
+      join(dataDir, "proxy.sqlite"),
+      { now: () => Date.now() },
+      {
+        responseTtlMs: 604_800_000,
+        turnLeaseMs: 600_000,
+        toolLeaseMs: 900_000,
+      },
+    );
+    try {
+      const [operation] = store.abandonedOperations();
+      expect(operation).toMatchObject({
+        state: "abandoned",
+        threadId: "thread-1",
+        stored: false,
+      });
+      allowDelete = true;
+      await recoverResponseOperations({ store, host });
+      expect(
+        store.lookupOperation(operation?.responseId ?? "missing"),
+      ).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  } finally {
+    releaseDelete();
+    vi.useRealTimers();
+    await service.close().catch(() => undefined);
+    await request?.catch(() => undefined);
+    closeStore.mockRestore();
+    rmSync(dataDir, { recursive: true, force: true });
   }
 });

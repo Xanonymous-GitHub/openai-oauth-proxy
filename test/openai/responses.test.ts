@@ -870,6 +870,10 @@ describe("POST /v1/responses", () => {
       expect(fixture.host.turnInterrupt).toHaveBeenCalledOnce(),
     );
     expect(fixture.deleteThread).toHaveBeenCalledOnce();
+    expect(fixture.deleteThread).toHaveBeenCalledWith(
+      "thread-1",
+      expect.any(AbortSignal),
+    );
     expect(fixture.store.lookup(body.id)).toMatchObject({ state: "lost" });
     expect(
       fixture.store.acquireLease("thread-1", "lease-probe", "turn", 1),
@@ -1078,7 +1082,10 @@ describe("POST /v1/responses", () => {
     expect(store.lookup(body.id as string)).toBeUndefined();
     expect(continuation.status).toBe(404);
     expect(deleteThread).toHaveBeenCalledOnce();
-    expect(deleteThread).toHaveBeenCalledWith("thread-1");
+    expect(deleteThread).toHaveBeenCalledWith(
+      "thread-1",
+      expect.any(AbortSignal),
+    );
   });
 
   it("deletes a store=false thread when the turn fails", async () => {
@@ -1133,7 +1140,10 @@ describe("POST /v1/responses", () => {
       { type: "resume", threadId: "thread-fork-3" },
     ]);
     expect(deleteThread).toHaveBeenCalledOnce();
-    expect(deleteThread).toHaveBeenCalledWith("thread-fork-4");
+    expect(deleteThread).toHaveBeenCalledWith(
+      "thread-fork-4",
+      expect.any(AbortSignal),
+    );
   });
 
   it("durably reserves start, resume, and fork identities before invoking the runner", async () => {
@@ -1262,7 +1272,10 @@ describe("POST /v1/responses", () => {
       fixture.store.lookupOperation(responseId ?? "missing"),
     ).toBeUndefined();
     expect(fixture.deleteThread).toHaveBeenCalledOnce();
-    expect(fixture.deleteThread).toHaveBeenCalledWith("thread-1");
+    expect(fixture.deleteThread).toHaveBeenCalledWith(
+      "thread-1",
+      expect.any(AbortSignal),
+    );
   });
 
   it("retains a returned thread for sweep retry when attachment and deletion fail", async () => {
@@ -1514,6 +1527,10 @@ describe("POST /v1/responses", () => {
 
     const cancelled = response.body?.cancel();
     await vi.waitFor(() => expect(fixture.deleteThread).toHaveBeenCalledOnce());
+    expect(fixture.deleteThread).toHaveBeenCalledWith(
+      "thread-1",
+      expect.any(AbortSignal),
+    );
     expect(write).not.toHaveBeenCalled();
     finishCleanup();
     await cancelled;
@@ -1736,7 +1753,10 @@ describe("POST /v1/responses", () => {
       fixture.store.lookupOperation(responseId ?? "missing"),
     ).toBeUndefined();
     expect(fixture.deleteThread).toHaveBeenCalledOnce();
-    expect(fixture.deleteThread).toHaveBeenCalledWith("thread-1");
+    expect(fixture.deleteThread).toHaveBeenCalledWith(
+      "thread-1",
+      expect.any(AbortSignal),
+    );
   });
 
   it("abandons and deletes a newly opened thread once when stream iteration throws", async () => {
@@ -1757,7 +1777,10 @@ describe("POST /v1/responses", () => {
       fixture.store.lookupOperation(responseId ?? "missing"),
     ).toBeUndefined();
     expect(fixture.deleteThread).toHaveBeenCalledOnce();
-    expect(fixture.deleteThread).toHaveBeenCalledWith("thread-1");
+    expect(fixture.deleteThread).toHaveBeenCalledWith(
+      "thread-1",
+      expect.any(AbortSignal),
+    );
   });
 });
 
