@@ -5,6 +5,11 @@ import { createDataApp } from "./app.js";
 import type { CodexHost } from "./codex/host.js";
 import { createSupervisor } from "./codex/supervisor.js";
 import { type Config, loadConfig } from "./config.js";
+import { TurnRunner } from "./turns/runner.js";
+
+const EMPTY_WORKING_DIRECTORY = "/tmp/work";
+const NEUTRAL_INSTRUCTIONS =
+  "Respond only through supplied text or client function tools. Internal tools and a local repository are unavailable. Follow the requested output format.";
 
 export interface RunningService {
   readonly host: Promise<CodexHost>;
@@ -51,6 +56,16 @@ function listen(
   });
 }
 
+function createLazyHost(resolve: () => CodexHost): CodexHost {
+  return new Proxy({} as CodexHost, {
+    get(_target, property) {
+      const host = resolve();
+      const value = Reflect.get(host, property) as unknown;
+      return typeof value === "function" ? value.bind(host) : value;
+    },
+  });
+}
+
 export async function start(
   config: Config,
   dependencies: StartDependencies = {},
@@ -59,23 +74,29 @@ export async function start(
   let draining = false;
   let host: Promise<CodexHost> | undefined;
   let activeHost: CodexHost | undefined;
-  const modelHost: Pick<CodexHost, "generation" | "modelList"> = {
-    get generation() {
-      if (!activeHost) throw new Error("Codex host not ready");
-      return activeHost.generation;
-    },
-    modelList: (params, signal) => {
-      if (!activeHost) return Promise.reject(new Error("Codex host not ready"));
-      return activeHost.modelList(params, signal);
-    },
-  };
+  const lazyHost = createLazyHost(() => {
+    if (!activeHost) throw new Error("Codex host not ready");
+    return activeHost;
+  });
+  const turnRunner = new TurnRunner({
+    host: lazyHost,
+    emptyWorkingDirectory: EMPTY_WORKING_DIRECTORY,
+    neutralInstructions: NEUTRAL_INSTRUCTIONS,
+    timeoutMs: config.turnTimeoutMs,
+  });
   const dataApp = createDataApp({
     health: () => supervisor.health(),
     ready: () => supervisor.ready(),
     draining: () => draining,
     bifrostToken: config.bifrostProxyToken,
     metricsToken: config.metricsToken,
-    host: modelHost,
+    host: lazyHost,
+    chat: {
+      runner: turnRunner,
+      deleteThread: async (threadId, signal) => {
+        await lazyHost.threadDelete({ threadId }, signal);
+      },
+    },
   });
   const adminApp = new Hono();
   let dataServer: ServerType;

@@ -16,7 +16,9 @@ class EventQueue implements AsyncIterable<HostNotification> {
   readonly #values: HostNotification[] = [];
   readonly #waiters: Array<{
     resolve(value: IteratorResult<HostNotification>): void;
+    reject(error: unknown): void;
   }> = [];
+  #failure: unknown;
 
   push(event: Omit<HostNotification, "generation">): void {
     const value = { ...event, generation: 1 } as HostNotification;
@@ -25,12 +27,20 @@ class EventQueue implements AsyncIterable<HostNotification> {
     else this.#values.push(value);
   }
 
+  fail(error: unknown): void {
+    this.#failure = error;
+    for (const waiter of this.#waiters.splice(0)) waiter.reject(error);
+  }
+
   [Symbol.asyncIterator](): AsyncIterator<HostNotification> {
     return {
       next: async () => {
         const value = this.#values.shift();
         if (value) return { done: false, value };
-        return new Promise((resolve) => this.#waiters.push({ resolve }));
+        if (this.#failure !== undefined) throw this.#failure;
+        return new Promise((resolve, reject) =>
+          this.#waiters.push({ resolve, reject }),
+        );
       },
     };
   }
@@ -187,7 +197,7 @@ function createFixture(
       },
     },
   });
-  return { app, host, release };
+  return { app, events, host, release };
 }
 
 function post(
@@ -488,6 +498,49 @@ describe("POST /v1/chat/completions", () => {
     expect(frames.at(-1)).toBe("data: [DONE]");
     expect(payload).not.toContain("item/agentMessage/delta");
     expect(payload).not.toContain("thread/tokenUsage/updated");
+    expect(host.threadDelete).toHaveBeenCalledOnce();
+  });
+
+  it("emits a sanitized SSE error when a stream fails before text", async () => {
+    const { app, host } = createFixture({
+      turnStart: async () => {
+        throw new Error("sensitive pre-text failure");
+      },
+    });
+    const response = await post(app, { ...ordinaryRequest, stream: true });
+    const payload = await response.text();
+
+    expect(payload).toContain('"code":"codex_host_error"');
+    expect(payload).toContain('"message":"Upstream service error"');
+    expect(payload).not.toContain("sensitive pre-text failure");
+    expect(payload).not.toContain('"finish_reason":"stop"');
+    expect(payload).not.toContain("data: [DONE]");
+    expect(host.threadDelete).toHaveBeenCalledOnce();
+  });
+
+  it("emits a sanitized SSE error after a partial delta", async () => {
+    const { app, events, host } = createFixture();
+    vi.mocked(host.turnStart).mockImplementation(async () => {
+      events.push({
+        method: "item/agentMessage/delta",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "message-1",
+          delta: "partial output",
+        },
+      });
+      setImmediate(() => events.fail(new Error("sensitive post-text failure")));
+      return { turn: fakeTurn() };
+    });
+    const response = await post(app, { ...ordinaryRequest, stream: true });
+    const payload = await response.text();
+
+    expect(payload).toContain('"content":"partial output"');
+    expect(payload).toContain('"code":"codex_host_error"');
+    expect(payload).not.toContain("sensitive post-text failure");
+    expect(payload).not.toContain('"finish_reason":"stop"');
+    expect(payload).not.toContain("data: [DONE]");
     expect(host.threadDelete).toHaveBeenCalledOnce();
   });
 

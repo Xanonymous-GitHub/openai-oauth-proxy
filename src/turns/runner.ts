@@ -169,6 +169,7 @@ export class TurnRunner {
     let interruptPromise: Promise<void> | undefined;
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let interruptWait: ReturnType<typeof setTimeout> | undefined;
+    let interruptDeadline: number | undefined;
     const release = lifecycle?.release ?? this.#release;
     const cleanup = lifecycle?.cleanup ?? this.#cleanup;
     const turnStartController = new AbortController();
@@ -193,15 +194,15 @@ export class TurnRunner {
         subscription.fail(error);
         return;
       }
+      interruptDeadline = Date.now() + this.#interruptWaitMs;
+      interruptWait = setTimeout(() => {
+        subscription?.fail(cancellationError(cancellationCause ?? "abort"));
+      }, this.#interruptWaitMs);
+      interruptWait.unref?.();
       interruptPromise = this.#host
         .turnInterrupt({ threadId, turnId: knownTurnId })
         .then(() => {
           this.assertGeneration(generation);
-          if (terminal) return;
-          interruptWait = setTimeout(() => {
-            subscription?.fail(cancellationError(cancellationCause ?? "abort"));
-          }, this.#interruptWaitMs);
-          interruptWait.unref?.();
         })
         .catch((error: unknown) => {
           if (error instanceof CodexGenerationChangedError) {
@@ -229,10 +230,16 @@ export class TurnRunner {
         if (shouldInterrupt) issueInterrupt();
         terminal = true;
         if (interruptPromise) {
-          await Promise.race([
-            interruptPromise.catch(() => undefined),
-            delay(this.#interruptWaitMs),
-          ]);
+          const remaining = Math.max(
+            0,
+            (interruptDeadline ?? Date.now()) - Date.now(),
+          );
+          if (remaining > 0) {
+            await Promise.race([
+              interruptPromise.catch(() => undefined),
+              delay(remaining),
+            ]);
+          }
         }
         subscription?.close();
 

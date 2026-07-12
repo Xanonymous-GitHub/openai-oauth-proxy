@@ -50,11 +50,23 @@ function publicMessage(error: ProxyError): string {
 }
 
 export function toOpenAIError(error: unknown, requestId: string): Response {
+  const body = openAIErrorBody(error);
+
+  return new Response(JSON.stringify(body), {
+    status: error instanceof ProxyError ? error.status : 500,
+    headers: {
+      "content-type": "application/json; charset=UTF-8",
+      "x-request-id": requestId,
+    },
+  });
+}
+
+export function openAIErrorBody(error: unknown): OpenAIErrorBody {
   const proxyError =
     error instanceof ProxyError
       ? error
       : new ProxyError(500, "internal_error", "Internal server error");
-  const body: OpenAIErrorBody = {
+  return {
     error: {
       message: publicMessage(proxyError),
       type: errorType(proxyError.status),
@@ -62,12 +74,4 @@ export function toOpenAIError(error: unknown, requestId: string): Response {
       code: proxyError.code,
     },
   };
-
-  return new Response(JSON.stringify(body), {
-    status: proxyError.status,
-    headers: {
-      "content-type": "application/json; charset=UTF-8",
-      "x-request-id": requestId,
-    },
-  });
 }

@@ -1,8 +1,13 @@
 import { type AddressInfo, createServer } from "node:net";
 import { expect, it, vi } from "vitest";
 import { createDataApp } from "../src/app.js";
-import { fakeModelListResponse } from "../src/codex/fake.js";
-import type { CodexHost } from "../src/codex/host.js";
+import {
+  fakeModel,
+  fakeModelListResponse,
+  fakeThreadStartResponse,
+  fakeTurn,
+} from "../src/codex/fake.js";
+import type { CodexHost, HostNotification } from "../src/codex/host.js";
 import { start } from "../src/main.js";
 
 async function availablePort(): Promise<number> {
@@ -25,6 +30,30 @@ async function probe(port: number, path: string): Promise<number> {
 
 function nextTurn(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
+}
+
+class EventQueue implements AsyncIterable<HostNotification> {
+  readonly #values: HostNotification[] = [];
+  readonly #waiters: Array<{
+    resolve(value: IteratorResult<HostNotification>): void;
+  }> = [];
+
+  push(event: Omit<HostNotification, "generation">): void {
+    const value = { ...event, generation: 1 } as HostNotification;
+    const waiter = this.#waiters.shift();
+    if (waiter) waiter.resolve({ done: false, value });
+    else this.#values.push(value);
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<HostNotification> {
+    return {
+      next: async () => {
+        const value = this.#values.shift();
+        if (value) return { done: false, value };
+        return new Promise((resolve) => this.#waiters.push({ resolve }));
+      },
+    };
+  }
 }
 
 it("exposes minimal probes and rejects unknown v1 routes", async () => {
@@ -225,6 +254,111 @@ it("rejects model requests before the first host is ready without a generation-z
     });
     expect(readyResponse.status).toBe(200);
     expect(modelList).toHaveBeenCalledTimes(1);
+  } finally {
+    await service.close();
+  }
+});
+
+it("serves Chat through the production listener after host readiness", async () => {
+  const dataPort = await availablePort();
+  const events = new EventQueue();
+  let resolveHost!: (host: CodexHost) => void;
+  const hostPromise = new Promise<CodexHost>((resolve) => {
+    resolveHost = resolve;
+  });
+  const threadDelete = vi.fn(async () => ({}));
+  const host = {
+    generation: 1,
+    modelList: vi.fn(async () =>
+      fakeModelListResponse({
+        data: [fakeModel({ id: "gpt-5.4", model: "gpt-5.4" })],
+      }),
+    ),
+    threadStart: vi.fn(async () => fakeThreadStartResponse()),
+    threadInjectItems: vi.fn(async () => ({})),
+    threadDelete,
+    turnStart: vi.fn(async () => {
+      events.push({
+        method: "item/completed",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          completedAtMs: 1,
+          item: {
+            type: "agentMessage",
+            id: "message-1",
+            text: "production answer",
+            phase: null,
+            memoryCitation: null,
+          },
+        },
+      });
+      events.push({
+        method: "turn/completed",
+        params: {
+          threadId: "thread-1",
+          turn: fakeTurn({ id: "turn-1", status: "completed" }),
+        },
+      });
+      return { turn: fakeTurn() };
+    }),
+    turnInterrupt: vi.fn(async () => ({})),
+    events: vi.fn(() => events),
+  } as unknown as CodexHost;
+  const supervisor = {
+    health: () => true,
+    ready: () => true,
+    start: () => hostPromise,
+    stop: async () => undefined,
+  };
+  const service = await start(
+    {
+      dataHost: "0.0.0.0",
+      dataPort,
+      adminHost: "127.0.0.1",
+      adminPort: 0,
+      dataDir: "/data",
+      codexHome: "/data/codex",
+      codexBin: "codex",
+      bifrostProxyToken: "b".repeat(32),
+      metricsToken: "m".repeat(32),
+      maxActiveTurns: 4,
+      queueCapacity: 32,
+      turnTimeoutMs: 600_000,
+      toolTimeoutMs: 900_000,
+      responseTtlMs: 604_800_000,
+    },
+    { supervisor },
+  );
+
+  try {
+    resolveHost(host);
+    await service.host;
+    await nextTurn();
+    const response = await fetch(
+      `http://127.0.0.1:${dataPort}/v1/chat/completions`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${"b".repeat(32)}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "gpt-5.4",
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      object: "chat.completion",
+      model: "gpt-5.4",
+      choices: [
+        { message: { role: "assistant", content: "production answer" } },
+      ],
+    });
+    expect(threadDelete).toHaveBeenCalledOnce();
   } finally {
     await service.close();
   }

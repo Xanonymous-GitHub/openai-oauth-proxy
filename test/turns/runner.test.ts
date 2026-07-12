@@ -745,6 +745,59 @@ describe("TurnRunner", () => {
     expect(host.turnInterrupt).toHaveBeenCalledOnce();
   });
 
+  it("bounds a hung interrupt RPC from the moment it is issued", async () => {
+    const { host } = createHost();
+    const release = vi.fn();
+    const cleanup = vi.fn();
+    vi.mocked(host.turnInterrupt).mockImplementation(
+      async () => new Promise(() => undefined),
+    );
+    const controller = new AbortController();
+    const result = createRunner(host, {
+      interruptWaitMs: 5,
+      release,
+      cleanup,
+    }).run(command(), controller.signal);
+
+    await vi.waitFor(() => expect(host.turnStart).toHaveBeenCalledOnce());
+    controller.abort();
+    const outcome = await Promise.race([
+      result.catch((error: unknown) => error),
+      new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 50)),
+    ]);
+
+    expect(outcome).not.toBe("hung");
+    expect(outcome).toMatchObject({ code: "request_aborted", status: 499 });
+    expect(host.turnInterrupt).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledOnce();
+    expect(cleanup).toHaveBeenCalledOnce();
+  });
+
+  it("preserves timeout status when its interrupt RPC hangs", async () => {
+    const { host } = createHost();
+    const release = vi.fn();
+    const cleanup = vi.fn();
+    vi.mocked(host.turnInterrupt).mockImplementation(
+      async () => new Promise(() => undefined),
+    );
+    const result = createRunner(host, {
+      timeoutMs: 5,
+      interruptWaitMs: 5,
+      release,
+      cleanup,
+    }).run(command());
+    const outcome = await Promise.race([
+      result.catch((error: unknown) => error),
+      new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 50)),
+    ]);
+
+    expect(outcome).not.toBe("hung");
+    expect(outcome).toMatchObject({ code: "turn_timeout", status: 504 });
+    expect(host.turnInterrupt).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledOnce();
+    expect(cleanup).toHaveBeenCalledOnce();
+  });
+
   it("interrupts a timed-out turn and reports a timeout", async () => {
     const { events, host } = createHost();
     vi.mocked(host.turnInterrupt).mockImplementation(

@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { Handler } from "hono";
 import { streamSSE } from "hono/streaming";
-import { ProxyError } from "../http/errors.js";
+import { openAIErrorBody, ProxyError } from "../http/errors.js";
 import type { TokenUsage, TurnCommand } from "../turns/events.js";
 import type { TurnLifecycleCallbacks, TurnRunner } from "../turns/runner.js";
 import { decodeImages } from "./images.js";
@@ -258,6 +258,9 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
           });
           await stream.writeSSE({ data: "[DONE]" });
         } else {
+          await stream.writeSSE({
+            data: JSON.stringify(openAIErrorBody(event.error)),
+          });
           return;
         }
       }
