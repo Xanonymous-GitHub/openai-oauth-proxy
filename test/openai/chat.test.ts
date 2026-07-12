@@ -152,6 +152,7 @@ function createFixture(
     withUsage?: boolean;
     timeoutMs?: number;
     lifecycleWaitMs?: number;
+    streamAbortBeforeWrite?: boolean;
     streamAbortAt?: number;
     streamWriteFailureAt?: number;
     turnStart?: CodexHost["turnStart"];
@@ -224,7 +225,8 @@ function createFixture(
     deleteThread: async (threadId: string, signal?: AbortSignal) => {
       await host.threadDelete({ threadId }, signal);
     },
-    ...(options.streamAbortAt === undefined &&
+    ...(options.streamAbortBeforeWrite !== true &&
+    options.streamAbortAt === undefined &&
     options.streamWriteFailureAt === undefined
       ? {}
       : {
@@ -254,7 +256,9 @@ function createFixture(
                     payload += `data: ${event.data}\n\n`;
                   },
                 };
-                void callback(stream).then(
+                const streaming = callback(stream);
+                if (options.streamAbortBeforeWrite) queueMicrotask(onAbort);
+                void streaming.then(
                   () => {
                     controller.enqueue(new TextEncoder().encode(payload));
                     controller.close();
@@ -278,7 +282,7 @@ function createFixture(
     host,
     chat,
   });
-  return { app, events, host, release, streamPayloads, tools };
+  return { app, events, host, release, runner, streamPayloads, tools };
 }
 
 function post(
@@ -1017,6 +1021,97 @@ describe("POST /v1/chat/completions", () => {
     expect(host.threadDelete).toHaveBeenCalledOnce();
     expect(release).toHaveBeenCalledOnce();
     expect(streamPayloads).not.toContain("[DONE]");
+  });
+
+  it("aborts a pending repeated stage before call IDs or stream output exist", async () => {
+    vi.useFakeTimers();
+    try {
+      const fixture = createFixture({
+        lifecycleWaitMs: 10,
+        streamAbortBeforeWrite: true,
+      });
+      const firstRespond = vi.fn();
+      vi.mocked(fixture.host.turnStart).mockImplementationOnce(async () => {
+        fixture.tools.push({
+          generation: 1,
+          id: "rpc-pending-repeat",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            callId: "internal-pending-repeat",
+            namespace: null,
+            tool: "first",
+            arguments: {},
+          },
+          respond: firstRespond,
+          reject: vi.fn(),
+        });
+        return { turn: fakeTurn() };
+      });
+      const definitions = [
+        {
+          type: "function" as const,
+          function: { name: "first", parameters: { type: "object" } },
+        },
+      ];
+      const suspendedPromise = post(fixture.app, {
+        ...ordinaryRequest,
+        tools: definitions,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const suspended = await suspendedPromise;
+      const body = (await suspended.json()) as {
+        choices: Array<{
+          message: { tool_calls: Array<{ id: string }> };
+        }>;
+      };
+      const firstCallId =
+        body.choices[0]?.message.tool_calls[0]?.id ?? "missing";
+      const continueSpy = vi.spyOn(fixture.runner.tools, "continue");
+
+      const responsePromise = post(fixture.app, {
+        model: "gpt-5.4",
+        tools: definitions,
+        stream: true,
+        messages: [
+          ...ordinaryRequest.messages,
+          body.choices[0]?.message,
+          { role: "tool", tool_call_id: firstCallId, content: "first result" },
+        ],
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const response = await responsePromise;
+      const continuation = await continueSpy.mock.results[0]?.value;
+      if (continuation?.type !== "continued") {
+        throw new Error("Expected continued tool stage");
+      }
+      let settled = false;
+      void continuation.result.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(settled).toBe(true);
+      await expect(continuation.result).rejects.toMatchObject({
+        code: "request_aborted",
+      });
+      await expect(response.text()).resolves.toBe("");
+      expect(firstRespond).toHaveBeenCalledOnce();
+      expect(fixture.host.turnInterrupt).toHaveBeenCalledOnce();
+      expect(fixture.host.threadDelete).toHaveBeenCalledOnce();
+      expect(fixture.release).toHaveBeenCalledOnce();
+      expect(fixture.streamPayloads).toEqual([]);
+      expect(fixture.streamPayloads).not.toContain("[DONE]");
+      await vi.advanceTimersByTimeAsync(10);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("emits a sanitized SSE error when a stream fails before text", async () => {

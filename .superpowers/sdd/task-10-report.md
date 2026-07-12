@@ -95,3 +95,27 @@ Implemented Chat Completions and Responses function-tool suspension and continua
 
 - Parent Task 10 commit: `5f455943a174287716482fc035e2b0ab6aa85b66` (`feat: bridge client function tools`).
 - Remediation source commit: `8edc0a9cc8e559f709cc079d12391c132e877568` (`fix: harden tool continuation failures`).
+
+## Final Chat Pending-Stage Abort Finding
+
+### RED Evidence
+
+- `bunx vitest run test/openai/chat.test.ts -t "aborts a pending repeated stage before call IDs or stream output exist"` failed with `expected false to be true`: response-body abort did not settle the resumed stage while `continuationResult` was pending because `tools.continue()` received only the request signal.
+
+### GREEN Evidence
+
+- Regression: the same targeted command exited 0 with 1 test passed and 24 skipped.
+- Focused: `bunx vitest run test/tools test/turns/runner.test.ts test/openai/chat.test.ts test/openai/responses.test.ts` exited 0 with 4 test files and 110 tests passed.
+- Full: `bun run test` exited 0 with 15 test files and 291 tests passed.
+- Protocol: `bun run protocol:check` regenerated the experimental TypeScript and JSON Schema protocol files and exited 0 with no generated diff.
+- Typecheck: `bun run typecheck` ran `tsc -p tsconfig.json --noEmit` and exited 0 with no diagnostics.
+- Build: `bun run build` ran `tsc -p tsconfig.build.json` and exited 0 with no diagnostics.
+- Biome: `bunx biome check src test .superpowers/sdd/task-10-report.md` exited 0 with 39 files checked and no fixes required both before and after this report append.
+- Graphify: `graphify update .` exited 0 and rebuilt 17,430 nodes and 20,191 edges; community clustering reported 1,246 on the source refresh and 1,240 on the final-report rerun. The installed skill emitted the existing non-blocking version warning, and HTML generation was skipped because the graph exceeded the 5,000-node visualization limit.
+
+### Self-Review
+
+- Signal ownership: streaming requests create one controller before `tools.continue()`. Its signal is combined with the HTTP request signal and passed to `ToolBridge.continue()`, so `TurnRunner.resume()` attaches the same cancellation source used by the response body.
+- Abort routing: `stream.onAbort()` aborts that controller. This covers the window where the resumed accumulator is pending and no repeated call IDs exist, while existing call-ID invalidation still covers calls already registered with the bridge.
+- Cleanup: the real continuation promise rejects with `request_aborted`; the stream treats that controller-caused rejection as an expected disconnect. The regression proves one interrupt, one release, one disposable-thread delete, no SSE payload or `[DONE]`, and no turn/tool timer after finite cleanup guards settle.
+- Scope: the source change is confined to Chat signal wiring and expected-abort handling. The regression uses the real runner and bridge; no new production abstraction, consumer, or accumulator was introduced.

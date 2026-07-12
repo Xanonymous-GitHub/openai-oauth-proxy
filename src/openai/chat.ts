@@ -199,13 +199,17 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
       created: Math.floor(Date.now() / 1_000),
       model: model.id,
     };
+    const streamController = request.stream ? new AbortController() : undefined;
+    const turnSignal = streamController
+      ? AbortSignal.any([context.req.raw.signal, streamController.signal])
+      : context.req.raw.signal;
     let continuationResult: Promise<TurnResult> | undefined;
     if (outputs.length > 0) {
       const continuation = await deps.runner.tools.continue({
         kind: "chat",
         toolFingerprint,
         results: outputs,
-        signal: context.req.raw.signal,
+        signal: turnSignal,
       });
       if (continuation.type === "lost") {
         throw ProxyError.public(
@@ -290,16 +294,11 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
     context.header("X-Accel-Buffering", "no");
     const sendStream = deps.streamSSE ?? streamSSE;
     return sendStream(context, async (stream) => {
-      const controller = new AbortController();
-      const signal = AbortSignal.any([
-        context.req.raw.signal,
-        controller.signal,
-      ]);
       const streamedToolCallIds: string[] = [];
       let aborted = false;
       stream.onAbort(() => {
         aborted = true;
-        controller.abort();
+        streamController?.abort();
         deps.runner.tools.invalidateCalls(streamedToolCallIds);
       });
       const writeSSE = async (event: { data: string }): Promise<void> => {
@@ -340,7 +339,7 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
               }
               yield { type: "completed" as const, result: continuationStage };
             })()
-          : deps.runner.stream(command, signal, lifecycle);
+          : deps.runner.stream(command, turnSignal, lifecycle);
         for await (const event of source) {
           if (event.type === "text.delta") {
             await writeSSE({
@@ -406,8 +405,8 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
         deps.runner.tools.invalidateCalls(streamedToolCallIds);
         if (
           aborted &&
-          error instanceof DOMException &&
-          error.name === "AbortError"
+          ((error instanceof DOMException && error.name === "AbortError") ||
+            (error instanceof ProxyError && error.code === "request_aborted"))
         ) {
           return;
         }
