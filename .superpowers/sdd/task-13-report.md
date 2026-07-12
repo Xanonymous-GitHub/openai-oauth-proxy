@@ -2,7 +2,7 @@
 
 ## Status
 
-Complete. Task 13 adds a pinned Codex 0.144.1 hardening baseline, app-owned atomic runtime configuration, fail-closed verification before every App Server spawn, private filesystem modes, and a digest-pinned amd64/arm64 production image running Node as UID/GID 10001.
+Complete. Task 13 adds a pinned Codex 0.144.1 hardening baseline, descriptor-durable app-owned atomic runtime configuration, fail-closed verification before every App Server spawn, private filesystem modes, and a digest-pinned amd64/arm64 production image running Node as UID/GID 10001.
 
 Implementation commit: `88df5ca340c348a4d26ea8dd071a16ebff584372` (`build: harden Codex runtime image`).
 
@@ -10,7 +10,7 @@ Implementation commit: `88df5ca340c348a4d26ea8dd071a16ebff584372` (`build: harde
 
 - Added `config/codex/config.toml` with the pinned authentication, approval, sandbox, instruction-file, web-search, update, and feature hardening keys.
 - Added `config/codex/neutral-instructions.md` with exactly the four approved neutral instruction points and no coding persona.
-- Added `src/runtime-security.ts` for `umask 077`, private directory modes, same-directory atomic config replacement, no-follow verification, and neutral-instruction loading.
+- Added `src/runtime-security.ts` for `umask 077`, private directory modes, descriptor-only temporary config writes and fsync, same-directory atomic replacement, containing-directory fsync, no-follow verification, and neutral-instruction loading.
 - Modified `src/codex/supervisor.ts` to execute a synchronous configuration guard before every initial or recovery spawn and become unhealthy without invoking the child factory when verification fails.
 - Modified `src/main.ts` to harden the runtime filesystem before any application write, force SQLite to `0600`, compose pre-spawn verification, and load the neutral instruction file.
 - Added `Dockerfile` with digest-pinned Bun 1.3.14 build/dependency stages and Node 26.5.0 runtime, target-architecture Codex optional dependencies, protocol regeneration, compilation, UID/GID 10001, and read-only application files.
@@ -62,6 +62,14 @@ Implementation commit: `88df5ca340c348a4d26ea8dd071a16ebff584372` (`build: harde
    ```
 
    Result: `1` test failed and `5` were skipped because verification did not yet use `O_NOFOLLOW`. GREEN opens `config.toml` with `O_NOFOLLOW`, verifies a regular single-link `0600` file by descriptor, and only then reads the app-owned config bytes.
+
+6. Post-rename credential replacement race:
+
+   ```bash
+   bunx vitest run test/security/codex-config.test.ts -t 'fails closed without mutating credentials replaced after rename'
+   ```
+
+   Result: `1` test failed and `6` were skipped because runtime preparation ignored the injected config-filesystem seam, completed startup preparation, and did not throw. GREEN routes the real atomic write through the seam; its `rename` replaces `config.toml` with a credential symlink before verification, startup preparation fails closed, and credential content and mode remain byte-for-byte and bit-for-bit unchanged.
 
 ## GREEN Evidence
 
@@ -136,7 +144,7 @@ Result: exit `0`; `65` files checked, no fixes required.
 bun run test
 ```
 
-Result: exit `0`; `26` test files and `371` tests passed. This includes `6` container tests, the real target-platform image build, and an assertion that the runtime returns exactly `v26.5.0` from `node --version`.
+Result after the post-rename remediation: exit `0`; `26` test files and `372` tests passed. This includes `7` Codex security tests, `6` container tests, the real target-platform image build, and an assertion that the runtime returns exactly `v26.5.0` from `node --version`.
 
 `bun test` is not the project gate: it invokes Bun's built-in test runner, which does not provide the Vitest APIs used by this repository. The exact full-suite command is `bun run test`.
 
@@ -157,7 +165,7 @@ Result: exit `0`; both target platforms completed and the OCI exporter emitted m
 graphify update .
 ```
 
-Result: exit `0`; `17,621` nodes, `20,624` edges, and `1,229` communities. `graphify-out/` remains ignored and was not committed or published.
+Initial result: exit `0`; `17,621` nodes, `20,624` edges, and `1,229` communities. After the post-rename remediation, the same command exited `0` with `17,637` nodes, `20,645` edges, and `1,231` communities. `graphify-out/` remains ignored and was not committed or published.
 
 ## Self-Review
 
@@ -171,8 +179,10 @@ Result: exit `0`; `17,621` nodes, `20,624` edges, and `1,229` communities. `grap
 
 - `process.umask(0o077)` is the first operation in runtime filesystem preparation and precedes directory, config, SQLite, credential, and operation-directory writes.
 - `CODEX_HOME` and empty working roots are enforced as `0700`; atomically replaced config and existing/new SQLite files are enforced as `0600`; the inherited umask makes App Server credential creation compatible with `0600`.
-- Config is written with exclusive `wx` creation and mode `0600` to a randomized same-directory temporary path, renamed atomically over only `config.toml`, then verified.
-- Verification opens `config.toml` with `O_NOFOLLOW`, checks the descriptor is one regular single-link `0600` file, compares exact baseline bytes, and rejects any failure with a fixed error.
+- Config temporary files are opened by descriptor with `O_CREAT | O_EXCL | O_NOFOLLOW` and mode `0600`; descriptor permissions are set to `0600`, baseline bytes are written through the descriptor, and the temporary file descriptor is fsynced before close.
+- The containing directory descriptor is opened before rename. After atomic rename, production performs only directory-descriptor fsync and descriptor close before verification; it performs no path-based chmod, removal, or other mutation.
+- Verification then opens final `config.toml` with `O_NOFOLLOW`, checks the descriptor is one regular single-link `0600` file, compares exact baseline bytes, and rejects any failure with a fixed error.
+- The injected-adapter regression replaces the final path with a credential symlink inside `rename`; no-follow verification fails closed while the credential fixture's content and `0640` mode remain unchanged.
 
 ### Every Spawn Verification
 
@@ -195,9 +205,9 @@ Result: exit `0`; `17,621` nodes, `20,624` edges, and `1,229` communities. `grap
 
 ### Scope
 
-- Changes are limited to Task 13 runtime hardening, container construction, focused regressions, and generated-output exclusion needed for the requested Biome/Graphify gates.
+- Changes are limited to Task 13 runtime hardening, container construction, focused regressions, the post-rename filesystem-race remediation, and generated-output exclusion needed for the requested Biome/Graphify gates.
 - No generated protocol drift, credentials, databases, environment files, graph artifacts, deployment manifests, or unrelated refactors are included.
-- The report adds no implementation change after `88df5ca340c348a4d26ea8dd071a16ebff584372`.
+- The post-report finding changes only `src/runtime-security.ts`, its focused security regression, and this report; Dockerfile, protocol, API, authentication, and session behavior are unchanged.
 
 ## Concerns
 
@@ -205,3 +215,21 @@ Result: exit `0`; `17,621` nodes, `20,624` edges, and `1,229` communities. `grap
 - A real authenticated App Server session was not started because no credentials were provided; strict config parsing, spawn gating, protocol generation, native binary presence, Node runtime, and both image platforms were verified offline.
 - Graphify reports its existing non-blocking version warning: installed skill `0.4.3`, package `0.9.4`.
 - The multiarch OCI archive is a temporary local verification artifact outside the repository and is not committed or published.
+
+## Post-Rename Finding Verification
+
+```bash
+bunx vitest run test/security/codex-config.test.ts test/codex/supervisor.test.ts test/app.test.ts test/container.test.ts
+```
+
+Result: exit `0`; `4` files and `40` tests passed, including all security/supervisor/startup regressions and the real Docker build/runtime assertion.
+
+```bash
+bun run protocol:check
+bun run typecheck
+bun run build
+bunx biome check .
+bun run test
+```
+
+Results: every command exited `0`; protocol regeneration had no tracked diff, typecheck and build had no diagnostics, Biome checked `65` files with no fixes, and the full Vitest suite passed `372` tests across `26` files.

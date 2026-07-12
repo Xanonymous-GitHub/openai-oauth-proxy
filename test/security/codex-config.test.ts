@@ -1,13 +1,19 @@
 import {
+  chmodSync,
   closeSync,
+  constants,
   existsSync,
+  fchmodSync,
+  fsyncSync,
   mkdirSync,
   mkdtempSync,
   openSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -84,6 +90,15 @@ interface RuntimeSecurityModule {
     codexHome: string;
     dataDir: string;
     workingDirectories: string[];
+    configFilesystem?: {
+      open(path: string, flags: number, mode?: number): number;
+      fchmod(descriptor: number, mode: number): void;
+      write(descriptor: number, content: string): void;
+      fsync(descriptor: number): void;
+      close(descriptor: number): void;
+      rename(from: string, to: string): void;
+      remove(path: string): void;
+    };
   }) => void;
 }
 
@@ -168,6 +183,94 @@ describe("runtime filesystem hardening", () => {
       expect(() => runtime.assertCodexConfiguration?.(root)).toThrow(
         "Codex configuration verification failed",
       );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed without mutating credentials replaced after rename", async () => {
+    const runtime = (await import("../../src/runtime-security.js").catch(
+      () => ({}),
+    )) as RuntimeSecurityModule;
+    expect(runtime.prepareRuntimeFilesystem).toBeTypeOf("function");
+    if (!runtime.prepareRuntimeFilesystem) return;
+
+    const root = mkdtempSync(join(tmpdir(), "codex-rename-race-"));
+    const dataDir = join(root, "data");
+    const codexHome = join(dataDir, "codex");
+    const credentialPath = join(codexHome, "credential-fixture");
+    const credentialContent = "synthetic-credential-content";
+    mkdirSync(codexHome, { recursive: true, mode: 0o700 });
+    writeFileSync(credentialPath, credentialContent, { mode: 0o640 });
+    chmodSync(credentialPath, 0o640);
+    const credentialMode = statSync(credentialPath).mode & 0o777;
+    let temporaryDescriptor: number | undefined;
+    let directoryDescriptor: number | undefined;
+    let temporaryFlags = 0;
+    let temporaryMode: number | undefined;
+    let descriptorMode: number | undefined;
+    let temporaryWritten = false;
+    let temporarySynced = false;
+    let directorySynced = false;
+    let replaced = false;
+
+    try {
+      expect(() =>
+        runtime.prepareRuntimeFilesystem?.({
+          codexHome,
+          dataDir,
+          workingDirectories: [join(root, "work")],
+          configFilesystem: {
+            open: (path, flags, mode) => {
+              const descriptor = openSync(path, flags, mode);
+              if (path === codexHome) directoryDescriptor = descriptor;
+              else {
+                temporaryDescriptor = descriptor;
+                temporaryFlags = flags;
+                temporaryMode = mode;
+              }
+              return descriptor;
+            },
+            fchmod: (descriptor, mode) => {
+              expect(descriptor).toBe(temporaryDescriptor);
+              descriptorMode = mode;
+              fchmodSync(descriptor, mode);
+            },
+            write: (descriptor, content) => {
+              expect(descriptor).toBe(temporaryDescriptor);
+              temporaryWritten = true;
+              writeFileSync(descriptor, content, "utf8");
+            },
+            fsync: (descriptor) => {
+              if (descriptor === temporaryDescriptor) temporarySynced = true;
+              if (descriptor === directoryDescriptor) directorySynced = true;
+              fsyncSync(descriptor);
+            },
+            close: (descriptor) => closeSync(descriptor),
+            rename: (from, to) => {
+              expect(temporaryWritten).toBe(true);
+              expect(temporarySynced).toBe(true);
+              renameSync(from, to);
+              rmSync(to);
+              symlinkSync(credentialPath, to);
+              replaced = true;
+            },
+            remove: (path) => {
+              expect(replaced).toBe(false);
+              rmSync(path, { force: true });
+            },
+          },
+        }),
+      ).toThrow("Codex configuration verification failed");
+      expect(replaced).toBe(true);
+      expect(temporaryFlags & constants.O_CREAT).toBe(constants.O_CREAT);
+      expect(temporaryFlags & constants.O_EXCL).toBe(constants.O_EXCL);
+      expect(temporaryFlags & constants.O_NOFOLLOW).toBe(constants.O_NOFOLLOW);
+      expect(temporaryMode).toBe(0o600);
+      expect(descriptorMode).toBe(0o600);
+      expect(directorySynced).toBe(true);
+      expect(readFileSync(credentialPath, "utf8")).toBe(credentialContent);
+      expect(statSync(credentialPath).mode & 0o777).toBe(credentialMode);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
