@@ -94,4 +94,4 @@ Implemented Chat Completions and Responses function-tool suspension and continua
 ### Remediation Hash
 
 - Parent Task 10 commit: `5f455943a174287716482fc035e2b0ab6aa85b66` (`feat: bridge client function tools`).
-- The remediation source commit hash is recorded by the follow-up report commit after Git creates it; a commit cannot contain its own final hash.
+- Remediation source commit: `8edc0a9cc8e559f709cc079d12391c132e877568` (`fix: harden tool continuation failures`).
