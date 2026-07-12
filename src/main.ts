@@ -57,12 +57,24 @@ export async function start(
 ): Promise<RunningService> {
   const supervisor = dependencies.supervisor ?? createSupervisor({ config });
   let draining = false;
+  let host: Promise<CodexHost> | undefined;
+  let activeHost: CodexHost | undefined;
+  const modelHost: Pick<CodexHost, "generation" | "modelList"> = {
+    get generation() {
+      return activeHost?.generation ?? 0;
+    },
+    modelList: (params, signal) => {
+      if (!host) return Promise.reject(new Error("Codex host not started"));
+      return host.then((value) => value.modelList(params, signal));
+    },
+  };
   const dataApp = createDataApp({
     health: () => supervisor.health(),
     ready: () => supervisor.ready(),
     draining: () => draining,
     bifrostToken: config.bifrostProxyToken,
     metricsToken: config.metricsToken,
+    host: modelHost,
   });
   const adminApp = new Hono();
   let dataServer: ServerType;
@@ -103,12 +115,17 @@ export async function start(
   process.once("SIGINT", handleSignal);
   process.once("SIGTERM", handleSignal);
 
-  let host: Promise<CodexHost>;
   try {
     host = supervisor.start();
   } catch (error) {
     host = Promise.reject(error);
   }
+  void host.then(
+    (value) => {
+      activeHost = value;
+    },
+    () => undefined,
+  );
   void host.catch(() => undefined);
 
   return { close, host };

@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
 import { ProxyError } from "./errors.js";
 
 export function authenticateBearer(
@@ -9,10 +9,13 @@ export function authenticateBearer(
   const suppliedToken = authorization?.startsWith(prefix)
     ? authorization.slice(prefix.length)
     : "";
-  const supplied = createHash("sha256").update(suppliedToken).digest();
-  const expected = createHash("sha256").update(expectedToken).digest();
+  const supplied = Buffer.from(suppliedToken);
+  const expected = Buffer.from(expectedToken);
 
-  if (!timingSafeEqual(supplied, expected)) {
+  if (
+    supplied.length !== expected.length ||
+    !timingSafeEqual(supplied, expected)
+  ) {
     throw ProxyError.public(
       401,
       "invalid_api_key",

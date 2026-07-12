@@ -33,6 +33,10 @@ it("exposes minimal probes and rejects unknown v1 routes", async () => {
     draining: () => draining,
     bifrostToken: "b".repeat(32),
     metricsToken: "m".repeat(32),
+    host: {
+      generation: 0,
+      modelList: async () => ({ data: [], nextCursor: null }),
+    },
   });
   expect((await app.request("/healthz")).status).toBe(200);
   expect((await app.request("/readyz")).status).toBe(503);

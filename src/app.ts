@@ -1,4 +1,9 @@
+import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
+import type { CodexHost } from "./codex/host.js";
+import { authenticateBearer } from "./http/auth.js";
+import { ProxyError, toOpenAIError } from "./http/errors.js";
+import { ModelCatalog } from "./openai/models.js";
 
 export interface DataAppDependencies {
   health(): boolean;
@@ -6,10 +11,27 @@ export interface DataAppDependencies {
   draining(): boolean;
   bifrostToken: string;
   metricsToken: string;
+  host: Pick<CodexHost, "generation" | "modelList">;
 }
 
 export function createDataApp(deps: DataAppDependencies): Hono {
   const app = new Hono();
+  const models = new ModelCatalog(deps.host);
+
+  app.onError((error, context) =>
+    toOpenAIError(
+      error,
+      context.req.header("x-request-id") ?? `req_${randomUUID()}`,
+    ),
+  );
+  app.use("/v1/*", async (context, next) => {
+    authenticateBearer(context.req.header("authorization"), deps.bifrostToken);
+    await next();
+  });
+  app.use("/metrics", async (context, next) => {
+    authenticateBearer(context.req.header("authorization"), deps.metricsToken);
+    await next();
+  });
 
   app.get("/healthz", (context) =>
     deps.health() && !deps.draining()
@@ -21,6 +43,17 @@ export function createDataApp(deps: DataAppDependencies): Hono {
       ? context.body(null, 200)
       : context.body(null, 503),
   );
+  app.get("/v1/models", async (context) => {
+    try {
+      return context.json(await models.list(context.req.raw.signal));
+    } catch {
+      throw new ProxyError(
+        503,
+        "codex_unavailable",
+        "Codex model catalog unavailable",
+      );
+    }
+  });
   app.all("/v1/*", (context) =>
     context.json(
       {
