@@ -4,6 +4,7 @@ export interface LogEvent {
   model?: string;
   status: number;
   durationMs: number;
+  errorCode?: string;
   streamOutcome?: "completed" | "cancelled" | "failed";
   queueOutcome?: "admitted" | "queued" | "full";
   leaseOutcome?: "acquired" | "busy" | "released";
@@ -24,6 +25,9 @@ export function createLogger(
         ...(event.model === undefined ? {} : { model: event.model }),
         status: event.status,
         durationMs: event.durationMs,
+        ...(event.errorCode === undefined
+          ? {}
+          : { errorCode: event.errorCode }),
         ...(event.streamOutcome === undefined
           ? {}
           : { streamOutcome: event.streamOutcome }),

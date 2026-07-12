@@ -13,6 +13,8 @@ import type {
 import { openAIErrorBody, ProxyError } from "../http/errors.js";
 import { readJsonBody } from "../http/limits.js";
 import type { Permit, TurnCapacity } from "../operations/capacity.js";
+import type { AdmittedTurn, TurnDrainRegistry } from "../operations/drain.js";
+import type { ObserveRequest } from "../operations/telemetry.js";
 import type { TokenUsage, TurnCommand, TurnResult } from "../turns/events.js";
 import type { TurnLifecycleCallbacks, TurnRunner } from "../turns/runner.js";
 import { decodeImages } from "./images.js";
@@ -53,6 +55,8 @@ export interface ResponsesHandlerDependencies {
   deleteThread(threadId: string, signal?: AbortSignal): void | Promise<void>;
   streamSSE?: typeof streamSSE;
   capacity?: Pick<TurnCapacity, "acquire">;
+  drain?: Pick<TurnDrainRegistry, "register">;
+  observe?: ObserveRequest;
 }
 
 export interface ProxyResponse {
@@ -458,6 +462,7 @@ export function createResponsesHandler(
         );
       }
       const model = await validatedModel(deps, request, context.req.raw.signal);
+      deps.observe?.(context.req.raw, { model: model.id });
       const mapping = deps.store.lookup(request.previous_response_id);
       if (!mapping) throw decisionError("not_found");
       if (mapping.state === "lost") throw decisionError("lost");
@@ -469,6 +474,7 @@ export function createResponsesHandler(
           "previous_response_id",
         );
       }
+      deps.observe?.(context.req.raw, { leaseOutcome: "acquired" });
       const continuation = await deps.runner.tools.continue({
         kind: "responses",
         responseId: request.previous_response_id,
@@ -492,6 +498,7 @@ export function createResponsesHandler(
         await loseResponseOperation(deps, request.previous_response_id).catch(
           () => undefined,
         );
+        deps.observe?.(context.req.raw, { leaseOutcome: "released" });
         throw error;
       }
       const identity: ResponseIdentity = {
@@ -503,6 +510,7 @@ export function createResponsesHandler(
       if (result.finishReason === "stop") {
         const operationCwd = deps.store.completeOperation(identity.responseId);
         removeOperationDirectory(operationCwd);
+        deps.observe?.(context.req.raw, { leaseOutcome: "released" });
       }
       if (!request.stream) return context.json(responseBody(identity, result));
       const sendStream = deps.streamSSE ?? streamSSE;
@@ -510,6 +518,10 @@ export function createResponsesHandler(
         let aborted = false;
         const invalidate = (): void => {
           aborted = true;
+          deps.observe?.(context.req.raw, {
+            streamOutcome: "cancelled",
+            errorCode: "request_aborted",
+          });
           if (result.finishReason === "tool_calls") {
             deps.runner.tools.invalidateResponse(identity.responseId);
           }
@@ -613,6 +625,7 @@ export function createResponsesHandler(
               response: responseBody(identity, result),
             }),
           });
+          deps.observe?.(context.req.raw, { streamOutcome: "completed" });
         } catch (error) {
           invalidate();
           if (
@@ -622,6 +635,10 @@ export function createResponsesHandler(
           ) {
             return;
           }
+          deps.observe?.(context.req.raw, {
+            streamOutcome: "failed",
+            errorCode: openAIErrorBody(error).error.code,
+          });
           throw error;
         }
       });
@@ -629,15 +646,32 @@ export function createResponsesHandler(
     assertOrdinaryRequest(request);
     const split = splitInput(request);
     const model = await validatedModel(deps, request, context.req.raw.signal);
+    deps.observe?.(context.req.raw, { model: model.id });
     const history = translateHistory(split.history);
     const input = translateTurnInput(split.input);
     let permit: Permit | undefined = await deps.capacity?.acquire(
       context.req.raw.signal,
     );
+    let admission: AdmittedTurn | undefined;
+    if (permit !== undefined) {
+      admission = deps.drain?.register(permit, context.req.raw.signal);
+      deps.observe?.(context.req.raw, {
+        queueOutcome: permit.queueOutcome ?? "admitted",
+      });
+    }
     const releasePermit = (): void => {
-      permit?.release();
+      if (admission) admission.release();
+      else permit?.release();
       permit = undefined;
     };
+    const finishAdmission = (): void => admission?.done();
+    const turnSignal = admission?.signal ?? context.req.raw.signal;
+    try {
+      turnSignal.throwIfAborted();
+    } catch (error) {
+      finishAdmission();
+      throw error;
+    }
     const identity: ResponseIdentity = {
       responseId: opaqueId("resp"),
       messageId: opaqueId("msg"),
@@ -658,6 +692,7 @@ export function createResponsesHandler(
       });
       mkdirSync(operationCwd, { mode: 0o700 });
     } catch (error) {
+      finishAdmission();
       releasePermit();
       throw error;
     }
@@ -675,6 +710,7 @@ export function createResponsesHandler(
       });
     } catch (error) {
       removeOperationDirectory(operationCwd);
+      finishAdmission();
       releasePermit();
       throw error;
     }
@@ -684,9 +720,14 @@ export function createResponsesHandler(
       decision.type === "lost"
     ) {
       removeOperationDirectory(operationCwd);
+      if (decision.type === "busy") {
+        deps.observe?.(context.req.raw, { leaseOutcome: "busy" });
+      }
+      finishAdmission();
       releasePermit();
       throw decisionError(decision.type);
     }
+    deps.observe?.(context.req.raw, { leaseOutcome: "acquired" });
     if (decision.type === "resume") removeOperationDirectory(operationCwd);
 
     const command: TurnCommand = {
@@ -718,6 +759,7 @@ export function createResponsesHandler(
     let openedThreadId: string | undefined;
     const lifecycle: TurnLifecycleCallbacks = {
       ...(permit === undefined ? {} : { release: releasePermit }),
+      ...(admission === undefined ? {} : { settled: finishAdmission }),
       opened: (threadId) => {
         openedThreadId = threadId;
         deps.store.attachOperation(identity.responseId, threadId);
@@ -789,6 +831,7 @@ export function createResponsesHandler(
           }
         }
         finalized = true;
+        deps.observe?.(context.req.raw, { leaseOutcome: "released" });
       })();
       await abandonPromise;
     };
@@ -797,20 +840,21 @@ export function createResponsesHandler(
       const completedCwd = deps.store.completeOperation(identity.responseId);
       finalized = true;
       removeOperationDirectory(completedCwd);
+      deps.observe?.(context.req.raw, { leaseOutcome: "released" });
     };
 
     if (!request.stream) {
       try {
         upstreamAttempted = true;
-        const result = await deps.runner.run(
-          command,
-          context.req.raw.signal,
-          lifecycle,
-        );
-        if (result.finishReason === "stop") await complete(result);
+        const result = await deps.runner.run(command, turnSignal, lifecycle);
+        if (result.finishReason === "stop") {
+          await complete(result);
+          finishAdmission();
+        }
         return context.json(responseBody(identity, result));
       } catch (error) {
         await abandon();
+        finishAdmission();
         throw error;
       }
     }
@@ -821,11 +865,14 @@ export function createResponsesHandler(
       stream: Parameters<Parameters<typeof sendStream>[1]>[0],
     ) => {
       const controller = new AbortController();
-      const signal = AbortSignal.any([
-        context.req.raw.signal,
-        controller.signal,
-      ]);
-      stream.onAbort(() => controller.abort());
+      const signal = AbortSignal.any([turnSignal, controller.signal]);
+      stream.onAbort(() => {
+        deps.observe?.(context.req.raw, {
+          streamOutcome: "cancelled",
+          errorCode: "request_aborted",
+        });
+        controller.abort();
+      });
       let sequenceNumber = 0;
       let toolOutputIndex = 0;
       try {
@@ -844,6 +891,7 @@ export function createResponsesHandler(
             },
           }),
         });
+        signal.throwIfAborted();
         sequenceNumber += 1;
 
         upstreamAttempted = true;
@@ -927,6 +975,9 @@ export function createResponsesHandler(
                   response: responseBody(identity, event.result),
                 }),
               });
+              deps.observe?.(context.req.raw, {
+                streamOutcome: "completed",
+              });
               return;
             }
             if (!stored) {
@@ -945,6 +996,11 @@ export function createResponsesHandler(
                     param: projected.param,
                   }),
                 });
+                deps.observe?.(context.req.raw, {
+                  streamOutcome: "failed",
+                  errorCode: projected.code,
+                });
+                finishAdmission();
                 return;
               }
             }
@@ -963,6 +1019,7 @@ export function createResponsesHandler(
             });
             sequenceNumber += 1;
             await complete(event.result);
+            finishAdmission();
             await stream.writeSSE({
               event: "response.completed",
               data: JSON.stringify({
@@ -971,6 +1028,7 @@ export function createResponsesHandler(
                 response: body,
               }),
             });
+            deps.observe?.(context.req.raw, { streamOutcome: "completed" });
             return;
           } else if (event.type === "failed") {
             let failure: unknown = event.error;
@@ -990,6 +1048,11 @@ export function createResponsesHandler(
                 param: projected.param,
               }),
             });
+            deps.observe?.(context.req.raw, {
+              streamOutcome: "failed",
+              errorCode: projected.code,
+            });
+            finishAdmission();
             return;
           }
         }
@@ -999,11 +1062,23 @@ export function createResponsesHandler(
           "Codex event stream ended before turn completion",
         );
       } catch (error) {
+        controller.abort();
         if (!upstreamAttempted) releasePermit();
         if (dynamicTools.length > 0) {
           deps.runner.tools.invalidateResponse(identity.responseId);
         }
         await abandon().catch(() => undefined);
+        if (!upstreamAttempted) finishAdmission();
+        deps.observe?.(context.req.raw, {
+          streamOutcome:
+            signal.aborted && context.req.raw.signal.aborted
+              ? "cancelled"
+              : "failed",
+          errorCode:
+            signal.aborted && context.req.raw.signal.aborted
+              ? "request_aborted"
+              : openAIErrorBody(error).error.code,
+        });
         throw error;
       }
     };
@@ -1012,6 +1087,7 @@ export function createResponsesHandler(
     } catch (error) {
       if (!upstreamAttempted) releasePermit();
       await abandon().catch(() => undefined);
+      if (!upstreamAttempted) finishAdmission();
       throw error;
     }
   };

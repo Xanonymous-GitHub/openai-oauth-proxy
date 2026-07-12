@@ -228,6 +228,34 @@ describe("CodexSupervisor", () => {
     await expect(supervisor.start()).resolves.toBe(facade);
   });
 
+  it("emits one narrow lifecycle event for each restart generation", async () => {
+    const first = fakeChild();
+    const second = fakeChild();
+    const third = fakeChild();
+    const supervisor = createSupervisor({
+      config,
+      childFactory: factoryFor([first, second, third]),
+      clock,
+      random: () => 0,
+    });
+    const restarts: unknown[] = [];
+    const unsubscribe = supervisor.onRestart((event) => restarts.push(event));
+    await makeReady(supervisor, first);
+
+    first.crash();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await makeReady(supervisor, second);
+    second.crash();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await makeReady(supervisor, third);
+
+    expect(restarts).toEqual([
+      { generation: 2, reason: "recovery" },
+      { generation: 3, reason: "recovery" },
+    ]);
+    unsubscribe();
+  });
+
   it("uses five deterministic recovery delays before becoming unhealthy", async () => {
     const first = fakeChild();
     const spawnTimes: number[] = [];

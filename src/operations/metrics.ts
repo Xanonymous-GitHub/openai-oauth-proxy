@@ -49,7 +49,6 @@ export class Metrics {
   #pendingTools = 0;
   #expiredTools = 0;
   #authReady = 0;
-  #processGeneration: number | undefined;
 
   recordRequest(
     route: MetricRoute,
@@ -116,15 +115,6 @@ export class Metrics {
     };
     restart.count += 1;
     this.#restarts.set(key, restart);
-  }
-
-  observeProcessGeneration(generation: number): void {
-    const previous = this.#processGeneration;
-    this.#processGeneration = generation;
-    if (previous === undefined || generation <= previous) return;
-    for (let current = previous + 1; current <= generation; current += 1) {
-      this.recordAppServerRestart(current, "generation_change");
-    }
   }
 
   setAuthReady(ready: boolean): void {

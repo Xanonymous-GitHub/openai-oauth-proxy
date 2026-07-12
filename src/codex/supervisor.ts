@@ -73,6 +73,13 @@ interface SupervisorOptions {
   drain?: () => Promise<void>;
 }
 
+export interface SupervisorRestartEvent {
+  generation: number;
+  reason: "recovery";
+}
+
+export type SupervisorRestartListener = (event: SupervisorRestartEvent) => void;
+
 type SupervisorState =
   | { type: "stopped" }
   | { type: "starting"; attempt: number }
@@ -110,6 +117,7 @@ export class CodexSupervisor {
   readonly #drain: (() => Promise<void>) | undefined;
   readonly #workingDirectory: string;
   readonly #facade: CodexHost;
+  readonly #restartListeners = new Set<SupervisorRestartListener>();
   #state: SupervisorState = { type: "stopped" };
   #current: Generation | undefined;
   #retiring: Generation | undefined;
@@ -162,6 +170,11 @@ export class CodexSupervisor {
     return this.#generation;
   }
 
+  onRestart(listener: SupervisorRestartListener): () => void {
+    this.#restartListeners.add(listener);
+    return () => this.#restartListeners.delete(listener);
+  }
+
   stop(): Promise<void> {
     if (!this.#stopPromise) this.#stopPromise = this.performStop();
     return this.#stopPromise;
@@ -172,6 +185,16 @@ export class CodexSupervisor {
     this.clearTimer("recovery");
     this.#state = { type: "starting", attempt };
     const generation = ++this.#generation;
+    if (generation > 1) {
+      const event: SupervisorRestartEvent = { generation, reason: "recovery" };
+      for (const listener of this.#restartListeners) {
+        try {
+          listener(event);
+        } catch {
+          // Observers cannot interfere with supervisor recovery.
+        }
+      }
+    }
 
     let child: SupervisorChild;
     try {

@@ -94,9 +94,7 @@ it("authenticates metrics separately and renders live operational state", async 
   const restarted = await app.request("/metrics", {
     headers: { authorization: `Bearer ${metricsToken}` },
   });
-  expect(await restarted.text()).toContain(
-    'proxy_app_server_restarts_total{generation="8",reason="generation_change"} 1',
-  );
+  expect(await restarted.text()).not.toContain("generation_change");
   permit.release();
 });
 

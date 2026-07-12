@@ -7,6 +7,9 @@ describe("TurnCapacity", () => {
     const active = await Promise.all(
       Array.from({ length: 4 }, () => capacity.acquire()),
     );
+    expect(active.every((permit) => permit.queueOutcome === "admitted")).toBe(
+      true,
+    );
     const admitted: number[] = [];
     const queued = Array.from({ length: 32 }, (_, index) =>
       capacity.acquire().then((permit) => {
@@ -28,6 +31,7 @@ describe("TurnCapacity", () => {
       const queuedPermit = queued[index];
       if (!queuedPermit) throw new Error("Missing queued permit");
       const permit = await queuedPermit;
+      expect(permit.queueOutcome).toBe("queued");
       expect(admitted).toEqual(Array.from({ length: index + 1 }, (_, i) => i));
       running.push(permit);
     }

@@ -8,6 +8,10 @@ import { SessionStore } from "./admin/sessions.js";
 import { createDataApp } from "./app.js";
 import { AccountManager } from "./codex/account.js";
 import type { CodexHost } from "./codex/host.js";
+import type {
+  SupervisorRestartEvent,
+  SupervisorRestartListener,
+} from "./codex/supervisor.js";
 import { createSupervisor } from "./codex/supervisor.js";
 import { type Config, loadConfig } from "./config.js";
 import { ConversationStore } from "./conversations/store.js";
@@ -16,6 +20,7 @@ import {
   startResponseSweeper,
 } from "./openai/responses.js";
 import { TurnCapacity } from "./operations/capacity.js";
+import { TurnDrainRegistry } from "./operations/drain.js";
 import { type Logger, log } from "./operations/log.js";
 import { Metrics } from "./operations/metrics.js";
 import { TurnRunner } from "./turns/runner.js";
@@ -36,6 +41,7 @@ interface SupervisorLifecycle {
   health(): boolean;
   ready(): boolean;
   stop(): Promise<void>;
+  onRestart?(listener: SupervisorRestartListener): () => void;
 }
 
 interface StartDependencies {
@@ -43,6 +49,7 @@ interface StartDependencies {
   capacity?: TurnCapacity;
   metrics?: Metrics;
   logger?: Logger;
+  drain?: TurnDrainRegistry;
   drainTimeoutMs?: number;
 }
 
@@ -115,6 +122,7 @@ export async function start(
     dependencies.capacity ??
     new TurnCapacity(config.maxActiveTurns, config.queueCapacity);
   const metrics = dependencies.metrics ?? new Metrics();
+  const drain = dependencies.drain ?? new TurnDrainRegistry();
   const logger = dependencies.logger ?? log;
   const clock = { now: () => Date.now() };
   const conversationStore = ConversationStore.open(
@@ -125,6 +133,10 @@ export async function start(
       turnLeaseMs: config.turnTimeoutMs,
       toolLeaseMs: config.toolTimeoutMs,
     },
+  );
+  const unsubscribeRestart = supervisor.onRestart?.(
+    (event: SupervisorRestartEvent) =>
+      metrics.recordAppServerRestart(event.generation, event.reason),
   );
   let draining = false;
   let host: Promise<CodexHost> | undefined;
@@ -150,6 +162,7 @@ export async function start(
     bifrostToken: config.bifrostProxyToken,
     metricsToken: config.metricsToken,
     capacity,
+    drain,
     metrics,
     logger,
     busyThreads: () => conversationStore.busyThreads(),
@@ -206,6 +219,7 @@ export async function start(
   try {
     dataServer = await listen(dataApp, config.dataHost, config.dataPort);
   } catch (error) {
+    unsubscribeRestart?.();
     await Promise.allSettled([supervisor.stop()]);
     conversationStore.close();
     throw error;
@@ -214,6 +228,7 @@ export async function start(
   try {
     adminServer = await listen(adminApp, config.adminHost, config.adminPort);
   } catch (error) {
+    unsubscribeRestart?.();
     await Promise.allSettled([closeServer(dataServer), supervisor.stop()]);
     conversationStore.close();
     throw error;
@@ -224,6 +239,8 @@ export async function start(
     if (!closePromise) {
       draining = true;
       capacity.beginDrain();
+      drain.beginDrain();
+      unsubscribeRestart?.();
       process.off("SIGINT", handleSignal);
       process.off("SIGTERM", handleSignal);
       closePromise = (async () => {
@@ -236,12 +253,16 @@ export async function start(
           }
         };
         const drained = await settlesWithin(
-          capacity.whenIdle(),
+          Promise.all([capacity.whenIdle(), drain.whenIdle()]).then(
+            () => undefined,
+          ),
           dependencies.drainTimeoutMs ?? DRAIN_TIMEOUT_MS,
         );
         if (!drained) {
+          drain.abortAll();
           await capture(() => turnRunner.interruptAll());
           capacity.invalidateActive();
+          await capture(() => drain.whenIdle());
         }
         await capture(() => responseSweeper?.stop());
         await capture(() => conversationStore.close());

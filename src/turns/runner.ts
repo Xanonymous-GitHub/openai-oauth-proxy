@@ -48,6 +48,7 @@ export interface TurnLifecycleCallbacks {
   started?: StartedCallback;
   release?: LifecycleCallback;
   cleanup?: CleanupCallback;
+  settled?: LifecycleCallback;
   tool?: TurnToolLifecycle;
 }
 
@@ -330,6 +331,7 @@ export class TurnRunner {
     let usage: TokenUsage | undefined;
     const release = lifecycle?.release ?? this.#release;
     const cleanup = lifecycle?.cleanup ?? this.#cleanup;
+    const onSettled = lifecycle?.settled;
     const turnStartController = new AbortController();
     let resolveCancellation!: (cause: CancellationCause) => void;
     const cancelled = new Promise<CancellationCause>((resolve) => {
@@ -438,23 +440,34 @@ export class TurnRunner {
               : cleanup?.(threadId, cleanupController.signal),
           ),
         ]);
-        const settled = await Promise.race([
+        const callbacksResult = await Promise.race([
           callbacks,
           delay(this.#lifecycleWaitMs).then(() => undefined),
         ]);
-        if (settled === undefined) {
+        let lifecycleError: unknown;
+        if (callbacksResult === undefined) {
           cleanupController.abort();
-          return new ProxyError(
+          lifecycleError = new ProxyError(
             502,
             "turn_lifecycle_timeout",
             "Codex turn lifecycle cleanup timed out",
           );
+        } else {
+          const [releaseResult, cleanupResult] = callbacksResult;
+          if (releaseResult.status === "rejected") {
+            lifecycleError = releaseResult.reason;
+          } else if (cleanupResult.status === "rejected") {
+            lifecycleError = cleanupResult.reason;
+          } else if (generationFailure) {
+            lifecycleError = normalizeError(generationFailure);
+          }
         }
-        const [releaseResult, cleanupResult] = settled;
-        if (releaseResult.status === "rejected") return releaseResult.reason;
-        if (cleanupResult.status === "rejected") return cleanupResult.reason;
-        if (generationFailure) return normalizeError(generationFailure);
-        return undefined;
+        try {
+          await onSettled?.();
+        } catch (error) {
+          lifecycleError ??= error;
+        }
+        return lifecycleError;
       })();
       return finalization;
     };

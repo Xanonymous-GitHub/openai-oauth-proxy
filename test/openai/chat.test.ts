@@ -12,6 +12,8 @@ import type {
   PendingServerToolCall,
 } from "../../src/codex/host.js";
 import { TurnCapacity } from "../../src/operations/capacity.js";
+import { createLogger, type Logger } from "../../src/operations/log.js";
+import { Metrics } from "../../src/operations/metrics.js";
 import { TurnRunner } from "../../src/turns/runner.js";
 
 const bifrostToken = "b".repeat(32);
@@ -159,6 +161,8 @@ function createFixture(
     turnStart?: CodexHost["turnStart"];
     threadInjectItems?: CodexHost["threadInjectItems"];
     capacity?: TurnCapacity;
+    logger?: Logger;
+    metrics?: Metrics;
   } = {},
 ) {
   let draining = false;
@@ -286,6 +290,9 @@ function createFixture(
     metricsToken: "m".repeat(32),
     host,
     chat,
+    ...(options.logger === undefined ? {} : { logger: options.logger }),
+    ...(options.metrics === undefined ? {} : { metrics: options.metrics }),
+    processGeneration: () => host.generation,
   });
   return {
     app,
@@ -1233,5 +1240,85 @@ describe("POST /v1/chat/completions", () => {
       turnId: "turn-1",
     });
     expect(release).toHaveBeenCalledOnce();
+  });
+
+  it("records streaming success only after the body completes", async () => {
+    const write = vi.fn();
+    const capacity = new TurnCapacity(1, 0);
+    const { app } = createFixture({
+      capacity,
+      logger: createLogger(write),
+    });
+    const response = await post(app, { ...ordinaryRequest, stream: true });
+
+    expect(write).not.toHaveBeenCalled();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await response.text();
+
+    expect(write).toHaveBeenCalledOnce();
+    const event = JSON.parse(String(write.mock.calls[0]?.[0]));
+    expect(event).toMatchObject({
+      route: "chat",
+      model: "gpt-5.4",
+      status: 200,
+      streamOutcome: "completed",
+      queueOutcome: "admitted",
+      processGeneration: 1,
+    });
+    expect(event.durationMs).toBeGreaterThanOrEqual(8);
+  });
+
+  it("records a stable midstream failure once without metric model labels", async () => {
+    const write = vi.fn();
+    const metrics = new Metrics();
+    const { app } = createFixture({
+      streamWriteFailureAt: 2,
+      logger: createLogger(write),
+      metrics,
+    });
+    const response = await post(app, {
+      ...ordinaryRequest,
+      messages: [{ role: "user", content: "private prompt" }],
+      stream: true,
+    });
+
+    await expect(response.text()).rejects.toThrow("stream write 2 failed");
+
+    expect(write).toHaveBeenCalledOnce();
+    const logged = String(write.mock.calls[0]?.[0]);
+    expect(JSON.parse(logged)).toMatchObject({
+      route: "chat",
+      model: "gpt-5.4",
+      status: 200,
+      errorCode: "internal_error",
+      streamOutcome: "failed",
+    });
+    expect(logged).not.toContain("private prompt");
+    expect(metrics.render()).toContain(
+      'proxy_errors_total{route="chat",code="internal_error"} 1',
+    );
+    expect(metrics.render()).not.toContain("gpt-5.4");
+    expect(metrics.render()).not.toContain("private prompt");
+  });
+
+  it("records consumer cancellation once at cancellation time", async () => {
+    const write = vi.fn();
+    const { app, host } = createFixture({
+      turnStart: async () => ({ turn: fakeTurn() }),
+      logger: createLogger(write),
+    });
+    const response = await post(app, { ...ordinaryRequest, stream: true });
+    await vi.waitFor(() => expect(host.turnStart).toHaveBeenCalledOnce());
+
+    await response.body?.cancel();
+    await vi.waitFor(() => expect(write).toHaveBeenCalledOnce());
+
+    expect(JSON.parse(String(write.mock.calls[0]?.[0]))).toMatchObject({
+      route: "chat",
+      model: "gpt-5.4",
+      status: 200,
+      errorCode: "request_aborted",
+      streamOutcome: "cancelled",
+    });
   });
 });

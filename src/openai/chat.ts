@@ -4,6 +4,8 @@ import { streamSSE } from "hono/streaming";
 import { openAIErrorBody, ProxyError } from "../http/errors.js";
 import { readJsonBody } from "../http/limits.js";
 import type { TurnCapacity } from "../operations/capacity.js";
+import type { AdmittedTurn, TurnDrainRegistry } from "../operations/drain.js";
+import type { ObserveRequest } from "../operations/telemetry.js";
 import type { TokenUsage, TurnCommand, TurnResult } from "../turns/events.js";
 import type { TurnLifecycleCallbacks, TurnRunner } from "../turns/runner.js";
 import { decodeImages } from "./images.js";
@@ -19,6 +21,8 @@ export interface ChatHandlerDependencies {
   deleteThread(threadId: string, signal?: AbortSignal): void | Promise<void>;
   release?: () => void | Promise<void>;
   capacity?: Pick<TurnCapacity, "acquire">;
+  drain?: Pick<TurnDrainRegistry, "register">;
+  observe?: ObserveRequest;
   streamSSE?: typeof streamSSE;
 }
 
@@ -178,6 +182,7 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
         "model",
       );
     }
+    deps.observe?.(context.req.raw, { model: model.id });
     if (images.length > 0 && !model.supportsImage) {
       throw ProxyError.public(
         400,
@@ -204,7 +209,7 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
       model: model.id,
     };
     const streamController = request.stream ? new AbortController() : undefined;
-    const turnSignal = streamController
+    let turnSignal = streamController
       ? AbortSignal.any([context.req.raw.signal, streamController.signal])
       : context.req.raw.signal;
     let continuationResult: Promise<TurnResult> | undefined;
@@ -266,10 +271,22 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
       continuationResult === undefined
         ? await deps.capacity?.acquire(context.req.raw.signal)
         : undefined;
+    let admission: AdmittedTurn | undefined;
+    if (permit !== undefined) {
+      admission = deps.drain?.register(permit, context.req.raw.signal);
+      turnSignal = admission?.signal ?? turnSignal;
+      if (streamController) {
+        turnSignal = AbortSignal.any([turnSignal, streamController.signal]);
+      }
+      deps.observe?.(context.req.raw, {
+        queueOutcome: permit.queueOutcome ?? "admitted",
+      });
+    }
     const lifecycle: TurnLifecycleCallbacks = {
       ...(permit === undefined && deps.release === undefined
         ? {}
-        : { release: permit?.release ?? deps.release }),
+        : { release: admission?.release ?? permit?.release ?? deps.release }),
+      ...(admission === undefined ? {} : { settled: admission.done }),
       cleanup: deps.deleteThread,
       ...(dynamicTools.length === 0
         ? {}
@@ -283,22 +300,28 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
     };
 
     if (!request.stream) {
-      const result = await (continuationResult ??
-        deps.runner.run(command, context.req.raw.signal, lifecycle));
-      return context.json({
-        ...identity,
-        object: "chat.completion" as const,
-        choices: [
-          {
-            index: 0,
-            message: resultMessage(result),
-            finish_reason: result.finishReason,
-          },
-        ],
-        ...(result.usage === undefined
-          ? {}
-          : { usage: usageBody(result.usage) }),
-      });
+      try {
+        const result = await (continuationResult ??
+          deps.runner.run(command, turnSignal, lifecycle));
+        if (result.finishReason === "stop") admission?.done();
+        return context.json({
+          ...identity,
+          object: "chat.completion" as const,
+          choices: [
+            {
+              index: 0,
+              message: resultMessage(result),
+              finish_reason: result.finishReason,
+            },
+          ],
+          ...(result.usage === undefined
+            ? {}
+            : { usage: usageBody(result.usage) }),
+        });
+      } catch (error) {
+        admission?.done();
+        throw error;
+      }
     }
 
     context.header("X-Accel-Buffering", "no");
@@ -311,6 +334,10 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
       let aborted = false;
       stream.onAbort(() => {
         aborted = true;
+        deps.observe?.(context.req.raw, {
+          streamOutcome: "cancelled",
+          errorCode: "request_aborted",
+        });
         streamController?.abort();
         deps.runner.tools.invalidateCalls(streamedToolCallIds);
       });
@@ -336,6 +363,7 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
             }),
           ),
         });
+        turnSignal.throwIfAborted();
 
         let usage: TokenUsage | undefined;
         let toolIndex = 0;
@@ -410,15 +438,23 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
               ),
             });
             await writeSSE({ data: "[DONE]" });
+            deps.observe?.(context.req.raw, { streamOutcome: "completed" });
+            if (event.result.finishReason === "stop") admission?.done();
           } else if (event.type === "failed") {
+            deps.observe?.(context.req.raw, {
+              streamOutcome: "failed",
+              errorCode: event.error.code,
+            });
             await writeSSE({
               data: JSON.stringify(openAIErrorBody(event.error)),
             });
+            admission?.done();
             return;
           }
         }
       } catch (error) {
-        if (!runnerStarted) permit?.release();
+        streamController?.abort();
+        if (!runnerStarted) admission?.done();
         deps.runner.tools.invalidateCalls(streamedToolCallIds);
         if (
           aborted &&
@@ -427,13 +463,17 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
         ) {
           return;
         }
+        deps.observe?.(context.req.raw, {
+          streamOutcome: "failed",
+          errorCode: openAIErrorBody(error).error.code,
+        });
         throw error;
       }
     };
     try {
       return sendStream(context, executeStream);
     } catch (error) {
-      if (!runnerStarted) permit?.release();
+      admission?.done();
       throw error;
     }
   };

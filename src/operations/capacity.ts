@@ -1,6 +1,7 @@
 import { ProxyError } from "../http/errors.js";
 
 export interface Permit {
+  readonly queueOutcome?: "admitted" | "queued";
   release(): void;
 }
 
@@ -54,7 +55,7 @@ export class TurnCapacity {
       );
     }
     if (this.#permits.size < this.#maxActive) {
-      return Promise.resolve(this.createPermit());
+      return Promise.resolve(this.createPermit("admitted"));
     }
     if (this.#waiters.length >= this.#queueCapacity) {
       return Promise.reject(
@@ -99,9 +100,10 @@ export class TurnCapacity {
     for (const permit of [...this.#permits]) permit.release();
   }
 
-  private createPermit(): Permit {
+  private createPermit(queueOutcome: "admitted" | "queued"): Permit {
     let permit: Permit;
     permit = {
+      queueOutcome,
       release: () => {
         if (!this.#permits.delete(permit)) return;
         this.admitNext();
@@ -117,7 +119,7 @@ export class TurnCapacity {
     const waiter = this.#waiters.shift();
     if (!waiter) return;
     waiter.signal?.removeEventListener("abort", waiter.onAbort);
-    waiter.resolve(this.createPermit());
+    waiter.resolve(this.createPermit("queued"));
   }
 
   private resolveIdle(): void {

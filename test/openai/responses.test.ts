@@ -30,6 +30,7 @@ import {
   startResponseSweeper,
   sweepExpiredResponses,
 } from "../../src/openai/responses.js";
+import { createLogger, type Logger } from "../../src/operations/log.js";
 import { ToolBridge } from "../../src/tools/bridge.js";
 import type {
   ProxyStreamEvent,
@@ -106,6 +107,7 @@ function createFixture(
     supportsImage?: boolean;
     streamWriteFailureAt?: number;
     iteratorFails?: boolean;
+    logger?: Logger;
   } = {},
 ) {
   const store = openStore();
@@ -207,6 +209,8 @@ function createFixture(
     bifrostToken,
     metricsToken: "m".repeat(32),
     host,
+    ...(options.logger === undefined ? {} : { logger: options.logger }),
+    processGeneration: () => host.generation,
     responses: {
       runner,
       store,
@@ -1459,6 +1463,30 @@ describe("POST /v1/responses", () => {
       state: "complete",
       turnId: "turn-1",
     });
+  });
+
+  it("records the released Responses lease at actual stream completion", async () => {
+    const write = vi.fn();
+    const { app } = createFixture({ logger: createLogger(write) });
+    const response = await postResponse(app, {
+      model: "gpt-5.4",
+      input: "private response prompt",
+      stream: true,
+    });
+
+    expect(write).not.toHaveBeenCalled();
+    await response.text();
+
+    expect(write).toHaveBeenCalledOnce();
+    const logged = String(write.mock.calls[0]?.[0]);
+    expect(JSON.parse(logged)).toMatchObject({
+      route: "responses",
+      model: "gpt-5.4",
+      status: 200,
+      streamOutcome: "completed",
+      leaseOutcome: "released",
+    });
+    expect(logged).not.toContain("private response prompt");
   });
 
   it("streams function-call argument and output-item events before suspension", async () => {
