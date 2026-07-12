@@ -88,3 +88,46 @@ Complete. Task 11 adds ChatGPT device authentication, account-aware data-plane r
 - No blocking implementation concern remains.
 - Graphify reports the existing non-blocking version warning: installed skill `0.4.3`, package `0.9.4`. `graphify-out/` remains untracked and intentionally excluded from commits.
 - Root-level `bunx biome check .` scans untracked Graphify cache JSON; the tracked source, tests, and this report are checked explicitly instead.
+
+## Authentication Epoch And Admin Session Follow-Up
+
+### Status
+
+Complete. Review findings for logout/read races, expired admin sessions, and ineffective safe-state coverage are remediated.
+
+### RED Evidence
+
+- Logout notification barrier: `bunx vitest run test/codex/account.test.ts -t "logout|serializes only safe"` failed because `account/updated` started a second read while logout was pending (`expected ... called once, but got 2 times`).
+- Logout versus forced/notification reads: the same command failed because the combined race started a third read (`expected ... called 2 times, but got 3 times`). The deterministic fixtures return an old ChatGPT account from both the pre-logout forced read and the forbidden notification-read path.
+- Expired/forbidden admin session: `bunx vitest run test/admin/app.test.ts -t "bootstraps a fresh session"` failed because fetch calls stopped at `[/api/state, /api/refresh]` instead of bootstrapping `/api/state` again. Vitest also captured the unhandled `Cannot read properties of undefined (reading 'type')` from `render(undefined)`.
+- Safe-state coverage replacement: the literal compile-time `AccountState[]` test was removed. Its replacement drives a real `AccountManager` through ready, login-pending, sanitized error, and signed-out transitions, serializes each through `createAdminApp`, and checks exact state key sets plus forbidden credential substrings.
+
+### GREEN Evidence
+
+- Targeted account/state: `bunx vitest run test/codex/account.test.ts -t "logout|serializes only safe"` exited 0 with 5 tests passed and 9 skipped.
+- Targeted admin script: `bunx vitest run test/admin/app.test.ts -t "bootstraps a fresh session"` exited 0 with 1 test passed and 14 skipped, with no unhandled rejection.
+- Focused: `bunx vitest run test/admin test/codex/account.test.ts test/app.test.ts` exited 0 with 3 files and 36 tests passed.
+- Full: `bun run test` exited 0 with 17 files and 321 tests passed.
+- Protocol: `bun run protocol:check` exited 0 with no generated protocol diff.
+- Typecheck: `bun run typecheck` exited 0 with no diagnostics.
+- Build: `bun run build` exited 0.
+- Biome: `bunx biome check src test` exited 0 with 45 files checked and no fixes required.
+- Graphify: final `graphify update .` exited 0 and rebuilt 17,500 nodes, 20,345 edges, and 1,247 communities. HTML visualization remained skipped above the 5,000-node limit.
+
+### Commit
+
+- Findings remediation: `5adac5b99aead72fe0469aaa8a01ffd4ebe20a70` (`fix: harden account logout races`).
+
+### Self-Review
+
+- One epoch: reads, login, cancel, logout, generation-triggered reads, and notification-triggered reads all acquire or invalidate the same monotonic authentication operation epoch. Completion mutates state only while its captured epoch remains current.
+- Logout authority: logout installs an active epoch before calling App Server, clears the active login, removes readiness immediately, blocks account notifications and generation/read refreshes, then advances the epoch and reasserts `signed_out` on success. Pre-logout reads that later observe an old ChatGPT account cannot restore readiness.
+- Notification barrier: both `account/updated` and `account/login/completed` are ignored while logout is active. They remain delivered through the sole central `HostEventDispatcher`; no competing `CodexHost.events()` iterator was added.
+- Session recovery: mutation responses with status `401` or `403` clear the stale CSRF value and bootstrap `/api/state`. JSON parse failures, failed bootstrap responses, and responses without state show a safe reload message; `render` is called only after a state-presence guard.
+- Safe serialization: ready exposes exactly `type/email/planType`; login-pending exposes exactly `type/loginId/verificationUrl/userCode`; error exposes exactly `type/code`; signed-out exposes only `type`. Serialized responses are checked against token, API-key, credential, `auth.json`, and home-path patterns.
+- Scope and secrets: changes are confined to account operation ordering, admin page recovery, focused tests, and this report. No credentials, generated protocol changes, database files, or graph artifacts are committed; no push or graph publication occurred.
+
+### Concerns
+
+- No blocking concern remains.
+- The existing non-blocking Graphify skill/package version warning remains; `graphify-out/` is intentionally untracked.
