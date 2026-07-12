@@ -47,6 +47,30 @@ const MIGRATIONS: Migration[] = [
       );
     `,
   },
+  {
+    version: 3,
+    sql: `
+      CREATE TABLE response_operations (
+        response_id TEXT PRIMARY KEY,
+        owner_request_id TEXT NOT NULL,
+        action TEXT NOT NULL CHECK (action IN ('start','resume','fork')),
+        state TEXT NOT NULL CHECK (state IN ('active','abandoned')),
+        stored INTEGER NOT NULL CHECK (stored IN (0,1)),
+        parent_response_id TEXT REFERENCES responses(response_id),
+        source_thread_id TEXT,
+        source_turn_id TEXT,
+        thread_id TEXT,
+        turn_id TEXT,
+        process_generation INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+      );
+      CREATE INDEX response_operations_source_idx
+        ON response_operations(source_thread_id, state);
+      CREATE INDEX response_operations_cleanup_idx
+        ON response_operations(state, thread_id);
+    `,
+  },
 ];
 
 interface VersionRow {
@@ -86,6 +110,26 @@ const REQUIRED_COLUMNS = [
         "owner_request_id",
         "kind",
         "process_generation",
+        "expires_at",
+      ],
+    },
+  },
+  {
+    version: 3,
+    tables: {
+      response_operations: [
+        "response_id",
+        "owner_request_id",
+        "action",
+        "state",
+        "stored",
+        "parent_response_id",
+        "source_thread_id",
+        "source_turn_id",
+        "thread_id",
+        "turn_id",
+        "process_generation",
+        "created_at",
         "expires_at",
       ],
     },

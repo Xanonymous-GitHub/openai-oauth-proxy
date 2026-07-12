@@ -42,6 +42,7 @@ export interface ResponsesHandlerDependencies {
   clock: ConversationClock;
   processGeneration(): number;
   deleteThread(threadId: string, signal?: AbortSignal): void | Promise<void>;
+  streamSSE?: typeof streamSSE;
 }
 
 export interface ProxyResponse {
@@ -70,6 +71,14 @@ interface ResponseIdentity {
 export async function sweepExpiredResponses(
   deps: ResponseSweepDependencies,
 ): Promise<void> {
+  for (const threadId of deps.store.abandonedThreads()) {
+    try {
+      await deps.deleteThread(threadId);
+    } catch {
+      return;
+    }
+    deps.store.finishAbandonedThread(threadId);
+  }
   deps.store.expire();
   for (const threadId of deps.store.deletableLeafThreads()) {
     try {
@@ -302,9 +311,26 @@ export function createResponsesHandler(
     assertOrdinaryRequest(request);
     const split = splitInput(request);
     const model = await validatedModel(deps, request, context.req.raw.signal);
+    const history = translateHistory(split.history);
+    const input = translateTurnInput(split.input);
+    const identity: ResponseIdentity = {
+      responseId: opaqueId("resp"),
+      messageId: opaqueId("msg"),
+      createdAt: Math.floor(deps.clock.now() / 1_000),
+      model: model.id,
+    };
     const requestId =
       context.req.header("x-request-id") ?? `req_${randomUUID()}`;
-    const decision = deps.store.decide(request.previous_response_id, requestId);
+    const stored = request.store !== false;
+    const decision = deps.store.reserveOperation({
+      responseId: identity.responseId,
+      ...(request.previous_response_id === undefined
+        ? {}
+        : { previousResponseId: request.previous_response_id }),
+      ownerRequestId: requestId,
+      stored,
+      processGeneration: deps.processGeneration(),
+    });
     if (
       decision.type === "busy" ||
       decision.type === "not_found" ||
@@ -313,12 +339,6 @@ export function createResponsesHandler(
       throw decisionError(decision.type);
     }
 
-    const identity: ResponseIdentity = {
-      responseId: opaqueId("resp"),
-      messageId: opaqueId("msg"),
-      createdAt: Math.floor(deps.clock.now() / 1_000),
-      model: model.id,
-    };
     const command: TurnCommand = {
       action:
         decision.type === "start"
@@ -331,8 +351,8 @@ export function createResponsesHandler(
                 lastTurnId: decision.lastTurnId,
               },
       model: model.id,
-      history: translateHistory(split.history),
-      input: translateTurnInput(split.input),
+      history,
+      input,
       ...(request.instructions === undefined
         ? {}
         : { instructions: request.instructions }),
@@ -343,55 +363,60 @@ export function createResponsesHandler(
         ? {}
         : { outputSchema: request.text.format.schema }),
     };
-    const stored = request.store !== false;
     let openedThreadId: string | undefined;
-    let leaseThreadId =
-      decision.type === "start" ? undefined : decision.threadId;
-    let pending = false;
     const lifecycle: TurnLifecycleCallbacks = {
       opened: (threadId) => {
         openedThreadId = threadId;
-        if (!stored) return;
-        if (decision.type === "start") leaseThreadId = threadId;
-        const created = deps.store.beginPending(
-          identity.responseId,
-          {
-            threadId,
-            ...(decision.type === "start"
-              ? {}
-              : { parentResponseId: decision.responseId }),
-            ...(decision.type === "fork"
-              ? {
-                  parentThreadId: decision.threadId,
-                  forkedAtTurnId: decision.lastTurnId,
-                }
-              : {}),
-            stored: true,
-            processGeneration: deps.processGeneration(),
-          },
-          decision.type === "start" ? requestId : undefined,
-        );
-        if (!created) throw decisionError("busy");
-        pending = true;
+        deps.store.attachOperation(identity.responseId, threadId);
       },
-      release: () => {
-        if (leaseThreadId !== undefined) {
-          deps.store.releaseLease(leaseThreadId, requestId);
-        }
+      started: (_threadId, turnId) => {
+        deps.store.attachOperationTurn(identity.responseId, turnId);
       },
-      ...(stored ? {} : { cleanup: deps.deleteThread }),
     };
 
-    const abandon = async (): Promise<void> => {
-      if (!pending) return;
-      if (
-        openedThreadId !== undefined &&
-        (decision.type === "start" || decision.type === "fork")
-      ) {
-        await deps.deleteThread(openedThreadId);
+    let finalized = false;
+    let cleanupAttempted = false;
+    let cleanupSucceeded = false;
+    let cleanupError: unknown;
+    let abandonPromise: Promise<void> | undefined;
+    const cleanupThread = async (threadId: string): Promise<void> => {
+      if (cleanupAttempted) {
+        if (cleanupError !== undefined) throw cleanupError;
+        return;
       }
-      deps.store.abandon(identity.responseId);
-      pending = false;
+      cleanupAttempted = true;
+      try {
+        await deps.deleteThread(threadId);
+        cleanupSucceeded = true;
+      } catch (error) {
+        cleanupError = error;
+        throw error;
+      }
+    };
+    const abandon = async (): Promise<void> => {
+      if (finalized) return;
+      abandonPromise ??= (async () => {
+        const durableThreadId = deps.store.abandonOperation(
+          identity.responseId,
+          openedThreadId,
+        );
+        const threadId =
+          durableThreadId ??
+          (decision.type === "start" || decision.type === "fork"
+            ? openedThreadId
+            : undefined);
+        if (threadId !== undefined) {
+          if (!cleanupAttempted) await cleanupThread(threadId);
+          if (cleanupSucceeded) deps.store.finishAbandonedThread(threadId);
+        }
+        finalized = true;
+      })();
+      await abandonPromise;
+    };
+    const complete = async (result: TurnResult): Promise<void> => {
+      if (!stored) await cleanupThread(result.threadId);
+      deps.store.completeOperation(identity.responseId);
+      finalized = true;
     };
 
     if (!request.stream) {
@@ -401,10 +426,7 @@ export function createResponsesHandler(
           context.req.raw.signal,
           lifecycle,
         );
-        if (stored) {
-          deps.store.complete(identity.responseId, result.turnId);
-          pending = false;
-        }
+        await complete(result);
         return context.json(responseBody(identity, result));
       } catch (error) {
         await abandon();
@@ -413,7 +435,10 @@ export function createResponsesHandler(
     }
 
     context.header("X-Accel-Buffering", "no");
-    return streamSSE(context, async (stream) => {
+    const sendStream = deps.streamSSE ?? streamSSE;
+    const executeStream = async (
+      stream: Parameters<Parameters<typeof sendStream>[1]>[0],
+    ) => {
       const controller = new AbortController();
       const signal = AbortSignal.any([
         context.req.raw.signal,
@@ -421,47 +446,62 @@ export function createResponsesHandler(
       ]);
       stream.onAbort(() => controller.abort());
       let sequenceNumber = 0;
-      await stream.writeSSE({
-        event: "response.created",
-        data: JSON.stringify({
-          type: "response.created",
-          sequence_number: sequenceNumber,
-          response: {
-            id: identity.responseId,
-            object: "response",
-            created_at: identity.createdAt,
-            status: "in_progress",
-            model: identity.model,
-            output: [],
-          },
-        }),
-      });
-      sequenceNumber += 1;
+      try {
+        await stream.writeSSE({
+          event: "response.created",
+          data: JSON.stringify({
+            type: "response.created",
+            sequence_number: sequenceNumber,
+            response: {
+              id: identity.responseId,
+              object: "response",
+              created_at: identity.createdAt,
+              status: "in_progress",
+              model: identity.model,
+              output: [],
+            },
+          }),
+        });
+        sequenceNumber += 1;
 
-      for await (const event of deps.runner.stream(
-        command,
-        signal,
-        lifecycle,
-      )) {
-        if (event.type === "text.delta") {
-          await stream.writeSSE({
-            event: "response.output_text.delta",
-            data: JSON.stringify({
-              type: "response.output_text.delta",
-              sequence_number: sequenceNumber,
-              item_id: identity.messageId,
-              output_index: 0,
-              content_index: 0,
-              delta: event.delta,
-              logprobs: [],
-            }),
-          });
-          sequenceNumber += 1;
-        } else if (event.type === "completed") {
-          try {
-            if (stored) {
-              deps.store.complete(identity.responseId, event.result.turnId);
-              pending = false;
+        for await (const event of deps.runner.stream(
+          command,
+          signal,
+          lifecycle,
+        )) {
+          if (event.type === "text.delta") {
+            await stream.writeSSE({
+              event: "response.output_text.delta",
+              data: JSON.stringify({
+                type: "response.output_text.delta",
+                sequence_number: sequenceNumber,
+                item_id: identity.messageId,
+                output_index: 0,
+                content_index: 0,
+                delta: event.delta,
+                logprobs: [],
+              }),
+            });
+            sequenceNumber += 1;
+          } else if (event.type === "completed") {
+            if (!stored) {
+              try {
+                await cleanupThread(event.result.threadId);
+              } catch (error) {
+                await abandon().catch(() => undefined);
+                const projected = openAIErrorBody(error).error;
+                await stream.writeSSE({
+                  event: "error",
+                  data: JSON.stringify({
+                    type: "error",
+                    sequence_number: sequenceNumber,
+                    code: projected.code,
+                    message: projected.message,
+                    param: projected.param,
+                  }),
+                });
+                return;
+              }
             }
             const body = responseBody(identity, event.result);
             await stream.writeSSE({
@@ -485,10 +525,17 @@ export function createResponsesHandler(
                 response: body,
               }),
             });
-            sequenceNumber += 1;
-          } catch (error) {
-            await abandon();
-            const projected = openAIErrorBody(error).error;
+            deps.store.completeOperation(identity.responseId);
+            finalized = true;
+            return;
+          } else if (event.type === "failed") {
+            let failure: unknown = event.error;
+            try {
+              await abandon();
+            } catch (error) {
+              failure = error;
+            }
+            const projected = openAIErrorBody(failure).error;
             await stream.writeSSE({
               event: "error",
               data: JSON.stringify({
@@ -499,24 +546,24 @@ export function createResponsesHandler(
                 param: projected.param,
               }),
             });
+            return;
           }
-          return;
-        } else if (event.type === "failed") {
-          await abandon();
-          const projected = openAIErrorBody(event.error).error;
-          await stream.writeSSE({
-            event: "error",
-            data: JSON.stringify({
-              type: "error",
-              sequence_number: sequenceNumber,
-              code: projected.code,
-              message: projected.message,
-              param: projected.param,
-            }),
-          });
-          return;
         }
+        throw new ProxyError(
+          502,
+          "codex_protocol_error",
+          "Codex event stream ended before turn completion",
+        );
+      } catch (error) {
+        await abandon().catch(() => undefined);
+        throw error;
       }
-    });
+    };
+    try {
+      return sendStream(context, executeStream);
+    } catch (error) {
+      await abandon().catch(() => undefined);
+      throw error;
+    }
   };
 }

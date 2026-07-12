@@ -61,7 +61,12 @@ afterEach(() => {
 });
 
 function createFixture(
-  options: { failAt?: number; supportsImage?: boolean } = {},
+  options: {
+    failAt?: number;
+    supportsImage?: boolean;
+    streamWriteFailureAt?: number;
+    iteratorFails?: boolean;
+  } = {},
 ) {
   const store = openStore();
   const invocations: RunnerInvocation[] = [];
@@ -81,6 +86,7 @@ function createFixture(
           : `thread-fork-${call}`;
     const turnId = `turn-${call}`;
     await lifecycle?.opened?.(threadId);
+    await lifecycle?.started?.(threadId, turnId);
     invocations.push({ command, threadId, turnId });
     try {
       if (options.failAt === call) throw new Error("interrupted fixture turn");
@@ -111,17 +117,20 @@ function createFixture(
       _signal?: AbortSignal,
       lifecycle?: TurnLifecycleCallbacks,
     ): AsyncIterable<ProxyStreamEvent> {
+      let result: TurnResult;
       try {
-        const result = await execute(command, lifecycle);
-        yield { type: "text.delta", delta: result.text };
-        if (result.usage) yield { type: "usage", usage: result.usage };
-        yield { type: "completed", result };
+        result = await execute(command, lifecycle);
       } catch {
         yield {
           type: "failed",
           error: new Error("fixture failure") as never,
         };
+        return;
       }
+      yield { type: "text.delta", delta: result.text };
+      if (options.iteratorFails) throw new Error("iterator transport failed");
+      if (result.usage) yield { type: "usage", usage: result.usage };
+      yield { type: "completed", result };
     }),
   } as unknown as TurnRunner;
   const host = {
@@ -157,6 +166,41 @@ function createFixture(
       clock,
       processGeneration: () => host.generation,
       deleteThread,
+      ...(options.streamWriteFailureAt === undefined
+        ? {}
+        : {
+            streamSSE: ((
+              _context: unknown,
+              callback: (stream: unknown) => Promise<void>,
+            ) => {
+              let writes = 0;
+              let payload = "";
+              const body = new ReadableStream({
+                start(controller) {
+                  const stream = {
+                    onAbort() {},
+                    async writeSSE(event: { event?: string; data: string }) {
+                      writes += 1;
+                      if (writes === options.streamWriteFailureAt) {
+                        throw new Error(`stream write ${writes} failed`);
+                      }
+                      payload += `${event.event ? `event: ${event.event}\n` : ""}data: ${event.data}\n\n`;
+                    },
+                  };
+                  void callback(stream).then(
+                    () => {
+                      controller.enqueue(new TextEncoder().encode(payload));
+                      controller.close();
+                    },
+                    (error) => controller.error(error),
+                  );
+                },
+              });
+              return new Response(body, {
+                headers: { "content-type": "text/event-stream" },
+              });
+            }) as never,
+          }),
     },
   });
 
@@ -356,6 +400,200 @@ describe("POST /v1/responses", () => {
 
     expect(response.status).toBe(500);
     expect(deleteThread).toHaveBeenCalledOnce();
+  });
+
+  it("forks store=false continuations without deleting the stored source or its live branches", async () => {
+    const { app, deleteThread, invocations } = createFixture();
+    const first = await postJson(app, { model: "gpt-5.4", input: "first" });
+    const latest = await postJson(app, {
+      model: "gpt-5.4",
+      input: "latest",
+      previous_response_id: first.id,
+    });
+    const branch = await postJson(app, {
+      model: "gpt-5.4",
+      input: "branch",
+      previous_response_id: first.id,
+    });
+
+    await postJson(app, {
+      model: "gpt-5.4",
+      input: "disposable continuation",
+      previous_response_id: latest.id,
+      store: false,
+    });
+    await postJson(app, {
+      model: "gpt-5.4",
+      input: "source survives",
+      previous_response_id: latest.id,
+    });
+    await postJson(app, {
+      model: "gpt-5.4",
+      input: "branch survives",
+      previous_response_id: branch.id,
+    });
+
+    expect(invocations.map(({ command }) => command.action)).toEqual([
+      { type: "start" },
+      { type: "resume", threadId: "thread-1" },
+      { type: "fork", threadId: "thread-1", lastTurnId: "turn-1" },
+      { type: "fork", threadId: "thread-1", lastTurnId: "turn-2" },
+      { type: "resume", threadId: "thread-1" },
+      { type: "resume", threadId: "thread-fork-3" },
+    ]);
+    expect(deleteThread).toHaveBeenCalledOnce();
+    expect(deleteThread).toHaveBeenCalledWith("thread-fork-4");
+  });
+
+  it("durably reserves start, resume, and fork identities before invoking the runner", async () => {
+    const start = createFixture();
+    const startReserve = vi.spyOn(start.store, "reserveOperation");
+    vi.mocked(start.runner.run).mockImplementationOnce(async () => {
+      const responseId = startReserve.mock.calls[0]?.[0].responseId;
+      expect(
+        start.store.lookupOperation(responseId ?? "missing"),
+      ).toMatchObject({
+        action: "start",
+        state: "active",
+      });
+      throw new Error("start crash window");
+    });
+    expect(
+      (await postResponse(start.app, { model: "gpt-5.4", input: "start" }))
+        .status,
+    ).toBe(500);
+    expect(startReserve).toHaveBeenCalledOnce();
+    expect(startReserve.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(start.runner.run).mock.invocationCallOrder[0] ?? Infinity,
+    );
+    const startId = startReserve.mock.calls[0]?.[0].responseId;
+    expect(start.store.lookupOperation(startId ?? "missing")).toBeUndefined();
+
+    const resume = createFixture();
+    const resumeSource = await postJson(resume.app, {
+      model: "gpt-5.4",
+      input: "source",
+    });
+    const resumeReserve = vi.spyOn(resume.store, "reserveOperation");
+    vi.mocked(resume.runner.run).mockImplementationOnce(async () => {
+      const responseId = resumeReserve.mock.calls[0]?.[0].responseId;
+      expect(
+        resume.store.lookupOperation(responseId ?? "missing"),
+      ).toMatchObject({
+        action: "resume",
+        sourceThreadId: "thread-1",
+        state: "active",
+      });
+      throw new Error("resume crash window");
+    });
+    expect(
+      (
+        await postResponse(resume.app, {
+          model: "gpt-5.4",
+          input: "resume",
+          previous_response_id: resumeSource.id,
+        })
+      ).status,
+    ).toBe(500);
+    expect(resumeReserve).toHaveBeenCalledOnce();
+    expect(resumeReserve.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(resume.runner.run).mock.invocationCallOrder.at(-1) ?? Infinity,
+    );
+    const resumeId = resumeReserve.mock.calls[0]?.[0].responseId;
+    expect(resume.store.lookupOperation(resumeId ?? "missing")).toBeUndefined();
+
+    const fork = createFixture();
+    const forkSource = await postJson(fork.app, {
+      model: "gpt-5.4",
+      input: "source",
+    });
+    await postJson(fork.app, {
+      model: "gpt-5.4",
+      input: "descendant",
+      previous_response_id: forkSource.id,
+    });
+    const forkReserve = vi.spyOn(fork.store, "reserveOperation");
+    vi.mocked(fork.runner.run).mockImplementationOnce(async () => {
+      const responseId = forkReserve.mock.calls[0]?.[0].responseId;
+      expect(fork.store.lookupOperation(responseId ?? "missing")).toMatchObject(
+        {
+          action: "fork",
+          sourceThreadId: "thread-1",
+          sourceTurnId: "turn-1",
+          state: "active",
+        },
+      );
+      throw new Error("fork crash window");
+    });
+    expect(
+      (
+        await postResponse(fork.app, {
+          model: "gpt-5.4",
+          input: "fork",
+          previous_response_id: forkSource.id,
+        })
+      ).status,
+    ).toBe(500);
+    expect(forkReserve).toHaveBeenCalledOnce();
+    expect(forkReserve.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(fork.runner.run).mock.invocationCallOrder.at(-1) ?? Infinity,
+    );
+    const forkId = forkReserve.mock.calls[0]?.[0].responseId;
+    expect(fork.store.lookupOperation(forkId ?? "missing")).toBeUndefined();
+  });
+
+  it("deletes a returned new thread once when durable thread attachment fails", async () => {
+    const fixture = createFixture();
+    const reserve = vi.spyOn(fixture.store, "reserveOperation");
+    vi.spyOn(fixture.store, "attachOperation").mockImplementationOnce(() => {
+      throw new Error("SQLite attachment failed");
+    });
+
+    const response = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      input: "start",
+    });
+
+    expect(response.status).toBe(500);
+    const responseId = reserve.mock.calls[0]?.[0].responseId;
+    expect(
+      fixture.store.lookupOperation(responseId ?? "missing"),
+    ).toBeUndefined();
+    expect(fixture.deleteThread).toHaveBeenCalledOnce();
+    expect(fixture.deleteThread).toHaveBeenCalledWith("thread-1");
+  });
+
+  it("retains a returned thread for sweep retry when attachment and deletion fail", async () => {
+    const fixture = createFixture();
+    const reserve = vi.spyOn(fixture.store, "reserveOperation");
+    vi.spyOn(fixture.store, "attachOperation").mockImplementationOnce(() => {
+      throw new Error("SQLite attachment failed");
+    });
+    fixture.deleteThread.mockRejectedValueOnce(new Error("delete failed"));
+
+    const response = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      input: "start",
+    });
+
+    expect(response.status).toBe(500);
+    const responseId = reserve.mock.calls[0]?.[0].responseId;
+    expect(
+      fixture.store.lookupOperation(responseId ?? "missing"),
+    ).toMatchObject({
+      state: "abandoned",
+      threadId: "thread-1",
+    });
+    expect(fixture.deleteThread).toHaveBeenCalledOnce();
+
+    await sweepExpiredResponses({
+      store: fixture.store,
+      deleteThread: fixture.deleteThread,
+    });
+    expect(fixture.deleteThread).toHaveBeenCalledTimes(2);
+    expect(
+      fixture.store.lookupOperation(responseId ?? "missing"),
+    ).toBeUndefined();
   });
 
   it.each([
@@ -567,9 +805,77 @@ describe("POST /v1/responses", () => {
       code: "internal_error",
       message: "Internal server error",
       param: null,
-      sequence_number: 1,
+      sequence_number: 2,
     });
     expect(error).not.toHaveProperty("error");
+  });
+
+  it("abandons and releases a continuation lease when the initial SSE write fails", async () => {
+    const fixture = createFixture({ streamWriteFailureAt: 1 });
+    const first = await postJson(fixture.app, {
+      model: "gpt-5.4",
+      input: "first",
+    });
+    const reserve = vi.spyOn(fixture.store, "reserveOperation");
+    const response = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      input: "stream",
+      previous_response_id: first.id,
+      stream: true,
+    });
+
+    await expect(response.text()).rejects.toThrow("stream write 1 failed");
+    const responseId = reserve.mock.calls[0]?.[0].responseId;
+    expect(
+      fixture.store.lookupOperation(responseId ?? "missing"),
+    ).toBeUndefined();
+    expect(fixture.deleteThread).not.toHaveBeenCalled();
+
+    const retry = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      input: "retry",
+      previous_response_id: first.id,
+    });
+    expect(retry.status).toBe(200);
+  });
+
+  it("abandons and deletes a newly opened thread once when a midstream write fails", async () => {
+    const fixture = createFixture({ streamWriteFailureAt: 2 });
+    const reserve = vi.spyOn(fixture.store, "reserveOperation");
+    const response = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      input: "stream",
+      stream: true,
+    });
+
+    await expect(response.text()).rejects.toThrow("stream write 2 failed");
+    const responseId = reserve.mock.calls[0]?.[0].responseId;
+    expect(
+      fixture.store.lookupOperation(responseId ?? "missing"),
+    ).toBeUndefined();
+    expect(fixture.deleteThread).toHaveBeenCalledOnce();
+    expect(fixture.deleteThread).toHaveBeenCalledWith("thread-1");
+  });
+
+  it("abandons and deletes a newly opened thread once when stream iteration throws", async () => {
+    const fixture = createFixture({
+      iteratorFails: true,
+      streamWriteFailureAt: Number.MAX_SAFE_INTEGER,
+    });
+    const reserve = vi.spyOn(fixture.store, "reserveOperation");
+    const response = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      input: "stream",
+      stream: true,
+    });
+
+    await expect(response.text()).rejects.toThrow("iterator transport failed");
+    const responseId = reserve.mock.calls[0]?.[0].responseId;
+    expect(
+      fixture.store.lookupOperation(responseId ?? "missing"),
+    ).toBeUndefined();
+    expect(fixture.deleteThread).toHaveBeenCalledOnce();
+    expect(fixture.deleteThread).toHaveBeenCalledWith("thread-1");
   });
 });
 
@@ -628,6 +934,24 @@ describe("Responses expiry cleanup", () => {
       "thread-root",
     ]);
     expect(store.deletableLeafThreads()).toEqual([]);
+  });
+
+  it("deletes and finalizes an abandoned attached operation during startup cleanup", async () => {
+    const store = openStore();
+    store.reserveOperation({
+      responseId: "resp_crashed_start",
+      ownerRequestId: "req-crashed-start",
+      stored: true,
+      processGeneration: 1,
+    });
+    store.attachOperation("resp_crashed_start", "thread-crashed-start");
+    store.markContinuationLost(2);
+    const deleteThread = vi.fn(async () => undefined);
+
+    await sweepExpiredResponses({ store, deleteThread });
+
+    expect(deleteThread).toHaveBeenCalledWith("thread-crashed-start");
+    expect(store.lookupOperation("resp_crashed_start")).toBeUndefined();
   });
 
   it("runs startup and hourly cleanup and stops its injected timer cleanly", async () => {

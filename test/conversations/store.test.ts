@@ -412,6 +412,223 @@ describe("ConversationStore", () => {
       type: "busy",
     });
   });
+
+  it("durably reserves start operations before a thread exists and recovers them after restart", () => {
+    const path = databasePath();
+    const first = open(path);
+
+    expect(
+      first.reserveOperation({
+        responseId: "resp_start_operation",
+        ownerRequestId: "req-start",
+        stored: true,
+        processGeneration: 1,
+      }),
+    ).toEqual({ type: "start" });
+    expect(first.lookupOperation("resp_start_operation")).toMatchObject({
+      action: "start",
+      state: "active",
+      stored: true,
+    });
+    close(first);
+
+    const restarted = open(path);
+    expect(restarted.lookupOperation("resp_start_operation")).toBeDefined();
+    restarted.markContinuationLost(2);
+    expect(restarted.lookupOperation("resp_start_operation")).toBeUndefined();
+  });
+
+  it("recovers stale operations when a restarted process reuses the same generation number", () => {
+    const path = databasePath();
+    const first = open(path);
+    first.reserveOperation({
+      responseId: "resp_same_generation",
+      ownerRequestId: "req-same-generation",
+      stored: true,
+      processGeneration: 1,
+    });
+    close(first);
+
+    const restarted = open(path);
+    restarted.markContinuationLost(1);
+
+    expect(restarted.lookupOperation("resp_same_generation")).toBeUndefined();
+  });
+
+  it("atomically reserves resume operations with the source lease and recovers without deleting the source", () => {
+    const path = databasePath();
+    const first = open(path);
+    const sourceId = completeResponse(
+      first,
+      { threadId: "thr_resume_source", stored: true, processGeneration: 1 },
+      "turn_resume_source",
+    );
+
+    expect(
+      first.reserveOperation({
+        responseId: "resp_resume_operation",
+        previousResponseId: sourceId,
+        ownerRequestId: "req-resume",
+        stored: true,
+        processGeneration: 1,
+      }),
+    ).toEqual({
+      type: "resume",
+      responseId: sourceId,
+      threadId: "thr_resume_source",
+      lastTurnId: "turn_resume_source",
+    });
+    expect(
+      open(path).reserveOperation({
+        responseId: "resp_competing_operation",
+        previousResponseId: sourceId,
+        ownerRequestId: "req-competing",
+        stored: true,
+        processGeneration: 1,
+      }),
+    ).toEqual({ type: "busy" });
+    close(first);
+
+    const restarted = open(path);
+    restarted.markContinuationLost(2);
+    expect(restarted.lookupOperation("resp_resume_operation")).toBeUndefined();
+    expect(restarted.lookup(sourceId)).toMatchObject({
+      threadId: "thr_resume_source",
+      state: "complete",
+    });
+    expect(
+      restarted.reserveOperation({
+        responseId: "resp_after_restart",
+        previousResponseId: sourceId,
+        ownerRequestId: "req-after-restart",
+        stored: true,
+        processGeneration: 2,
+      }),
+    ).toMatchObject({ type: "resume" });
+  });
+
+  it("forces disposable continuations to fork inclusively and retains attached forks for crash cleanup", () => {
+    const path = databasePath();
+    const first = open(path);
+    const sourceId = completeResponse(
+      first,
+      { threadId: "thr_fork_source", stored: true, processGeneration: 1 },
+      "turn_fork_source",
+    );
+
+    expect(
+      first.reserveOperation({
+        responseId: "resp_disposable_fork",
+        previousResponseId: sourceId,
+        ownerRequestId: "req-disposable",
+        stored: false,
+        processGeneration: 1,
+      }),
+    ).toEqual({
+      type: "fork",
+      responseId: sourceId,
+      threadId: "thr_fork_source",
+      lastTurnId: "turn_fork_source",
+    });
+    first.attachOperation("resp_disposable_fork", "thr_disposable_fork");
+    close(first);
+
+    const restarted = open(path);
+    restarted.markContinuationLost(2);
+    expect(restarted.lookup(sourceId)).toBeDefined();
+    expect(restarted.lookupOperation("resp_disposable_fork")).toMatchObject({
+      state: "abandoned",
+      threadId: "thr_disposable_fork",
+    });
+    expect(restarted.abandonedThreads()).toEqual(["thr_disposable_fork"]);
+    expect(restarted.finishAbandonedThread("thr_disposable_fork")).toBe(true);
+    expect(restarted.lookupOperation("resp_disposable_fork")).toBeUndefined();
+  });
+
+  it("attaches thread and turn identities before completing a stored operation", () => {
+    const store = open();
+    expect(
+      store.reserveOperation({
+        responseId: "resp_attached",
+        ownerRequestId: "req-attached",
+        stored: true,
+        processGeneration: 1,
+      }),
+    ).toEqual({ type: "start" });
+
+    store.attachOperation("resp_attached", "thr_attached");
+    store.attachOperationTurn("resp_attached", "turn_attached");
+    expect(store.lookupOperation("resp_attached")).toMatchObject({
+      threadId: "thr_attached",
+      turnId: "turn_attached",
+      state: "active",
+    });
+    store.completeOperation("resp_attached");
+
+    expect(store.lookupOperation("resp_attached")).toBeUndefined();
+    expect(store.lookup("resp_attached")).toMatchObject({
+      threadId: "thr_attached",
+      turnId: "turn_attached",
+      state: "complete",
+    });
+  });
+
+  it("does not delete an expired thread while its own lease is live", () => {
+    const store = open(databasePath(), {
+      responseTtlMs: 100,
+      turnLeaseMs: 300,
+      toolLeaseMs: 300,
+    });
+    completeResponse(
+      store,
+      { threadId: "thr_leased_expired", stored: true, processGeneration: 1 },
+      "turn_leased_expired",
+    );
+    expect(
+      store.acquireLease("thr_leased_expired", "req-live", "turn", 1),
+    ).toBe(true);
+
+    now += 100;
+    expect(store.deletableLeafThreads()).toEqual([]);
+    now += 200;
+    expect(store.deletableLeafThreads()).toEqual(["thr_leased_expired"]);
+  });
+
+  it("does not delete an expired ancestor while a descendant lease is live", () => {
+    const store = open(databasePath(), {
+      responseTtlMs: 100,
+      turnLeaseMs: 300,
+      toolLeaseMs: 300,
+    });
+    const rootId = completeResponse(
+      store,
+      { threadId: "thr_leased_root", stored: true, processGeneration: 1 },
+      "turn_leased_root",
+    );
+    completeResponse(
+      store,
+      {
+        threadId: "thr_leased_child",
+        parentResponseId: rootId,
+        parentThreadId: "thr_leased_root",
+        forkedAtTurnId: "turn_leased_root",
+        stored: true,
+        processGeneration: 1,
+      },
+      "turn_leased_child",
+    );
+    expect(store.acquireLease("thr_leased_child", "req-child", "turn", 1)).toBe(
+      true,
+    );
+
+    now += 100;
+    expect(store.deletableLeafThreads()).toEqual([]);
+    now += 200;
+    expect(store.deletableLeafThreads()).toEqual([
+      "thr_leased_child",
+      "thr_leased_root",
+    ]);
+  });
 });
 
 describe("conversation migrations", () => {
@@ -499,7 +716,7 @@ describe("conversation migrations", () => {
       previousApplication
         .prepare("SELECT version FROM schema_migrations ORDER BY version")
         .all(),
-    ).toEqual([{ version: 1 }, { version: 2 }]);
+    ).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
     expect(
       previousApplication
         .prepare(
@@ -527,7 +744,7 @@ describe("conversation migrations", () => {
         id INTEGER PRIMARY KEY,
         value TEXT NOT NULL
       );
-      INSERT INTO schema_migrations(version, applied_at) VALUES (3, ${now});
+      INSERT INTO schema_migrations(version, applied_at) VALUES (4, ${now});
       COMMIT;
     `);
     futureApplication.close();
@@ -540,6 +757,27 @@ describe("conversation migrations", () => {
         )
         .get(),
     ).toEqual({ thread_id: "thr_future", turn_id: "turn_future" });
+    previousApplication.close();
+  });
+
+  it("lets the version-two reader reopen a database after the additive operations migration", () => {
+    const path = databasePath();
+    const store = open(path);
+    close(store);
+
+    const previousApplication = openPreviousReader(path, 2);
+    expect(
+      previousApplication
+        .prepare("SELECT version FROM schema_migrations ORDER BY version")
+        .all(),
+    ).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
+    expect(
+      previousApplication
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'response_operations'",
+        )
+        .get(),
+    ).toEqual({ name: "response_operations" });
     previousApplication.close();
   });
 

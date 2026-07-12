@@ -19,6 +19,10 @@ const DEFAULT_LIFECYCLE_WAIT_MS = 5_000;
 
 type LifecycleCallback = () => void | Promise<void>;
 type OpenedCallback = (threadId: string) => void | Promise<void>;
+type StartedCallback = (
+  threadId: string,
+  turnId: string,
+) => void | Promise<void>;
 type CleanupCallback = (
   threadId: string,
   signal?: AbortSignal,
@@ -26,6 +30,7 @@ type CleanupCallback = (
 
 export interface TurnLifecycleCallbacks {
   opened?: OpenedCallback;
+  started?: StartedCallback;
   release?: LifecycleCallback;
   cleanup?: CleanupCallback;
 }
@@ -383,6 +388,10 @@ export class TurnRunner {
         if (subscription.turnId === undefined) subscription.bind(turnId);
         issueInterrupt();
       }
+
+      await lifecycle?.started?.(threadId, turnId);
+      this.assertGeneration(generation);
+      signal?.throwIfAborted();
 
       let text = "";
       let usage: TokenUsage | undefined;

@@ -316,6 +316,23 @@ describe("TurnRunner", () => {
     expect(host.threadInjectItems).not.toHaveBeenCalled();
   });
 
+  it("reports opened thread and started turn identities at their durable boundaries", async () => {
+    const { events, host } = createHost();
+    const opened = vi.fn();
+    const started = vi.fn();
+    vi.mocked(host.turnStart).mockImplementation(async () => {
+      emitCompletedTurn(events, "thread-1", "turn-1", "final", false);
+      return { turn: fakeTurn({ id: "turn-1" }) };
+    });
+
+    await createRunner(host).run(command(), undefined, { opened, started });
+
+    expect(opened).toHaveBeenCalledWith("thread-1");
+    expect(opened).toHaveBeenCalledBefore(vi.mocked(host.turnStart));
+    expect(started).toHaveBeenCalledWith("thread-1", "turn-1");
+    expect(started).toHaveBeenCalledAfter(vi.mocked(host.turnStart));
+  });
+
   it("resumes and forks with the requested lineage", async () => {
     const { events, host } = createHost();
     vi.mocked(host.turnStart).mockImplementation(async ({ threadId }) => {

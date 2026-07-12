@@ -14,6 +14,8 @@ export interface ConversationStoreOptions {
 
 export type LeaseKind = "turn" | "tool";
 export type ResponseState = "pending" | "complete" | "lost" | "expired";
+export type OperationAction = "start" | "resume" | "fork";
+export type OperationState = "active" | "abandoned";
 
 export type ContinuationDecision =
   | { type: "start" }
@@ -35,6 +37,42 @@ export interface CreatePendingResponse {
   forkedAtTurnId?: string;
   stored: boolean;
   processGeneration: number;
+}
+
+export interface ReserveOperationInput {
+  responseId: string;
+  previousResponseId?: string;
+  ownerRequestId: string;
+  stored: boolean;
+  processGeneration: number;
+}
+
+export type OperationDecision =
+  | { type: "start" }
+  | {
+      type: "resume" | "fork";
+      responseId: string;
+      threadId: string;
+      lastTurnId: string;
+    }
+  | { type: "busy" }
+  | { type: "not_found" }
+  | { type: "lost" };
+
+export interface ResponseOperation {
+  responseId: string;
+  ownerRequestId: string;
+  action: OperationAction;
+  state: OperationState;
+  stored: boolean;
+  parentResponseId?: string;
+  sourceThreadId?: string;
+  sourceTurnId?: string;
+  threadId?: string;
+  turnId?: string;
+  processGeneration: number;
+  createdAt: number;
+  expiresAt: number;
 }
 
 export interface ResponseMapping {
@@ -78,6 +116,22 @@ interface ThreadRow {
   thread_id: string;
 }
 
+interface OperationRow {
+  response_id: string;
+  owner_request_id: string;
+  action: OperationAction;
+  state: OperationState;
+  stored: number;
+  parent_response_id: string | null;
+  source_thread_id: string | null;
+  source_turn_id: string | null;
+  thread_id: string | null;
+  turn_id: string | null;
+  process_generation: number;
+  created_at: number;
+  expires_at: number;
+}
+
 interface Statements {
   insertLineage: StatementSync;
   readLineage: StatementSync;
@@ -99,6 +153,18 @@ interface Statements {
   countThreadResponses: StatementSync;
   deleteThreadResponses: StatementSync;
   deleteThreadLineage: StatementSync;
+  insertOperation: StatementSync;
+  readOperation: StatementSync;
+  hasActiveSourceOperation: StatementSync;
+  attachOperation: StatementSync;
+  attachOperationTurn: StatementSync;
+  insertCompletedResponse: StatementSync;
+  abandonOperation: StatementSync;
+  deleteOperation: StatementSync;
+  abandonOldOperations: StatementSync;
+  deleteOldOperationsWithoutCleanup: StatementSync;
+  abandonedThreads: StatementSync;
+  finishAbandonedThread: StatementSync;
 }
 
 export class ConversationStore {
@@ -206,10 +272,10 @@ export class ConversationStore {
       losePendingResponses: database.prepare(`
         UPDATE responses
         SET state = 'lost', last_access_at = ?, expires_at = ?
-        WHERE state = 'pending' AND process_generation <> ?
+        WHERE state = 'pending'
       `),
       deleteOldGenerationLeases: database.prepare(`
-        DELETE FROM thread_leases WHERE process_generation <> ?
+        DELETE FROM thread_leases
       `),
       hasCompleteDescendant: database.prepare(`
         WITH RECURSIVE descendants(response_id) AS (
@@ -276,6 +342,17 @@ export class ConversationStore {
           WHERE descendants.ancestor_thread_id = expired_threads.thread_id
             AND responses.state <> 'expired'
         )
+          AND NOT EXISTS (
+            SELECT 1 FROM thread_leases
+            WHERE thread_leases.thread_id = expired_threads.thread_id
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM descendants
+            JOIN thread_leases
+              ON thread_leases.thread_id = descendants.descendant_thread_id
+            WHERE descendants.ancestor_thread_id = expired_threads.thread_id
+          )
         ORDER BY COALESCE(depths.depth, 0) DESC, expired_threads.thread_id
       `),
       deletePendingResponse: database.prepare(`
@@ -291,6 +368,82 @@ export class ConversationStore {
       `),
       deleteThreadLineage: database.prepare(`
         DELETE FROM thread_lineage WHERE thread_id = ?
+      `),
+      insertOperation: database.prepare(`
+        INSERT INTO response_operations(
+          response_id, owner_request_id, action, state, stored,
+          parent_response_id, source_thread_id, source_turn_id,
+          thread_id, turn_id, process_generation, created_at, expires_at
+        ) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, NULL, NULL, ?, ?, ?)
+      `),
+      readOperation: database.prepare(`
+        SELECT response_id, owner_request_id, action, state, stored,
+               parent_response_id, source_thread_id, source_turn_id,
+               thread_id, turn_id, process_generation, created_at, expires_at
+        FROM response_operations
+        WHERE response_id = ?
+      `),
+      hasActiveSourceOperation: database.prepare(`
+        SELECT EXISTS(
+          SELECT 1 FROM response_operations
+          WHERE source_thread_id = ? AND state = 'active'
+        ) AS present
+      `),
+      attachOperation: database.prepare(`
+        UPDATE response_operations
+        SET thread_id = ?
+        WHERE response_id = ? AND state = 'active' AND thread_id IS NULL
+      `),
+      attachOperationTurn: database.prepare(`
+        UPDATE response_operations
+        SET turn_id = ?
+        WHERE response_id = ? AND state = 'active'
+          AND thread_id IS NOT NULL AND turn_id IS NULL
+      `),
+      insertCompletedResponse: database.prepare(`
+        INSERT INTO responses(
+          response_id, thread_id, turn_id, parent_response_id,
+          root_response_id, state, stored, process_generation,
+          created_at, last_access_at, expires_at
+        ) VALUES (
+          ?, ?, ?, ?,
+          COALESCE(
+            (SELECT root_response_id FROM responses WHERE response_id = ?),
+            ?
+          ),
+          'complete', 1, ?, ?, ?, ?
+        )
+      `),
+      abandonOperation: database.prepare(`
+        UPDATE response_operations
+        SET state = 'abandoned'
+        WHERE response_id = ? AND state = 'active'
+      `),
+      deleteOperation: database.prepare(`
+        DELETE FROM response_operations WHERE response_id = ?
+      `),
+      abandonOldOperations: database.prepare(`
+        UPDATE response_operations
+        SET state = 'abandoned'
+        WHERE state = 'active'
+          AND action IN ('start', 'fork') AND thread_id IS NOT NULL
+      `),
+      deleteOldOperationsWithoutCleanup: database.prepare(`
+        DELETE FROM response_operations
+        WHERE state = 'active'
+          AND (thread_id IS NULL OR action = 'resume')
+      `),
+      abandonedThreads: database.prepare(`
+        SELECT DISTINCT thread_id
+        FROM response_operations
+        WHERE state = 'abandoned' AND thread_id IS NOT NULL
+          AND action IN ('start', 'fork')
+        ORDER BY thread_id
+      `),
+      finishAbandonedThread: database.prepare(`
+        DELETE FROM response_operations
+        WHERE state = 'abandoned' AND thread_id = ?
+          AND action IN ('start', 'fork')
       `),
     };
   }
@@ -448,17 +601,195 @@ export class ConversationStore {
     );
   }
 
-  markContinuationLost(currentProcessGeneration: number): number {
+  reserveOperation(input: ReserveOperationInput): OperationDecision {
+    return this.#transaction(() => {
+      const now = this.#clock.now();
+      if (input.previousResponseId === undefined) {
+        this.#insertOperation(input, "start", undefined, undefined, now);
+        return { type: "start" };
+      }
+
+      this.#statements.expireResponse.run(input.previousResponseId, now);
+      const response = this.#responseRow(input.previousResponseId);
+      if (!response || response.state === "expired" || response.stored === 0) {
+        return { type: "not_found" };
+      }
+      if (response.state === "lost") return { type: "lost" };
+      if (response.state !== "complete" || response.turn_id === null) {
+        return { type: "busy" };
+      }
+      const active = this.#statements.hasActiveSourceOperation.get(
+        response.thread_id,
+      ) as unknown as ExistsRow;
+      if (active.present !== 0) return { type: "busy" };
+
+      this.#statements.deleteStaleLease.run(response.thread_id, now);
+      const acquired = this.#statements.insertLease.run(
+        response.thread_id,
+        input.ownerRequestId,
+        "turn",
+        input.processGeneration,
+        now + this.#turnLeaseMs,
+      );
+      if (acquired.changes !== 1) return { type: "busy" };
+
+      this.#statements.touchResponse.run(
+        now,
+        now + this.#responseTtlMs,
+        response.response_id,
+      );
+      const descendant = this.#statements.hasCompleteDescendant.get(
+        response.response_id,
+        response.thread_id,
+        response.thread_id,
+      ) as unknown as ExistsRow;
+      const action: OperationAction =
+        !input.stored || descendant.present !== 0 ? "fork" : "resume";
+      this.#insertOperation(
+        input,
+        action,
+        response.thread_id,
+        response.turn_id,
+        now,
+      );
+      return {
+        type: action,
+        responseId: response.response_id,
+        threadId: response.thread_id,
+        lastTurnId: response.turn_id,
+      };
+    });
+  }
+
+  lookupOperation(responseId: string): ResponseOperation | undefined {
+    const row = this.#operationRow(responseId);
+    return row ? mapOperation(row) : undefined;
+  }
+
+  attachOperation(responseId: string, threadId: string): void {
+    this.#transaction(() => {
+      if (
+        this.#statements.attachOperation.run(threadId, responseId).changes !== 1
+      ) {
+        throw new Error(
+          `Active response operation ${responseId} does not exist`,
+        );
+      }
+    });
+  }
+
+  attachOperationTurn(responseId: string, turnId: string): void {
+    this.#transaction(() => {
+      if (
+        this.#statements.attachOperationTurn.run(turnId, responseId).changes !==
+        1
+      ) {
+        throw new Error(
+          `Attached response operation ${responseId} does not exist`,
+        );
+      }
+    });
+  }
+
+  completeOperation(responseId: string): void {
+    this.#transaction(() => {
+      const operation = this.#operationRow(responseId);
+      if (
+        operation?.state !== "active" ||
+        operation.thread_id === null ||
+        operation.turn_id === null
+      ) {
+        throw new Error(
+          `Complete response operation ${responseId} does not exist`,
+        );
+      }
+      const now = this.#clock.now();
+      if (operation.stored === 1) {
+        const parentThreadId =
+          operation.action === "fork" ? operation.source_thread_id : null;
+        const forkedAtTurnId =
+          operation.action === "fork" ? operation.source_turn_id : null;
+        this.#statements.insertLineage.run(
+          operation.thread_id,
+          parentThreadId,
+          forkedAtTurnId,
+        );
+        this.#statements.insertCompletedResponse.run(
+          operation.response_id,
+          operation.thread_id,
+          operation.turn_id,
+          operation.parent_response_id,
+          operation.parent_response_id,
+          operation.response_id,
+          operation.process_generation,
+          operation.created_at,
+          now,
+          now + this.#responseTtlMs,
+        );
+      }
+      this.#releaseOperationLease(operation);
+      this.#statements.deleteOperation.run(responseId);
+    });
+  }
+
+  abandonOperation(
+    responseId: string,
+    openedThreadId?: string,
+  ): string | undefined {
+    return this.#transaction(() => {
+      const operation = this.#operationRow(responseId);
+      if (!operation) return undefined;
+      this.#releaseOperationLease(operation);
+      let cleanupThreadId = operation.thread_id;
+      if (
+        cleanupThreadId === null &&
+        openedThreadId !== undefined &&
+        (operation.action === "start" || operation.action === "fork")
+      ) {
+        if (
+          this.#statements.attachOperation.run(openedThreadId, responseId)
+            .changes !== 1
+        ) {
+          throw new Error(`Could not retain abandoned operation ${responseId}`);
+        }
+        cleanupThreadId = openedThreadId;
+      }
+      if (
+        cleanupThreadId !== null &&
+        (operation.action === "start" || operation.action === "fork")
+      ) {
+        this.#statements.abandonOperation.run(responseId);
+        return cleanupThreadId;
+      }
+      this.#statements.deleteOperation.run(responseId);
+      return undefined;
+    });
+  }
+
+  abandonedThreads(): string[] {
+    return (
+      this.#statements.abandonedThreads.all() as unknown as Array<{
+        thread_id: string;
+      }>
+    ).map((row) => row.thread_id);
+  }
+
+  finishAbandonedThread(threadId: string): boolean {
+    return this.#statements.finishAbandonedThread.run(threadId).changes > 0;
+  }
+
+  markContinuationLost(_currentProcessGeneration: number): number {
     const now = this.#clock.now();
     return this.#transaction(() => {
       this.#statements.expireResponses.run(now);
       const result = this.#statements.losePendingResponses.run(
         now,
         now + this.#responseTtlMs,
-        currentProcessGeneration,
       );
-      this.#statements.deleteOldGenerationLeases.run(currentProcessGeneration);
-      return Number(result.changes);
+      this.#statements.deleteOldGenerationLeases.run();
+      this.#statements.abandonOldOperations.run();
+      const removed = this.#statements.deleteOldOperationsWithoutCleanup.run();
+      return Number(result.changes) + Number(removed.changes);
     });
   }
 
@@ -566,6 +897,42 @@ export class ConversationStore {
       | undefined;
   }
 
+  #operationRow(responseId: string): OperationRow | undefined {
+    return this.#statements.readOperation.get(responseId) as unknown as
+      | OperationRow
+      | undefined;
+  }
+
+  #insertOperation(
+    input: ReserveOperationInput,
+    action: OperationAction,
+    sourceThreadId: string | undefined,
+    sourceTurnId: string | undefined,
+    now: number,
+  ): void {
+    this.#statements.insertOperation.run(
+      input.responseId,
+      input.ownerRequestId,
+      action,
+      input.stored ? 1 : 0,
+      input.previousResponseId ?? null,
+      sourceThreadId ?? null,
+      sourceTurnId ?? null,
+      input.processGeneration,
+      now,
+      now + this.#responseTtlMs,
+    );
+  }
+
+  #releaseOperationLease(operation: OperationRow): void {
+    if (operation.source_thread_id !== null) {
+      this.#statements.releaseLease.run(
+        operation.source_thread_id,
+        operation.owner_request_id,
+      );
+    }
+  }
+
   #transaction<T>(operation: () => T): T {
     this.#database.exec("BEGIN IMMEDIATE");
     try {
@@ -599,6 +966,30 @@ function mapResponse(row: ResponseRow): ResponseMapping {
     processGeneration: row.process_generation,
     createdAt: row.created_at,
     lastAccessAt: row.last_access_at,
+    expiresAt: row.expires_at,
+  };
+}
+
+function mapOperation(row: OperationRow): ResponseOperation {
+  return {
+    responseId: row.response_id,
+    ownerRequestId: row.owner_request_id,
+    action: row.action,
+    state: row.state,
+    stored: row.stored === 1,
+    ...(row.parent_response_id === null
+      ? {}
+      : { parentResponseId: row.parent_response_id }),
+    ...(row.source_thread_id === null
+      ? {}
+      : { sourceThreadId: row.source_thread_id }),
+    ...(row.source_turn_id === null
+      ? {}
+      : { sourceTurnId: row.source_turn_id }),
+    ...(row.thread_id === null ? {} : { threadId: row.thread_id }),
+    ...(row.turn_id === null ? {} : { turnId: row.turn_id }),
+    processGeneration: row.process_generation,
+    createdAt: row.created_at,
     expiresAt: row.expires_at,
   };
 }
