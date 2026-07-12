@@ -5,6 +5,8 @@ import {
   fakeTurn,
 } from "../../src/codex/fake.js";
 import type { CodexHost, HostNotification } from "../../src/codex/host.js";
+import { CodexGenerationChangedError } from "../../src/codex/transport.js";
+import { ProxyError } from "../../src/http/errors.js";
 import type { ProxyStreamEvent, TurnCommand } from "../../src/turns/events.js";
 import { TurnRunner } from "../../src/turns/runner.js";
 
@@ -460,6 +462,22 @@ describe("TurnRunner", () => {
     });
 
     await expect(createRunner(host).run(command())).rejects.toMatchObject({
+      status: 503,
+      code: "codex_generation_changed",
+    });
+  });
+
+  it("normalizes a generation change while awaiting turn events", async () => {
+    const { events, host } = createHost();
+    const result = createRunner(host).run(command());
+
+    await vi.waitFor(() => expect(host.turnStart).toHaveBeenCalledOnce());
+    setGeneration(host, 2);
+    events.fail(new CodexGenerationChangedError());
+
+    const error = await result.catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(ProxyError);
+    expect(error).toMatchObject({
       status: 503,
       code: "codex_generation_changed",
     });

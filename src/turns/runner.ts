@@ -222,9 +222,9 @@ export class TurnRunner {
             threadId === undefined ? undefined : this.#cleanup?.(threadId),
           ),
         ]);
-        if (generationFailure) return generationFailure;
         if (release.status === "rejected") return release.reason;
         if (cleanup.status === "rejected") return cleanup.reason;
+        if (generationFailure) return normalizeError(generationFailure);
         return undefined;
       })();
       return finalization;
