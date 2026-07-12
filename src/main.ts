@@ -101,6 +101,7 @@ export async function start(
     emptyWorkingDirectory: EMPTY_WORKING_DIRECTORY,
     neutralInstructions: NEUTRAL_INSTRUCTIONS,
     timeoutMs: config.turnTimeoutMs,
+    toolTimeoutMs: config.toolTimeoutMs,
   });
   const dataApp = createDataApp({
     health: () => supervisor.health(),

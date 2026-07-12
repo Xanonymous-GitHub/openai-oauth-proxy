@@ -58,13 +58,23 @@ export interface ProxyResponse {
   created_at: number;
   status: "completed";
   model: string;
-  output: Array<{
-    id: string;
-    type: "message";
-    status: "completed";
-    role: "assistant";
-    content: Array<{ type: "output_text"; text: string; annotations: [] }>;
-  }>;
+  output: Array<
+    | {
+        id: string;
+        type: "message";
+        status: "completed";
+        role: "assistant";
+        content: Array<{ type: "output_text"; text: string; annotations: [] }>;
+      }
+    | {
+        id: string;
+        type: "function_call";
+        status: "completed";
+        call_id: string;
+        name: string;
+        arguments: string;
+      }
+  >;
   usage?: { input_tokens: number; output_tokens: number; total_tokens: number };
 }
 
@@ -75,6 +85,19 @@ interface ResponseRecoveryDependencies {
 
 function removeOperationDirectory(cwd: string | undefined): void {
   if (cwd !== undefined) rmSync(cwd, { recursive: true, force: true });
+}
+
+async function loseResponseOperation(
+  deps: Pick<ResponsesHandlerDependencies, "store" | "deleteThread">,
+  responseId: string,
+): Promise<void> {
+  const operationCwd = deps.store.lookupOperation(responseId)?.operationCwd;
+  const cleanupThreadId = deps.store.loseOperation(responseId);
+  if (cleanupThreadId !== undefined) {
+    await deps.deleteThread(cleanupThreadId);
+    deps.store.finishAbandonedThread(cleanupThreadId);
+  }
+  removeOperationDirectory(operationCwd);
 }
 
 async function threadsForOperation(
@@ -217,27 +240,33 @@ async function requestBody(request: Request): Promise<unknown> {
   }
 }
 
-function toolSemanticsError(param: string): ProxyError {
-  return ProxyError.public(
-    400,
-    "unsupported_tool_semantics",
-    "Function tool turns are not supported yet",
-    param,
-  );
-}
-
 function assertOrdinaryRequest(request: ResponsesRequest): void {
-  if (request.tools !== undefined) throw toolSemanticsError("tools");
-  if (request.tool_choice !== undefined)
-    throw toolSemanticsError("tool_choice");
-  if (request.parallel_tool_calls !== undefined) {
-    throw toolSemanticsError("parallel_tool_calls");
-  }
   if (Array.isArray(request.input)) {
     for (const [index, item] of request.input.entries()) {
-      if (!("role" in item)) throw toolSemanticsError(`input.${index}`);
+      if (!("role" in item)) {
+        throw ProxyError.public(
+          400,
+          "unknown_tool_call",
+          "Function call input did not match a pending response",
+          `input.${index}`,
+        );
+      }
     }
   }
+}
+
+function functionOutputs(request: ResponsesRequest) {
+  if (!Array.isArray(request.input)) return [];
+  return request.input
+    .filter(
+      (
+        item,
+      ): item is Extract<
+        ResponsesInputItem,
+        { type: "function_call_output" }
+      > => "type" in item && item.type === "function_call_output",
+    )
+    .map((item) => ({ callId: item.call_id, output: item.output }));
 }
 
 function splitInput(request: ResponsesRequest): {
@@ -325,6 +354,24 @@ function responseBody(
   identity: ResponseIdentity,
   result: TurnResult,
 ): ProxyResponse {
+  if (result.finishReason === "tool_calls") {
+    return {
+      id: identity.responseId,
+      object: "response",
+      created_at: identity.createdAt,
+      status: "completed",
+      model: identity.model,
+      output: (result.toolCalls ?? []).map((call) => ({
+        id: `fc_${call.id.slice("call_".length)}`,
+        type: "function_call" as const,
+        status: "completed" as const,
+        call_id: call.id,
+        name: call.name,
+        arguments: JSON.stringify(call.arguments),
+      })),
+      ...(result.usage === undefined ? {} : { usage: usageBody(result.usage) }),
+    };
+  }
   return {
     id: identity.responseId,
     object: "response",
@@ -382,6 +429,163 @@ export function createResponsesHandler(
 ): Handler {
   return async (context) => {
     const request = parseResponsesRequest(await requestBody(context.req.raw));
+    const validatedTools = deps.runner.tools.toDynamicTools(
+      request.tools ?? [],
+    );
+    const dynamicTools = request.tool_choice === "none" ? [] : validatedTools;
+    const toolFingerprint = deps.runner.tools.fingerprint(dynamicTools);
+    const outputs = functionOutputs(request);
+    if (outputs.length > 0) {
+      if (
+        request.previous_response_id === undefined ||
+        !Array.isArray(request.input) ||
+        request.input.length !== outputs.length
+      ) {
+        throw ProxyError.public(
+          400,
+          "invalid_tool_continuation",
+          "Function outputs require one pending previous response",
+          "input",
+        );
+      }
+      const model = await validatedModel(deps, request, context.req.raw.signal);
+      const mapping = deps.store.lookup(request.previous_response_id);
+      if (!mapping) throw decisionError("not_found");
+      if (mapping.state === "lost") throw decisionError("lost");
+      if (mapping.state !== "pending") {
+        throw ProxyError.public(
+          400,
+          "unknown_tool_call",
+          "Response has no pending function calls",
+          "previous_response_id",
+        );
+      }
+      const continuation = await deps.runner.tools.continue({
+        kind: "responses",
+        responseId: request.previous_response_id,
+        toolFingerprint,
+        results: outputs,
+        signal: context.req.raw.signal,
+      });
+      if (continuation.type === "lost") throw decisionError("lost");
+      if (continuation.type === "incomplete") {
+        throw ProxyError.public(
+          400,
+          "incomplete_tool_outputs",
+          `Missing tool outputs: ${continuation.missingCallIds.join(", ")}`,
+          "input",
+        );
+      }
+      let result: TurnResult;
+      try {
+        result = await continuation.result;
+      } catch (error) {
+        await loseResponseOperation(deps, request.previous_response_id);
+        throw error;
+      }
+      const identity: ResponseIdentity = {
+        responseId: request.previous_response_id,
+        messageId: opaqueId("msg"),
+        createdAt: Math.floor(deps.clock.now() / 1_000),
+        model: model.id,
+      };
+      if (result.finishReason === "stop") {
+        const operationCwd = deps.store.completeOperation(identity.responseId);
+        removeOperationDirectory(operationCwd);
+      }
+      if (!request.stream) return context.json(responseBody(identity, result));
+      const sendStream = deps.streamSSE ?? streamSSE;
+      return sendStream(context, async (stream) => {
+        let sequenceNumber = 0;
+        await stream.writeSSE({
+          event: "response.created",
+          data: JSON.stringify({
+            type: "response.created",
+            sequence_number: sequenceNumber,
+            response: {
+              id: identity.responseId,
+              object: "response",
+              created_at: identity.createdAt,
+              status: "in_progress",
+              model: identity.model,
+              output: [],
+            },
+          }),
+        });
+        sequenceNumber += 1;
+        if (result.finishReason === "stop") {
+          await stream.writeSSE({
+            event: "response.output_text.done",
+            data: JSON.stringify({
+              type: "response.output_text.done",
+              sequence_number: sequenceNumber,
+              item_id: identity.messageId,
+              output_index: 0,
+              content_index: 0,
+              text: result.text,
+              logprobs: [],
+            }),
+          });
+          sequenceNumber += 1;
+        }
+        for (const [outputIndex, call] of (result.toolCalls ?? []).entries()) {
+          const item = responseBody(identity, {
+            ...result,
+            toolCalls: [call],
+          }).output[0];
+          await stream.writeSSE({
+            event: "response.output_item.added",
+            data: JSON.stringify({
+              type: "response.output_item.added",
+              sequence_number: sequenceNumber,
+              output_index: outputIndex,
+              item,
+            }),
+          });
+          sequenceNumber += 1;
+          await stream.writeSSE({
+            event: "response.function_call_arguments.delta",
+            data: JSON.stringify({
+              type: "response.function_call_arguments.delta",
+              sequence_number: sequenceNumber,
+              item_id: item?.id,
+              output_index: outputIndex,
+              delta: JSON.stringify(call.arguments),
+            }),
+          });
+          sequenceNumber += 1;
+          await stream.writeSSE({
+            event: "response.function_call_arguments.done",
+            data: JSON.stringify({
+              type: "response.function_call_arguments.done",
+              sequence_number: sequenceNumber,
+              item_id: item?.id,
+              output_index: outputIndex,
+              arguments: JSON.stringify(call.arguments),
+            }),
+          });
+          sequenceNumber += 1;
+          await stream.writeSSE({
+            event: "response.output_item.done",
+            data: JSON.stringify({
+              type: "response.output_item.done",
+              sequence_number: sequenceNumber,
+              output_index: outputIndex,
+              item,
+            }),
+          });
+          sequenceNumber += 1;
+        }
+        await stream.writeSSE({
+          event: "response.completed",
+          data: JSON.stringify({
+            type: "response.completed",
+            sequence_number: sequenceNumber,
+            response: responseBody(identity, result),
+          }),
+        });
+      });
+    }
     assertOrdinaryRequest(request);
     const split = splitInput(request);
     const model = await validatedModel(deps, request, context.req.raw.signal);
@@ -452,6 +656,7 @@ export function createResponsesHandler(
       ...(request.text === undefined
         ? {}
         : { outputSchema: request.text.format.schema }),
+      ...(dynamicTools.length === 0 ? {} : { dynamicTools }),
     };
     let openedThreadId: string | undefined;
     const lifecycle: TurnLifecycleCallbacks = {
@@ -462,6 +667,23 @@ export function createResponsesHandler(
       started: (_threadId, turnId) => {
         deps.store.attachOperationTurn(identity.responseId, turnId);
       },
+      ...(dynamicTools.length === 0
+        ? {}
+        : {
+            tool: {
+              kind: "responses" as const,
+              responseId: identity.responseId,
+              leaseOwner: requestId,
+              toolFingerprint,
+              suspended: () => {
+                deps.store.suspendOperation(identity.responseId);
+              },
+              lost: async () => {
+                await loseResponseOperation(deps, identity.responseId);
+                finalized = true;
+              },
+            },
+          }),
     };
 
     let finalized = false;
@@ -527,7 +749,7 @@ export function createResponsesHandler(
           context.req.raw.signal,
           lifecycle,
         );
-        await complete(result);
+        if (result.finishReason === "stop") await complete(result);
         return context.json(responseBody(identity, result));
       } catch (error) {
         await abandon();
@@ -547,6 +769,7 @@ export function createResponsesHandler(
       ]);
       stream.onAbort(() => controller.abort());
       let sequenceNumber = 0;
+      let toolOutputIndex = 0;
       try {
         await stream.writeSSE({
           event: "response.created",
@@ -585,7 +808,69 @@ export function createResponsesHandler(
               }),
             });
             sequenceNumber += 1;
+          } else if (event.type === "tool.call") {
+            const item = responseBody(identity, {
+              threadId: "",
+              turnId: "",
+              text: "",
+              finishReason: "tool_calls",
+              toolCalls: [event.call],
+            }).output[0];
+            await stream.writeSSE({
+              event: "response.output_item.added",
+              data: JSON.stringify({
+                type: "response.output_item.added",
+                sequence_number: sequenceNumber,
+                output_index: toolOutputIndex,
+                item,
+              }),
+            });
+            sequenceNumber += 1;
+            await stream.writeSSE({
+              event: "response.function_call_arguments.delta",
+              data: JSON.stringify({
+                type: "response.function_call_arguments.delta",
+                sequence_number: sequenceNumber,
+                item_id: item?.id,
+                output_index: toolOutputIndex,
+                delta: JSON.stringify(event.call.arguments),
+              }),
+            });
+            sequenceNumber += 1;
+            await stream.writeSSE({
+              event: "response.function_call_arguments.done",
+              data: JSON.stringify({
+                type: "response.function_call_arguments.done",
+                sequence_number: sequenceNumber,
+                item_id: item?.id,
+                output_index: toolOutputIndex,
+                arguments: JSON.stringify(event.call.arguments),
+              }),
+            });
+            sequenceNumber += 1;
+            await stream.writeSSE({
+              event: "response.output_item.done",
+              data: JSON.stringify({
+                type: "response.output_item.done",
+                sequence_number: sequenceNumber,
+                output_index: toolOutputIndex,
+                item,
+              }),
+            });
+            sequenceNumber += 1;
+            toolOutputIndex += 1;
           } else if (event.type === "completed") {
+            if (event.result.finishReason === "tool_calls") {
+              await stream.writeSSE({
+                event: "response.completed",
+                data: JSON.stringify({
+                  type: "response.completed",
+                  sequence_number: sequenceNumber,
+                  response: responseBody(identity, event.result),
+                }),
+              });
+              return;
+            }
             if (!stored) {
               try {
                 await cleanupThread(event.result.threadId);
@@ -656,6 +941,9 @@ export function createResponsesHandler(
           "Codex event stream ended before turn completion",
         );
       } catch (error) {
+        if (dynamicTools.length > 0) {
+          deps.runner.tools.invalidateResponse(identity.responseId);
+        }
         await abandon().catch(() => undefined);
         throw error;
       }

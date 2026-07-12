@@ -4,7 +4,11 @@ import {
   fakeThreadStartResponse,
   fakeTurn,
 } from "../../src/codex/fake.js";
-import type { CodexHost, HostNotification } from "../../src/codex/host.js";
+import type {
+  CodexHost,
+  HostNotification,
+  PendingServerToolCall,
+} from "../../src/codex/host.js";
 import { CodexGenerationChangedError } from "../../src/codex/transport.js";
 import { ProxyError } from "../../src/http/errors.js";
 import type { ProxyStreamEvent, TurnCommand } from "../../src/turns/events.js";
@@ -47,6 +51,29 @@ class EventQueue implements AsyncIterable<HostNotification> {
   }
 }
 
+class ToolQueue implements AsyncIterable<PendingServerToolCall> {
+  readonly #values: PendingServerToolCall[] = [];
+  readonly #waiters: Array<
+    (value: IteratorResult<PendingServerToolCall>) => void
+  > = [];
+
+  push(value: PendingServerToolCall): void {
+    const waiter = this.#waiters.shift();
+    if (waiter) waiter({ done: false, value });
+    else this.#values.push(value);
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<PendingServerToolCall> {
+    return {
+      next: async () => {
+        const value = this.#values.shift();
+        if (value) return { done: false, value };
+        return new Promise((resolve) => this.#waiters.push(resolve));
+      },
+    };
+  }
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((settle) => {
@@ -71,6 +98,7 @@ function command(overrides: Partial<TurnCommand> = {}): TurnCommand {
 
 function createHost() {
   const events = new EventQueue();
+  const tools = new ToolQueue();
   const host = {
     generation: 1,
     threadStart: vi.fn(async () => fakeThreadStartResponse()),
@@ -85,9 +113,10 @@ function createHost() {
     turnStart: vi.fn(async () => ({ turn: fakeTurn() })),
     turnInterrupt: vi.fn(async () => ({})),
     events: vi.fn(() => events),
+    toolCalls: vi.fn(() => tools),
   } as unknown as CodexHost;
 
-  return { events, host };
+  return { events, host, tools };
 }
 
 function createRunner(host: CodexHost, overrides = {}) {
@@ -302,6 +331,184 @@ describe("TurnRunner", () => {
     expect(host.threadInjectItems).toHaveBeenCalledBefore(
       vi.mocked(host.turnStart),
     );
+  });
+
+  it("passes dynamic tools only when creating a thread", async () => {
+    const { events, host } = createHost();
+    vi.mocked(host.turnStart).mockImplementation(async () => {
+      emitCompletedTurn(events, "thread-1", "turn-1", "final", false);
+      return { turn: fakeTurn() };
+    });
+    const dynamicTools = [
+      {
+        type: "function" as const,
+        name: "weather",
+        description: "Read weather",
+        inputSchema: { type: "object" },
+      },
+    ];
+
+    await createRunner(host).run(command({ dynamicTools }));
+
+    expect(host.threadStart).toHaveBeenCalledWith(
+      expect.objectContaining({ dynamicTools }),
+      undefined,
+    );
+    expect(host.turnStart).not.toHaveBeenCalledWith(
+      expect.objectContaining({ dynamicTools }),
+      expect.anything(),
+    );
+  });
+
+  it("suspends one live turn for a client tool result and then completes it", async () => {
+    const { events, host, tools } = createHost();
+    const runner = createRunner(host);
+    const release = vi.fn();
+    const cleanup = vi.fn();
+    const dynamicTools = [
+      {
+        type: "function" as const,
+        name: "weather",
+        description: "Read weather",
+        inputSchema: { type: "object" },
+      },
+    ];
+    const fingerprint = runner.tools.fingerprint(dynamicTools);
+    const respond = vi.fn(() => {
+      emitCompletedTurn(events, "thread-1", "turn-1", "sunny", false);
+    });
+    vi.mocked(host.turnStart).mockImplementation(async () => {
+      tools.push({
+        generation: 1,
+        id: "rpc-secret",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          callId: "internal-secret",
+          namespace: null,
+          tool: "weather",
+          arguments: { city: "Paris" },
+        },
+        respond,
+        reject: vi.fn(),
+      });
+      return { turn: fakeTurn() };
+    });
+
+    const suspended = await runner.run(command({ dynamicTools }), undefined, {
+      release,
+      cleanup,
+      tool: {
+        kind: "chat",
+        leaseOwner: "request-1",
+        toolFingerprint: fingerprint,
+      },
+    });
+
+    expect(suspended).toMatchObject({
+      threadId: "thread-1",
+      turnId: "turn-1",
+      finishReason: "tool_calls",
+      toolCalls: [
+        {
+          id: expect.stringMatching(/^call_g1_/),
+          name: "weather",
+          arguments: { city: "Paris" },
+        },
+      ],
+    });
+    expect(release).not.toHaveBeenCalled();
+    expect(cleanup).not.toHaveBeenCalled();
+
+    const callId = suspended.toolCalls?.[0]?.id ?? "missing";
+    const continuation = await runner.tools.continue({
+      kind: "chat",
+      toolFingerprint: fingerprint,
+      results: [{ callId, output: "sunny" }],
+    });
+    expect(continuation.type).toBe("continued");
+    if (continuation.type !== "continued") throw new Error("not continued");
+    await expect(continuation.result).resolves.toMatchObject({
+      text: "sunny",
+      finishReason: "stop",
+    });
+    expect(host.toolCalls).toHaveBeenCalledOnce();
+    expect(host.turnStart).toHaveBeenCalledOnce();
+    expect(respond).toHaveBeenCalledWith({
+      success: true,
+      contentItems: [{ type: "inputText", text: "sunny" }],
+    });
+    expect(release).toHaveBeenCalledOnce();
+    expect(cleanup).toHaveBeenCalledOnce();
+  });
+
+  it("interrupts and finalizes an expired suspended tool turn once", async () => {
+    const { events, host, tools } = createHost();
+    const runner = createRunner(host);
+    const release = vi.fn();
+    const cleanup = vi.fn();
+    const dynamicTools = [
+      {
+        type: "function" as const,
+        name: "lookup",
+        description: "",
+        inputSchema: {},
+      },
+    ];
+    const fingerprint = runner.tools.fingerprint(dynamicTools);
+    vi.mocked(host.turnStart).mockImplementationOnce(async () => {
+      tools.push({
+        generation: 1,
+        id: "rpc-expiring",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          callId: "internal-expiring",
+          namespace: null,
+          tool: "lookup",
+          arguments: {},
+        },
+        respond: vi.fn(),
+        reject: vi.fn(),
+      });
+      return { turn: fakeTurn() };
+    });
+    vi.mocked(host.turnInterrupt).mockImplementationOnce(
+      async ({ threadId, turnId }) => {
+        events.push({
+          method: "turn/completed",
+          params: {
+            threadId,
+            turn: fakeTurn({ id: turnId, status: "interrupted" }),
+          },
+        });
+        return {};
+      },
+    );
+    const suspended = await runner.run(command({ dynamicTools }), undefined, {
+      release,
+      cleanup,
+      tool: {
+        kind: "chat",
+        leaseOwner: "request-1",
+        toolFingerprint: fingerprint,
+      },
+    });
+    const callId = suspended.toolCalls?.[0]?.id ?? "missing";
+
+    runner.tools.expire(Number.MAX_SAFE_INTEGER);
+
+    await vi.waitFor(() => expect(host.turnInterrupt).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(release).toHaveBeenCalledOnce());
+    expect(cleanup).toHaveBeenCalledOnce();
+    await expect(
+      runner.tools.continue({
+        kind: "chat",
+        toolFingerprint: fingerprint,
+        results: [{ callId, output: "late" }],
+      }),
+    ).resolves.toEqual({ type: "lost" });
+    expect(host.turnInterrupt).toHaveBeenCalledOnce();
   });
 
   it("does not inject an empty history", async () => {

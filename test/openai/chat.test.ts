@@ -6,7 +6,11 @@ import {
   fakeThreadStartResponse,
   fakeTurn,
 } from "../../src/codex/fake.js";
-import type { CodexHost, HostNotification } from "../../src/codex/host.js";
+import type {
+  CodexHost,
+  HostNotification,
+  PendingServerToolCall,
+} from "../../src/codex/host.js";
 import { TurnRunner } from "../../src/turns/runner.js";
 
 const bifrostToken = "b".repeat(32);
@@ -41,6 +45,29 @@ class EventQueue implements AsyncIterable<HostNotification> {
         return new Promise((resolve, reject) =>
           this.#waiters.push({ resolve, reject }),
         );
+      },
+    };
+  }
+}
+
+class ToolQueue implements AsyncIterable<PendingServerToolCall> {
+  readonly #values: PendingServerToolCall[] = [];
+  readonly #waiters: Array<
+    (value: IteratorResult<PendingServerToolCall>) => void
+  > = [];
+
+  push(value: PendingServerToolCall): void {
+    const waiter = this.#waiters.shift();
+    if (waiter) waiter({ done: false, value });
+    else this.#values.push(value);
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<PendingServerToolCall> {
+    return {
+      next: async () => {
+        const value = this.#values.shift();
+        if (value) return { done: false, value };
+        return new Promise((resolve) => this.#waiters.push(resolve));
       },
     };
   }
@@ -130,6 +157,7 @@ function createFixture(
   } = {},
 ) {
   const events = new EventQueue();
+  const tools = new ToolQueue();
   const release = vi.fn(async () => undefined);
   const host = {
     generation: 1,
@@ -173,6 +201,7 @@ function createFixture(
       return {};
     }),
     events: vi.fn(() => events),
+    toolCalls: vi.fn(() => tools),
   } as unknown as CodexHost;
   const runner = new TurnRunner({
     host,
@@ -201,7 +230,7 @@ function createFixture(
       },
     },
   });
-  return { app, events, host, release };
+  return { app, events, host, release, tools };
 }
 
 function post(
@@ -329,6 +358,293 @@ describe("POST /v1/chat/completions", () => {
     expect(await response.json()).not.toHaveProperty("usage");
   });
 
+  it("validates tool_choice none definitions but passes no dynamic tools", async () => {
+    const { app, host } = createFixture();
+    const response = await post(app, {
+      ...ordinaryRequest,
+      tools: [
+        {
+          type: "function",
+          function: { name: "lookup", parameters: { type: "object" } },
+        },
+      ],
+      tool_choice: "none",
+    });
+
+    expect(response.status).toBe(200);
+    expect(host.threadStart).toHaveBeenCalledWith(
+      expect.not.objectContaining({ dynamicTools: expect.anything() }),
+      expect.any(AbortSignal),
+    );
+    expect(host.toolCalls).not.toHaveBeenCalled();
+  });
+
+  it("returns lost rather than unknown for an old-generation Chat call ID", async () => {
+    const { app, host } = createFixture();
+    (host as { generation: number }).generation = 2;
+    const response = await post(app, {
+      model: "gpt-5.4",
+      tools: [
+        {
+          type: "function",
+          function: { name: "lookup", parameters: { type: "object" } },
+        },
+      ],
+      messages: [
+        { role: "tool", tool_call_id: "call_g1_stale", content: "late" },
+      ],
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      error: { code: "proxy_continuation_lost" },
+    });
+    expect(host.threadStart).not.toHaveBeenCalled();
+  });
+
+  it("suspends and continues one client-executed function call on the same turn", async () => {
+    const { app, events, host, release, tools } = createFixture();
+    const respond = vi.fn(() => emitCompletion(events, "It is sunny", false));
+    vi.mocked(host.turnStart).mockImplementationOnce(async () => {
+      tools.push({
+        generation: 1,
+        id: "rpc-secret",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          callId: "internal-secret",
+          namespace: null,
+          tool: "weather",
+          arguments: { city: "Paris" },
+        },
+        respond,
+        reject: vi.fn(),
+      });
+      return { turn: fakeTurn() };
+    });
+    const toolsDefinition = [
+      {
+        type: "function" as const,
+        function: {
+          name: "weather",
+          description: "Read weather",
+          parameters: {
+            type: "object",
+            properties: { city: { type: "string" } },
+          },
+        },
+      },
+    ];
+
+    const suspended = await post(app, {
+      ...ordinaryRequest,
+      tools: toolsDefinition,
+      tool_choice: "auto",
+    });
+    const suspendedBody = (await suspended.json()) as {
+      choices: Array<{ message: { tool_calls: Array<{ id: string }> } }>;
+    };
+    const callId =
+      suspendedBody.choices[0]?.message.tool_calls[0]?.id ?? "missing";
+
+    expect(suspended.status).toBe(200);
+    expect(suspendedBody).toMatchObject({
+      choices: [
+        {
+          message: {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: expect.stringMatching(/^call_g1_/),
+                type: "function",
+                function: {
+                  name: "weather",
+                  arguments: '{"city":"Paris"}',
+                },
+              },
+            ],
+          },
+          finish_reason: "tool_calls",
+        },
+      ],
+    });
+    expect(host.threadDelete).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+
+    const completed = await post(app, {
+      model: "gpt-5.4",
+      tools: toolsDefinition,
+      tool_choice: "auto",
+      messages: [
+        ...ordinaryRequest.messages,
+        suspendedBody.choices[0]?.message,
+        { role: "tool", tool_call_id: callId, content: "sunny" },
+      ],
+    });
+
+    expect(completed.status).toBe(200);
+    expect(await completed.json()).toMatchObject({
+      choices: [
+        {
+          message: { role: "assistant", content: "It is sunny" },
+          finish_reason: "stop",
+        },
+      ],
+    });
+    expect(host.turnStart).toHaveBeenCalledOnce();
+    expect(respond).toHaveBeenCalledWith({
+      success: true,
+      contentItems: [{ type: "inputText", text: "sunny" }],
+    });
+    expect(host.threadDelete).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it("fans in parallel tool outputs without resolving a partial submission", async () => {
+    const { app, events, host, tools } = createFixture();
+    let responses = 0;
+    const respond = vi.fn(() => {
+      responses += 1;
+      if (responses === 2) emitCompletion(events, "combined", false);
+    });
+    vi.mocked(host.turnStart).mockImplementationOnce(async () => {
+      for (const [id, tool] of [
+        ["one", "first"],
+        ["two", "second"],
+      ] as const) {
+        tools.push({
+          generation: 1,
+          id,
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            callId: `internal-${id}`,
+            namespace: null,
+            tool,
+            arguments: {},
+          },
+          respond,
+          reject: vi.fn(),
+        });
+      }
+      return { turn: fakeTurn() };
+    });
+    const definitions = ["first", "second"].map((name) => ({
+      type: "function" as const,
+      function: { name, parameters: { type: "object" } },
+    }));
+    const suspended = await post(app, {
+      ...ordinaryRequest,
+      tools: definitions,
+    });
+    const body = (await suspended.json()) as {
+      choices: Array<{ message: { tool_calls: Array<{ id: string }> } }>;
+    };
+    const calls = body.choices[0]?.message.tool_calls ?? [];
+
+    const partial = await post(app, {
+      model: "gpt-5.4",
+      tools: definitions,
+      messages: [
+        ...ordinaryRequest.messages,
+        body.choices[0]?.message,
+        { role: "tool", tool_call_id: calls[0]?.id, content: "one" },
+      ],
+    });
+    expect(partial.status).toBe(400);
+    expect(respond).not.toHaveBeenCalled();
+
+    const complete = await post(app, {
+      model: "gpt-5.4",
+      tools: definitions,
+      messages: [
+        ...ordinaryRequest.messages,
+        body.choices[0]?.message,
+        { role: "tool", tool_call_id: calls[1]?.id, content: "two" },
+        { role: "tool", tool_call_id: calls[0]?.id, content: "one" },
+      ],
+    });
+    expect(complete.status).toBe(200);
+    expect(respond).toHaveBeenCalledTimes(2);
+    expect(host.turnStart).toHaveBeenCalledOnce();
+  });
+
+  it("supports repeated tool-call loops without starting another turn", async () => {
+    const { app, events, host, tools } = createFixture();
+    const pushCall = (tool: string, id: string, onRespond: () => void) => {
+      tools.push({
+        generation: 1,
+        id,
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          callId: `internal-${id}`,
+          namespace: null,
+          tool,
+          arguments: {},
+        },
+        respond: vi.fn(onRespond),
+        reject: vi.fn(),
+      });
+    };
+    vi.mocked(host.turnStart).mockImplementationOnce(async () => {
+      pushCall("first", "one", () =>
+        pushCall("second", "two", () => emitCompletion(events, "done", false)),
+      );
+      return { turn: fakeTurn() };
+    });
+    const definitions = ["first", "second"].map((name) => ({
+      type: "function" as const,
+      function: { name, parameters: { type: "object" } },
+    }));
+    const first = await post(app, { ...ordinaryRequest, tools: definitions });
+    const firstBody = (await first.json()) as {
+      choices: Array<{
+        message: { tool_calls: Array<{ id: string }> };
+      }>;
+    };
+    const firstMessage = firstBody.choices[0]?.message;
+    const firstCall = firstMessage?.tool_calls[0]?.id;
+    if (!firstMessage || !firstCall) throw new Error("Missing first tool call");
+    const second = await post(app, {
+      model: "gpt-5.4",
+      tools: definitions,
+      messages: [
+        ...ordinaryRequest.messages,
+        firstMessage,
+        { role: "tool", tool_call_id: firstCall, content: "one" },
+      ],
+    });
+    const secondBody = (await second.json()) as {
+      choices: Array<{
+        message: { tool_calls: Array<{ id: string }> };
+      }>;
+    };
+    const secondMessage = secondBody.choices[0]?.message;
+    const secondCall = secondMessage?.tool_calls[0]?.id;
+    if (!secondMessage || !secondCall)
+      throw new Error("Missing second tool call");
+    const completed = await post(app, {
+      model: "gpt-5.4",
+      tools: definitions,
+      messages: [
+        ...ordinaryRequest.messages,
+        firstMessage,
+        { role: "tool", tool_call_id: firstCall, content: "one" },
+        secondMessage,
+        { role: "tool", tool_call_id: secondCall, content: "two" },
+      ],
+    });
+
+    expect(completed.status).toBe(200);
+    expect(await completed.json()).toMatchObject({
+      choices: [{ message: { content: "done" }, finish_reason: "stop" }],
+    });
+    expect(host.turnStart).toHaveBeenCalledOnce();
+    expect(host.toolCalls).toHaveBeenCalledOnce();
+  });
+
   it.each([
     [
       "an unknown model",
@@ -341,26 +657,6 @@ describe("POST /v1/chat/completions", () => {
       { ...ordinaryRequest, reasoning_effort: "medium" },
       400,
       "unsupported_reasoning_effort",
-    ],
-    [
-      "function tools",
-      {
-        ...ordinaryRequest,
-        tools: [
-          {
-            type: "function",
-            function: { name: "lookup", parameters: { type: "object" } },
-          },
-        ],
-      },
-      400,
-      "unsupported_tool_semantics",
-    ],
-    [
-      "an empty tools field",
-      { ...ordinaryRequest, tools: [] },
-      400,
-      "unsupported_tool_semantics",
     ],
     [
       "assistant tool calls",
@@ -382,7 +678,7 @@ describe("POST /v1/chat/completions", () => {
         ],
       },
       400,
-      "unsupported_tool_semantics",
+      "unknown_tool_call",
     ],
     [
       "terminal tool output",
@@ -391,7 +687,7 @@ describe("POST /v1/chat/completions", () => {
         messages: [{ role: "tool", tool_call_id: "call-1", content: "result" }],
       },
       400,
-      "unsupported_tool_semantics",
+      "unknown_tool_call",
     ],
   ])("rejects %s before creating a thread", async (_name, request, status, code) => {
     const { app, host } = createFixture();
@@ -506,6 +802,80 @@ describe("POST /v1/chat/completions", () => {
     expect(payload).not.toContain("item/agentMessage/delta");
     expect(payload).not.toContain("thread/tokenUsage/updated");
     expect(host.threadDelete).toHaveBeenCalledOnce();
+  });
+
+  it("streams tool calls to an intentional terminal tool_calls chunk", async () => {
+    const { app, events, host, tools } = createFixture();
+    const respond = vi.fn(() => emitCompletion(events, "done", false));
+    vi.mocked(host.turnStart).mockImplementationOnce(async () => {
+      tools.push({
+        generation: 1,
+        id: "rpc-stream",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          callId: "internal-stream",
+          namespace: null,
+          tool: "lookup",
+          arguments: { id: 1 },
+        },
+        respond,
+        reject: vi.fn(),
+      });
+      return { turn: fakeTurn() };
+    });
+    const definitions = [
+      {
+        type: "function" as const,
+        function: { name: "lookup", parameters: { type: "object" } },
+      },
+    ];
+    const response = await post(app, {
+      ...ordinaryRequest,
+      tools: definitions,
+      stream: true,
+    });
+    const payload = await response.text();
+    const chunks = payload
+      .trim()
+      .split("\n\n")
+      .slice(0, -1)
+      .map((frame) => JSON.parse(frame.replace(/^data: /, "")));
+    const toolCall = chunks.find(
+      (chunk) => chunk.choices[0].delta.tool_calls !== undefined,
+    ).choices[0].delta.tool_calls[0];
+
+    expect(toolCall).toMatchObject({
+      index: 0,
+      id: expect.stringMatching(/^call_g1_/),
+      function: { name: "lookup", arguments: '{"id":1}' },
+    });
+    expect(chunks.at(-1)?.choices[0].finish_reason).toBe("tool_calls");
+    expect(payload).toContain("data: [DONE]");
+    expect(host.turnInterrupt).not.toHaveBeenCalled();
+    expect(host.threadDelete).not.toHaveBeenCalled();
+
+    const completed = await post(app, {
+      model: "gpt-5.4",
+      tools: definitions,
+      messages: [
+        ...ordinaryRequest.messages,
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: toolCall.id,
+              type: "function",
+              function: { name: "lookup", arguments: '{"id":1}' },
+            },
+          ],
+        },
+        { role: "tool", tool_call_id: toolCall.id, content: "found" },
+      ],
+    });
+    expect(completed.status).toBe(200);
+    expect(host.turnStart).toHaveBeenCalledOnce();
   });
 
   it("emits a sanitized SSE error when a stream fails before text", async () => {

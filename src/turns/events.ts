@@ -1,9 +1,11 @@
 import type { ResponseItem } from "../codex/generated/ResponseItem.js";
 import type { JsonValue } from "../codex/generated/serde_json/JsonValue.js";
+import type { DynamicToolSpec } from "../codex/generated/v2/DynamicToolSpec.js";
 import type { UserInput } from "../codex/generated/v2/UserInput.js";
 import type { CodexHost, HostNotification } from "../codex/host.js";
 import { CodexGenerationChangedError } from "../codex/transport.js";
 import type { ProxyError } from "../http/errors.js";
+import type { ExternalToolCall } from "../tools/bridge.js";
 
 export type ThreadAction =
   | { type: "start" }
@@ -25,19 +27,22 @@ export interface TurnCommand {
   instructions?: string;
   effort?: "minimal" | "low" | "medium" | "high" | "xhigh";
   outputSchema?: JsonValue;
+  dynamicTools?: DynamicToolSpec[];
 }
 
 export interface TurnResult {
   threadId: string;
   turnId: string;
   text: string;
-  finishReason: "stop";
+  finishReason: "stop" | "tool_calls";
+  toolCalls?: ExternalToolCall[];
   usage?: TokenUsage;
 }
 
 export type ProxyStreamEvent =
   | { type: "text.delta"; delta: string }
   | { type: "usage"; usage: TokenUsage }
+  | { type: "tool.call"; call: ExternalToolCall }
   | { type: "completed"; result: TurnResult }
   | { type: "failed"; error: ProxyError };
 

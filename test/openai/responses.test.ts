@@ -13,8 +13,14 @@ import {
   fakeModel,
   fakeModelListResponse,
   fakeThread,
+  fakeThreadStartResponse,
+  fakeTurn,
 } from "../../src/codex/fake.js";
-import type { CodexHost } from "../../src/codex/host.js";
+import type {
+  CodexHost,
+  HostNotification,
+  PendingServerToolCall,
+} from "../../src/codex/host.js";
 import {
   type ConversationClock,
   ConversationStore,
@@ -24,6 +30,7 @@ import {
   startResponseSweeper,
   sweepExpiredResponses,
 } from "../../src/openai/responses.js";
+import { ToolBridge } from "../../src/tools/bridge.js";
 import type {
   ProxyStreamEvent,
   TurnCommand,
@@ -33,6 +40,7 @@ import type {
   TurnLifecycleCallbacks,
   TurnRunner,
 } from "../../src/turns/runner.js";
+import { TurnRunner as ActualTurnRunner } from "../../src/turns/runner.js";
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
 const bifrostToken = "b".repeat(32);
@@ -47,6 +55,27 @@ interface RunnerInvocation {
   command: TurnCommand;
   threadId: string;
   turnId: string;
+}
+
+class AsyncQueue<T> implements AsyncIterable<T> {
+  readonly #values: T[] = [];
+  readonly #waiters: Array<(value: IteratorResult<T>) => void> = [];
+
+  push(value: T): void {
+    const waiter = this.#waiters.shift();
+    if (waiter) waiter({ done: false, value });
+    else this.#values.push(value);
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<T> {
+    return {
+      next: async () => {
+        const value = this.#values.shift();
+        if (value) return { done: false, value };
+        return new Promise((resolve) => this.#waiters.push(resolve));
+      },
+    };
+  }
 }
 
 function openStore(): ConversationStore {
@@ -169,6 +198,7 @@ function createFixture(
       }),
     ),
   } as unknown as CodexHost;
+  (runner as unknown as { tools: ToolBridge }).tools = new ToolBridge({ host });
   const app = createDataApp({
     health: () => true,
     ready: () => true,
@@ -233,6 +263,93 @@ function createFixture(
     store,
     streamEvents,
   };
+}
+
+function createToolFixture() {
+  const store = openStore();
+  const operationWorkingDirectory = mkdtempSync(
+    join(tmpdir(), "responses-tool-operations-"),
+  );
+  directories.add(operationWorkingDirectory);
+  const events = new AsyncQueue<HostNotification>();
+  const tools = new AsyncQueue<PendingServerToolCall>();
+  const deleteThread = vi.fn(async () => undefined);
+  const host = {
+    generation: 1,
+    modelList: vi.fn(async () =>
+      fakeModelListResponse({
+        data: [fakeModel({ id: "gpt-5.4", model: "gpt-5.4" })],
+      }),
+    ),
+    threadStart: vi.fn(async () => fakeThreadStartResponse()),
+    threadResume: vi.fn(),
+    threadFork: vi.fn(),
+    threadInjectItems: vi.fn(async () => ({})),
+    threadDelete: vi.fn(async () => ({})),
+    turnStart: vi.fn(async () => ({ turn: fakeTurn() })),
+    turnInterrupt: vi.fn(async ({ threadId, turnId }) => {
+      events.push({
+        generation: host.generation,
+        method: "turn/completed",
+        params: {
+          threadId,
+          turn: fakeTurn({ id: turnId, status: "interrupted" }),
+        },
+      });
+      return {};
+    }),
+    events: vi.fn(() => events),
+    toolCalls: vi.fn(() => tools),
+  } as unknown as CodexHost;
+  const runner = new ActualTurnRunner({
+    host,
+    emptyWorkingDirectory: "/tmp/work",
+    neutralInstructions: "Use only the supplied interface.",
+    interruptWaitMs: 10,
+  });
+  const app = createDataApp({
+    health: () => true,
+    ready: () => true,
+    draining: () => false,
+    bifrostToken,
+    metricsToken: "m".repeat(32),
+    host,
+    responses: {
+      runner,
+      store,
+      clock,
+      processGeneration: () => host.generation,
+      operationWorkingDirectory,
+      deleteThread,
+    },
+  });
+  const complete = (text: string) => {
+    events.push({
+      generation: host.generation,
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        completedAtMs: now,
+        item: {
+          type: "agentMessage",
+          id: "message-1",
+          text,
+          phase: null,
+          memoryCitation: null,
+        },
+      },
+    });
+    events.push({
+      generation: host.generation,
+      method: "turn/completed",
+      params: {
+        threadId: "thread-1",
+        turn: fakeTurn({ id: "turn-1", status: "completed" }),
+      },
+    });
+  };
+  return { app, complete, deleteThread, events, host, runner, store, tools };
 }
 
 async function postResponse(
@@ -396,6 +513,274 @@ describe("POST /v1/responses", () => {
         properties: { answer: { type: "string" } },
       },
     });
+  });
+
+  it("durably suspends and completes a function call on the original response turn", async () => {
+    const fixture = createToolFixture();
+    const respond = vi.fn(() => fixture.complete("weather complete"));
+    vi.mocked(fixture.host.turnStart).mockImplementationOnce(async () => {
+      fixture.tools.push({
+        generation: 1,
+        id: "rpc-secret",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          callId: "internal-secret",
+          namespace: null,
+          tool: "weather",
+          arguments: { city: "Paris" },
+        },
+        respond,
+        reject: vi.fn(),
+      });
+      return { turn: fakeTurn() };
+    });
+    const definitions = [
+      {
+        type: "function" as const,
+        name: "weather",
+        description: "Read weather",
+        parameters: {
+          type: "object",
+          properties: { city: { type: "string" } },
+        },
+      },
+    ];
+
+    const suspended = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      input: "weather",
+      tools: definitions,
+    });
+    const body = (await suspended.json()) as {
+      id: string;
+      output: Array<{ type: string; call_id: string }>;
+    };
+    const callId = body.output[0]?.call_id ?? "missing";
+
+    expect(suspended.status).toBe(200);
+    expect(body).toMatchObject({
+      id: expect.stringMatching(/^resp_/),
+      status: "completed",
+      output: [
+        {
+          type: "function_call",
+          status: "completed",
+          call_id: expect.stringMatching(/^call_g1_/),
+          name: "weather",
+          arguments: '{"city":"Paris"}',
+        },
+      ],
+    });
+    expect(fixture.store.lookup(body.id)).toMatchObject({ state: "pending" });
+    expect(fixture.store.lookupOperation(body.id)).toMatchObject({
+      state: "active",
+      threadId: "thread-1",
+      turnId: "turn-1",
+    });
+
+    const completed = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      previous_response_id: body.id,
+      tools: definitions,
+      input: [
+        { type: "function_call_output", call_id: callId, output: "sunny" },
+      ],
+    });
+
+    expect(completed.status).toBe(200);
+    expect(await completed.json()).toMatchObject({
+      id: body.id,
+      output: [
+        {
+          type: "message",
+          content: [{ type: "output_text", text: "weather complete" }],
+        },
+      ],
+    });
+    expect(fixture.host.turnStart).toHaveBeenCalledOnce();
+    expect(respond).toHaveBeenCalledWith({
+      success: true,
+      contentItems: [{ type: "inputText", text: "sunny" }],
+    });
+    expect(fixture.store.lookup(body.id)).toMatchObject({ state: "complete" });
+    expect(fixture.store.lookupOperation(body.id)).toBeUndefined();
+  });
+
+  it("supports parallel and repeated Responses tool loops on one turn", async () => {
+    const fixture = createToolFixture();
+    let parallelResults = 0;
+    const pushCall = (
+      id: string,
+      tool: string,
+      onRespond: () => void,
+    ): void => {
+      fixture.tools.push({
+        generation: 1,
+        id,
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          callId: `internal-${id}`,
+          namespace: null,
+          tool,
+          arguments: {},
+        },
+        respond: vi.fn(onRespond),
+        reject: vi.fn(),
+      });
+    };
+    vi.mocked(fixture.host.turnStart).mockImplementationOnce(async () => {
+      for (const [id, tool] of [
+        ["one", "first"],
+        ["two", "second"],
+      ] as const) {
+        pushCall(id, tool, () => {
+          parallelResults += 1;
+          if (parallelResults === 2) {
+            pushCall("three", "third", () => fixture.complete("all done"));
+          }
+        });
+      }
+      return { turn: fakeTurn() };
+    });
+    const definitions = ["first", "second", "third"].map((name) => ({
+      type: "function" as const,
+      name,
+      parameters: { type: "object" },
+    }));
+    const first = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      input: "start",
+      tools: definitions,
+    });
+    const firstBody = (await first.json()) as {
+      id: string;
+      output: Array<{ call_id: string }>;
+    };
+    const second = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      previous_response_id: firstBody.id,
+      tools: definitions,
+      input: firstBody.output.map((call, index) => ({
+        type: "function_call_output",
+        call_id: call.call_id,
+        output: `result-${index}`,
+      })),
+    });
+    const secondBody = (await second.json()) as {
+      id: string;
+      output: Array<{ call_id: string }>;
+    };
+
+    expect(secondBody.id).toBe(firstBody.id);
+    expect(secondBody.output).toHaveLength(1);
+    expect(fixture.store.lookup(firstBody.id)).toMatchObject({
+      state: "pending",
+    });
+
+    const completed = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      previous_response_id: firstBody.id,
+      tools: definitions,
+      input: [
+        {
+          type: "function_call_output",
+          call_id: secondBody.output[0]?.call_id,
+          output: "third result",
+        },
+      ],
+    });
+    expect(completed.status).toBe(200);
+    expect(await completed.json()).toMatchObject({
+      id: firstBody.id,
+      output: [
+        {
+          type: "message",
+          content: [{ type: "output_text", text: "all done" }],
+        },
+      ],
+    });
+    expect(fixture.host.turnStart).toHaveBeenCalledOnce();
+    expect(fixture.host.toolCalls).toHaveBeenCalledOnce();
+  });
+
+  it("returns stable lost semantics for an old-generation pending response", async () => {
+    const fixture = createToolFixture();
+    vi.mocked(fixture.host.turnStart).mockImplementationOnce(async () => {
+      fixture.tools.push({
+        generation: 1,
+        id: "rpc-secret",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          callId: "internal-secret",
+          namespace: null,
+          tool: "lookup",
+          arguments: {},
+        },
+        respond: vi.fn(),
+        reject: vi.fn(),
+      });
+      return { turn: fakeTurn() };
+    });
+    const definitions = [
+      { type: "function" as const, name: "lookup", parameters: {} },
+    ];
+    const suspended = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      input: "lookup",
+      tools: definitions,
+    });
+    const body = (await suspended.json()) as {
+      id: string;
+      output: Array<{ call_id: string }>;
+    };
+    (fixture.host as { generation: number }).generation = 2;
+
+    const continuation = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      previous_response_id: body.id,
+      tools: definitions,
+      input: [
+        {
+          type: "function_call_output",
+          call_id: body.output[0]?.call_id ?? "missing",
+          output: "found",
+        },
+      ],
+    });
+
+    expect(continuation.status).toBe(409);
+    expect(await continuation.json()).toMatchObject({
+      error: { code: "proxy_continuation_lost" },
+    });
+    await vi.waitFor(() =>
+      expect(fixture.store.lookup(body.id)).toMatchObject({ state: "lost" }),
+    );
+    expect(fixture.host.turnInterrupt).not.toHaveBeenCalled();
+  });
+
+  it("returns response_not_found for outputs targeting an unknown response", async () => {
+    const { app, invocations } = createFixture();
+    const response = await postResponse(app, {
+      model: "gpt-5.4",
+      previous_response_id: "resp_missing",
+      tools: [{ type: "function", name: "lookup", parameters: {} }],
+      input: [
+        {
+          type: "function_call_output",
+          call_id: "call_g1_unknown",
+          output: "found",
+        },
+      ],
+    });
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({
+      error: { code: "response_not_found" },
+    });
+    expect(invocations).toEqual([]);
   });
 
   it("returns an opaque store=false ID without creating a resumable mapping", async () => {
@@ -637,15 +1022,6 @@ describe("POST /v1/responses", () => {
 
   it.each([
     [
-      "stored tools",
-      {
-        model: "gpt-5.4",
-        input: "tool",
-        tools: [{ type: "function", name: "lookup", parameters: {} }],
-      },
-      "unsupported_tool_semantics",
-    ],
-    [
       "disposable tools",
       {
         model: "gpt-5.4",
@@ -668,7 +1044,7 @@ describe("POST /v1/responses", () => {
           },
         ],
       },
-      "unsupported_tool_semantics",
+      "unknown_tool_call",
     ],
   ])("rejects %s before model lookup or thread start", async (_name, request, code) => {
     const { app, host, invocations } = createFixture();
@@ -813,6 +1189,88 @@ describe("POST /v1/responses", () => {
       state: "complete",
       turnId: "turn-1",
     });
+  });
+
+  it("streams function-call argument and output-item events before suspension", async () => {
+    const fixture = createToolFixture();
+    const respond = vi.fn(() => fixture.complete("stream complete"));
+    vi.mocked(fixture.host.turnStart).mockImplementationOnce(async () => {
+      fixture.tools.push({
+        generation: 1,
+        id: "rpc-stream",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          callId: "internal-stream",
+          namespace: null,
+          tool: "lookup",
+          arguments: { id: 1 },
+        },
+        respond,
+        reject: vi.fn(),
+      });
+      return { turn: fakeTurn() };
+    });
+    const definitions = [
+      {
+        type: "function" as const,
+        name: "lookup",
+        parameters: { type: "object" },
+      },
+    ];
+    const response = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      input: "stream tool",
+      tools: definitions,
+      stream: true,
+    });
+    const frames = (await response.text()).trim().split("\n\n");
+    const projected = frames.map((frame) => {
+      const lines = frame.split("\n");
+      return {
+        event: lines[0]?.replace("event: ", ""),
+        data: JSON.parse(lines[1]?.replace("data: ", "") ?? "null"),
+      };
+    });
+    const completed = projected.at(-1)?.data.response;
+    const callId = completed?.output[0]?.call_id as string;
+
+    expect(projected.map(({ event }) => event)).toEqual([
+      "response.created",
+      "response.output_item.added",
+      "response.function_call_arguments.delta",
+      "response.function_call_arguments.done",
+      "response.output_item.done",
+      "response.completed",
+    ]);
+    expect(projected.map(({ data }) => data.sequence_number)).toEqual([
+      0, 1, 2, 3, 4, 5,
+    ]);
+    expect(completed).toMatchObject({
+      id: expect.stringMatching(/^resp_/),
+      output: [
+        {
+          type: "function_call",
+          call_id: expect.stringMatching(/^call_g1_/),
+          arguments: '{"id":1}',
+        },
+      ],
+    });
+    expect(fixture.host.turnInterrupt).not.toHaveBeenCalled();
+    expect(fixture.store.lookup(completed.id)).toMatchObject({
+      state: "pending",
+    });
+
+    const continuation = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      previous_response_id: completed.id,
+      tools: definitions,
+      input: [
+        { type: "function_call_output", call_id: callId, output: "found" },
+      ],
+    });
+    expect(continuation.status).toBe(200);
+    expect(fixture.host.turnStart).toHaveBeenCalledOnce();
   });
 
   it("does not emit response.completed when SQLite completion fails", async () => {

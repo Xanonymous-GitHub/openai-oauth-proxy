@@ -5,6 +5,12 @@ import type { CodexHost, HostNotification } from "../codex/host.js";
 import { CodexGenerationChangedError } from "../codex/transport.js";
 import { ProxyError } from "../http/errors.js";
 import {
+  type ExternalToolCall,
+  type ToolBridge,
+  type ToolBridgeContext,
+  toolBridgeFor,
+} from "../tools/bridge.js";
+import {
   eventDispatcherFor,
   type ProxyStreamEvent,
   type TokenUsage,
@@ -28,11 +34,21 @@ type CleanupCallback = (
   signal?: AbortSignal,
 ) => void | Promise<void>;
 
+export interface TurnToolLifecycle {
+  kind: "chat" | "responses";
+  responseId?: string;
+  leaseOwner: string;
+  toolFingerprint: string;
+  suspended?: (threadId: string, turnId: string) => void | Promise<void>;
+  lost?: (threadId: string, turnId: string) => void | Promise<void>;
+}
+
 export interface TurnLifecycleCallbacks {
   opened?: OpenedCallback;
   started?: StartedCallback;
   release?: LifecycleCallback;
   cleanup?: CleanupCallback;
+  tool?: TurnToolLifecycle;
 }
 
 export interface TurnRunnerOptions {
@@ -42,6 +58,7 @@ export interface TurnRunnerOptions {
   timeoutMs?: number;
   interruptWaitMs?: number;
   lifecycleWaitMs?: number;
+  toolTimeoutMs?: number;
   release?: LifecycleCallback;
   cleanup?: CleanupCallback;
 }
@@ -101,6 +118,112 @@ function pending<T>(): Promise<T> {
   return new Promise(() => undefined);
 }
 
+interface EventWaiter {
+  resolve(value: IteratorResult<ProxyStreamEvent>): void;
+}
+
+class StreamQueue implements AsyncIterable<ProxyStreamEvent> {
+  readonly #events: ProxyStreamEvent[] = [];
+  readonly #waiters: EventWaiter[] = [];
+  #closed = false;
+
+  push(event: ProxyStreamEvent): void {
+    if (this.#closed) return;
+    const waiter = this.#waiters.shift();
+    if (waiter) waiter.resolve({ done: false, value: event });
+    else this.#events.push(event);
+  }
+
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    for (const waiter of this.#waiters.splice(0)) {
+      waiter.resolve({ done: true, value: undefined });
+    }
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<ProxyStreamEvent> {
+    return {
+      next: async () => {
+        const event = this.#events.shift();
+        if (event) return { done: false, value: event };
+        if (this.#closed) return { done: true, value: undefined };
+        return new Promise((resolve) => this.#waiters.push({ resolve }));
+      },
+      return: async () => {
+        this.close();
+        return { done: true, value: undefined };
+      },
+    };
+  }
+}
+
+class TurnStage {
+  readonly events = new StreamQueue();
+  readonly result: Promise<TurnResult>;
+  #resolve!: (result: TurnResult) => void;
+  #reject!: (error: unknown) => void;
+  settled = false;
+
+  constructor() {
+    this.result = new Promise<TurnResult>((resolve, reject) => {
+      this.#resolve = resolve;
+      this.#reject = reject;
+    });
+    void this.result.catch(() => undefined);
+  }
+
+  complete(result: TurnResult): void {
+    if (this.settled) return;
+    this.settled = true;
+    this.events.push({ type: "completed", result });
+    this.events.close();
+    this.#resolve(result);
+  }
+
+  fail(error: unknown, streamError: ProxyError): void {
+    if (this.settled) return;
+    this.settled = true;
+    this.events.push({ type: "failed", error: streamError });
+    this.events.close();
+    this.#reject(error);
+  }
+}
+
+class TurnAccumulator {
+  #stage = new TurnStage();
+
+  result(): Promise<TurnResult> {
+    return this.#stage.result;
+  }
+
+  stream(): AsyncIterable<ProxyStreamEvent> {
+    return this.#stage.events;
+  }
+
+  emit(
+    event: Exclude<ProxyStreamEvent, { type: "completed" | "failed" }>,
+  ): void {
+    this.#stage.events.push(event);
+  }
+
+  complete(result: TurnResult): void {
+    this.#stage.complete(result);
+  }
+
+  resume(): Promise<TurnResult> {
+    if (!this.#stage.settled) {
+      throw new Error("Cannot continue a turn before it is suspended");
+    }
+    this.#stage = new TurnStage();
+    return this.#stage.result;
+  }
+
+  fail(error: unknown, streamError = normalizeError(error)): void {
+    this.#stage.fail(error, streamError);
+  }
+}
+
 function usageFrom(
   event: Extract<HostNotification, { method: "thread/tokenUsage/updated" }>,
 ): TokenUsage {
@@ -130,6 +253,7 @@ export class TurnRunner {
   readonly #release: LifecycleCallback | undefined;
   readonly #cleanup: CleanupCallback | undefined;
   readonly #dispatcher;
+  readonly tools: ToolBridge;
 
   constructor(options: TurnRunnerOptions) {
     this.#host = options.host;
@@ -143,6 +267,7 @@ export class TurnRunner {
     this.#release = options.release;
     this.#cleanup = options.cleanup;
     this.#dispatcher = eventDispatcherFor(options.host);
+    this.tools = toolBridgeFor(options.host, options.toolTimeoutMs);
   }
 
   async run(
@@ -150,15 +275,9 @@ export class TurnRunner {
     signal?: AbortSignal,
     lifecycle?: TurnLifecycleCallbacks,
   ): Promise<TurnResult> {
-    for await (const event of this.execute(command, signal, lifecycle, false)) {
-      if (event.type === "completed") return event.result;
-      if (event.type === "failed") throw event.error;
-    }
-    throw new ProxyError(
-      502,
-      "codex_protocol_error",
-      "Codex event stream ended before turn completion",
-    );
+    const accumulator = new TurnAccumulator();
+    void this.execute(command, signal, lifecycle, false, accumulator);
+    return accumulator.result();
   }
 
   stream(
@@ -166,15 +285,18 @@ export class TurnRunner {
     signal?: AbortSignal,
     lifecycle?: TurnLifecycleCallbacks,
   ): AsyncIterable<ProxyStreamEvent> {
-    return this.execute(command, signal, lifecycle, true);
+    const accumulator = new TurnAccumulator();
+    void this.execute(command, signal, lifecycle, true, accumulator);
+    return accumulator.stream();
   }
 
-  private async *execute(
+  private async execute(
     command: TurnCommand,
     signal: AbortSignal | undefined,
     lifecycle: TurnLifecycleCallbacks | undefined,
     projectLifecycleFailures: boolean,
-  ): AsyncIterable<ProxyStreamEvent> {
+    accumulator: TurnAccumulator,
+  ): Promise<void> {
     const generation = this.#host.generation;
     let threadId: string | undefined;
     let turnId: string | undefined;
@@ -186,6 +308,10 @@ export class TurnRunner {
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let interruptWait: ReturnType<typeof setTimeout> | undefined;
     let interruptDeadline: number | undefined;
+    let toolContext: ToolBridgeContext | undefined;
+    let clientSignal = signal;
+    let text = "";
+    let usage: TokenUsage | undefined;
     const release = lifecycle?.release ?? this.#release;
     const cleanup = lifecycle?.cleanup ?? this.#cleanup;
     const turnStartController = new AbortController();
@@ -241,13 +367,31 @@ export class TurnRunner {
       issueInterrupt();
     };
     const onAbort = (): void => requestCancellation("abort");
+    const detachClient = (): void => {
+      clientSignal?.removeEventListener("abort", onAbort);
+      clientSignal = undefined;
+    };
+    const attachClient = (nextSignal?: AbortSignal): void => {
+      detachClient();
+      clientSignal = nextSignal;
+      clientSignal?.addEventListener("abort", onAbort, { once: true });
+      if (clientSignal?.aborted) onAbort();
+    };
+    const startTimeout = (): void => {
+      if (timeout) clearTimeout(timeout);
+      timeout = setTimeout(
+        () => requestCancellation("timeout"),
+        this.#timeoutMs,
+      );
+      timeout.unref?.();
+    };
     let finalization: Promise<unknown | undefined> | undefined;
     const finalize = (): Promise<unknown | undefined> => {
       finalization ??= (async () => {
         const shouldInterrupt = !terminal;
         if (timeout) clearTimeout(timeout);
         if (interruptWait) clearTimeout(interruptWait);
-        signal?.removeEventListener("abort", onAbort);
+        detachClient();
 
         if (shouldInterrupt) issueInterrupt();
         terminal = true;
@@ -264,6 +408,7 @@ export class TurnRunner {
           }
         }
         subscription?.close();
+        if (toolContext) this.tools.complete(toolContext);
 
         const cleanupController = new AbortController();
         const callbacks = Promise.allSettled([
@@ -296,13 +441,13 @@ export class TurnRunner {
     };
 
     try {
-      signal?.throwIfAborted();
-      threadId = await this.openThread(command, generation, signal);
+      clientSignal?.throwIfAborted();
+      threadId = await this.openThread(command, generation, clientSignal);
       this.assertGeneration(generation);
-      signal?.throwIfAborted();
+      clientSignal?.throwIfAborted();
       await lifecycle?.opened?.(threadId);
       this.assertGeneration(generation);
-      signal?.throwIfAborted();
+      clientSignal?.throwIfAborted();
 
       const items: ResponseItem[] = [...command.history];
       if (command.instructions !== undefined) {
@@ -316,21 +461,16 @@ export class TurnRunner {
         this.assertGeneration(generation);
         await this.#host.threadInjectItems(
           { threadId, items: items as unknown as JsonValue[] },
-          signal,
+          clientSignal,
         );
         this.assertGeneration(generation);
       }
-      signal?.throwIfAborted();
+      clientSignal?.throwIfAborted();
 
       subscription = this.#dispatcher.register(threadId, generation);
       const subscriptionFailure = subscription.whenFailed();
-      signal?.addEventListener("abort", onAbort, { once: true });
-      timeout = setTimeout(
-        () => requestCancellation("timeout"),
-        this.#timeoutMs,
-      );
-      timeout.unref?.();
-      if (signal?.aborted) onAbort();
+      attachClient(clientSignal);
+      startTimeout();
 
       this.assertGeneration(generation);
       const turnStartOutcome = this.#host
@@ -391,15 +531,76 @@ export class TurnRunner {
 
       await lifecycle?.started?.(threadId, turnId);
       this.assertGeneration(generation);
-      signal?.throwIfAborted();
+      clientSignal?.throwIfAborted();
+      const activeThreadId = threadId;
+      const activeTurnId = turnId;
 
-      let text = "";
-      let usage: TokenUsage | undefined;
+      if (
+        command.dynamicTools &&
+        command.dynamicTools.length > 0 &&
+        lifecycle?.tool
+      ) {
+        const toolLifecycle = lifecycle.tool;
+        let pendingCalls: ExternalToolCall[] = [];
+        let flushScheduled = false;
+        const flushCalls = async (): Promise<void> => {
+          flushScheduled = false;
+          const calls = pendingCalls;
+          pendingCalls = [];
+          if (calls.length === 0 || cancellationCause) return;
+          await toolLifecycle.suspended?.(activeThreadId, activeTurnId);
+          if (timeout) clearTimeout(timeout);
+          timeout = undefined;
+          detachClient();
+          for (const call of calls)
+            accumulator.emit({ type: "tool.call", call });
+          accumulator.complete({
+            threadId: activeThreadId,
+            turnId: activeTurnId,
+            text,
+            finishReason: "tool_calls",
+            toolCalls: calls,
+            ...(usage === undefined ? {} : { usage }),
+          });
+        };
+        toolContext = {
+          kind: toolLifecycle.kind,
+          ...(toolLifecycle.responseId === undefined
+            ? {}
+            : { responseId: toolLifecycle.responseId }),
+          threadId: activeThreadId,
+          turnId: activeTurnId,
+          leaseOwner: toolLifecycle.leaseOwner,
+          generation,
+          toolFingerprint: toolLifecycle.toolFingerprint,
+          resume: (nextSignal) => {
+            const result = accumulator.resume();
+            attachClient(nextSignal);
+            startTimeout();
+            return result;
+          },
+          invalidate: async () => {
+            await toolLifecycle.lost?.(activeThreadId, activeTurnId);
+            requestCancellation("timeout");
+          },
+        };
+        this.tools.attach(toolContext, (call) => {
+          pendingCalls.push(call);
+          if (flushScheduled) return;
+          flushScheduled = true;
+          setImmediate(() => {
+            void flushCalls().catch((error: unknown) =>
+              subscription?.fail(error),
+            );
+          });
+        });
+      }
+
       for await (const event of subscription) {
         this.assertGeneration(generation);
         switch (event.method) {
           case "item/agentMessage/delta":
-            yield { type: "text.delta", delta: event.params.delta };
+            accumulator.emit({ type: "text.delta", delta: event.params.delta });
             break;
           case "item/completed":
             if (event.params.item.type === "agentMessage") {
@@ -408,7 +609,7 @@ export class TurnRunner {
             break;
           case "thread/tokenUsage/updated":
             usage = usageFrom(event);
-            yield { type: "usage", usage };
+            accumulator.emit({ type: "usage", usage });
             break;
           case "turn/completed": {
             terminal = true;
@@ -419,16 +620,17 @@ export class TurnRunner {
             const lifecycleError = await finalize();
             if (lifecycleError !== undefined) {
               if (projectLifecycleFailures) {
-                yield {
-                  type: "failed",
-                  error: normalizeError(lifecycleError),
-                };
+                accumulator.fail(
+                  normalizeError(lifecycleError),
+                  normalizeError(lifecycleError),
+                );
                 return;
               }
-              throw lifecycleError;
+              accumulator.fail(lifecycleError, normalizeError(lifecycleError));
+              return;
             }
             if (error) {
-              yield { type: "failed", error };
+              accumulator.fail(error, error);
               return;
             }
             const result: TurnResult = {
@@ -438,7 +640,7 @@ export class TurnRunner {
               finishReason: "stop",
               ...(usage === undefined ? {} : { usage }),
             };
-            yield { type: "completed", result };
+            accumulator.complete(result);
             return;
           }
         }
@@ -447,12 +649,16 @@ export class TurnRunner {
       const lifecycleError = await finalize();
       if (lifecycleError !== undefined) {
         if (projectLifecycleFailures) {
-          yield { type: "failed", error: normalizeError(lifecycleError) };
+          accumulator.fail(
+            normalizeError(lifecycleError),
+            normalizeError(lifecycleError),
+          );
           return;
         }
-        throw lifecycleError;
+        accumulator.fail(lifecycleError, normalizeError(lifecycleError));
+        return;
       }
-      yield { type: "failed", error: normalizeError(error) };
+      accumulator.fail(normalizeError(error));
     } finally {
       await finalize();
     }
@@ -477,6 +683,9 @@ export class TurnRunner {
             ephemeral: false,
             serviceName: "openai_oauth_proxy",
             environments: [],
+            ...(command.dynamicTools === undefined
+              ? {}
+              : { dynamicTools: command.dynamicTools }),
             selectedCapabilityRoots: [],
           },
           signal,

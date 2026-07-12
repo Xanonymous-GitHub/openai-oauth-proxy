@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import type { Handler } from "hono";
 import { streamSSE } from "hono/streaming";
 import { openAIErrorBody, ProxyError } from "../http/errors.js";
-import type { TokenUsage, TurnCommand } from "../turns/events.js";
+import type { TokenUsage, TurnCommand, TurnResult } from "../turns/events.js";
 import type { TurnLifecycleCallbacks, TurnRunner } from "../turns/runner.js";
 import { decodeImages } from "./images.js";
 import type { ModelCapabilities, ModelCatalog } from "./models.js";
@@ -40,26 +40,40 @@ function usageBody(usage: TokenUsage): {
   };
 }
 
-function toolSemanticsError(param: string): ProxyError {
-  return ProxyError.public(
-    400,
-    "unsupported_tool_semantics",
-    "Function tool turns are not supported yet",
-    param,
-  );
-}
-
-function assertOrdinaryMessages(
+function assertInitialMessages(
   messages: readonly ChatMessage[],
 ): asserts messages is readonly Exclude<ChatMessage, { role: "tool" }>[] {
   for (const [index, message] of messages.entries()) {
     if (message.role === "tool") {
-      throw toolSemanticsError(`messages.${index}`);
+      throw ProxyError.public(
+        400,
+        "unknown_tool_call",
+        "Tool output did not match a pending call",
+        `messages.${index}`,
+      );
     }
     if (message.role === "assistant" && message.tool_calls !== undefined) {
-      throw toolSemanticsError(`messages.${index}.tool_calls`);
+      throw ProxyError.public(
+        400,
+        "unknown_tool_call",
+        "Assistant tool calls require pending tool outputs",
+        `messages.${index}.tool_calls`,
+      );
     }
   }
+}
+
+function toolOutputs(messages: readonly ChatMessage[]) {
+  const trailing: Array<Extract<ChatMessage, { role: "tool" }>> = [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== "tool") break;
+    trailing.push(message);
+  }
+  return trailing.reverse().map((message) => ({
+    callId: message.tool_call_id,
+    output: message.content,
+  }));
 }
 
 function imageParts(messages: readonly ChatMessage[]) {
@@ -74,8 +88,17 @@ function chunk(
   identity: ChatIdentity,
   choice: {
     index: 0;
-    delta: { role?: "assistant"; content?: string };
-    finish_reason: "stop" | null;
+    delta: {
+      role?: "assistant";
+      content?: string;
+      tool_calls?: Array<{
+        index: number;
+        id: string;
+        type: "function";
+        function: { name: string; arguments: string };
+      }>;
+    };
+    finish_reason: "stop" | "tool_calls" | null;
   },
   usage?: TokenUsage,
 ) {
@@ -85,6 +108,24 @@ function chunk(
     choices: [choice],
     ...(usage === undefined ? {} : { usage: usageBody(usage) }),
   };
+}
+
+function resultMessage(result: TurnResult) {
+  if (result.finishReason === "tool_calls") {
+    return {
+      role: "assistant" as const,
+      content: result.text === "" ? null : result.text,
+      tool_calls: (result.toolCalls ?? []).map((call) => ({
+        id: call.id,
+        type: "function" as const,
+        function: {
+          name: call.name,
+          arguments: JSON.stringify(call.arguments),
+        },
+      })),
+    };
+  }
+  return { role: "assistant" as const, content: result.text };
 }
 
 async function requestBody(request: Request): Promise<unknown> {
@@ -102,23 +143,12 @@ async function requestBody(request: Request): Promise<unknown> {
 export function createChatHandler(deps: ChatHandlerDependencies): Handler {
   return async (context) => {
     const request = parseChatRequest(await requestBody(context.req.raw));
-    if (request.tools !== undefined) throw toolSemanticsError("tools");
-    if (request.tool_choice !== undefined)
-      throw toolSemanticsError("tool_choice");
-    if (request.parallel_tool_calls !== undefined) {
-      throw toolSemanticsError("parallel_tool_calls");
-    }
-    assertOrdinaryMessages(request.messages);
-
-    const lastMessage = request.messages.at(-1);
-    if (lastMessage?.role !== "user") {
-      throw ProxyError.public(
-        400,
-        "invalid_chat_history",
-        "Ordinary Chat requests must end with a user message",
-        `messages.${request.messages.length - 1}.role`,
-      );
-    }
+    const validatedTools = deps.runner.tools.toDynamicTools(
+      request.tools ?? [],
+    );
+    const dynamicTools = request.tool_choice === "none" ? [] : validatedTools;
+    const toolFingerprint = deps.runner.tools.fingerprint(dynamicTools);
+    const outputs = toolOutputs(request.messages);
 
     const images = imageParts(request.messages);
     decodeImages(images);
@@ -166,36 +196,85 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
       created: Math.floor(Date.now() / 1_000),
       model: model.id,
     };
+    let continuationResult: Promise<TurnResult> | undefined;
+    if (outputs.length > 0) {
+      const continuation = await deps.runner.tools.continue({
+        kind: "chat",
+        toolFingerprint,
+        results: outputs,
+        signal: context.req.raw.signal,
+      });
+      if (continuation.type === "lost") {
+        throw ProxyError.public(
+          409,
+          "proxy_continuation_lost",
+          "Tool continuation was lost after a proxy restart",
+          "messages",
+        );
+      }
+      if (continuation.type === "incomplete") {
+        throw ProxyError.public(
+          400,
+          "incomplete_tool_outputs",
+          `Missing tool outputs: ${continuation.missingCallIds.join(", ")}`,
+          "messages",
+        );
+      }
+      continuationResult = continuation.result;
+    }
+
+    const lastMessage = request.messages.at(-1);
+    if (continuationResult === undefined && lastMessage?.role !== "user") {
+      assertInitialMessages(request.messages);
+      throw ProxyError.public(
+        400,
+        "invalid_chat_history",
+        "Ordinary Chat requests must end with a user message",
+        `messages.${request.messages.length - 1}.role`,
+      );
+    }
+    if (continuationResult === undefined)
+      assertInitialMessages(request.messages);
     const command: TurnCommand = {
       action: { type: "start" },
       model: model.id,
       history: translateHistory(request.messages.slice(0, -1)),
-      input: translateTurnInput(lastMessage.content),
+      input:
+        lastMessage?.role === "user"
+          ? translateTurnInput(lastMessage.content)
+          : [],
       ...(request.reasoning_effort === undefined
         ? {}
         : { effort: request.reasoning_effort }),
       ...(request.response_format === undefined
         ? {}
         : { outputSchema: request.response_format.json_schema.schema }),
+      ...(dynamicTools.length === 0 ? {} : { dynamicTools }),
     };
     const lifecycle: TurnLifecycleCallbacks = {
       ...(deps.release === undefined ? {} : { release: deps.release }),
       cleanup: deps.deleteThread,
+      ...(dynamicTools.length === 0
+        ? {}
+        : {
+            tool: {
+              kind: "chat" as const,
+              leaseOwner: identity.id,
+              toolFingerprint,
+            },
+          }),
     };
 
     if (!request.stream) {
-      const result = await deps.runner.run(
-        command,
-        context.req.raw.signal,
-        lifecycle,
-      );
+      const result = await (continuationResult ??
+        deps.runner.run(command, context.req.raw.signal, lifecycle));
       return context.json({
         ...identity,
         object: "chat.completion" as const,
         choices: [
           {
             index: 0,
-            message: { role: "assistant" as const, content: result.text },
+            message: resultMessage(result),
             finish_reason: result.finishReason,
           },
         ],
@@ -213,56 +292,95 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
         controller.signal,
       ]);
       stream.onAbort(() => controller.abort());
+      const streamedToolCallIds: string[] = [];
 
-      await stream.writeSSE({
-        data: JSON.stringify(
-          chunk(identity, {
-            index: 0,
-            delta: { role: "assistant" },
-            finish_reason: null,
-          }),
-        ),
-      });
+      try {
+        await stream.writeSSE({
+          data: JSON.stringify(
+            chunk(identity, {
+              index: 0,
+              delta: { role: "assistant" },
+              finish_reason: null,
+            }),
+          ),
+        });
 
-      let usage: TokenUsage | undefined;
-      for await (const event of deps.runner.stream(
-        command,
-        signal,
-        lifecycle,
-      )) {
-        if (event.type === "text.delta") {
-          await stream.writeSSE({
-            data: JSON.stringify(
-              chunk(identity, {
-                index: 0,
-                delta: { content: event.delta },
-                finish_reason: null,
-              }),
-            ),
-          });
-        } else if (event.type === "usage") {
-          usage = event.usage;
-        } else if (event.type === "completed") {
-          await stream.writeSSE({
-            data: JSON.stringify(
-              chunk(
-                identity,
-                {
+        let usage: TokenUsage | undefined;
+        let toolIndex = 0;
+        const source = continuationResult
+          ? (async function* () {
+              const result = await continuationResult;
+              if (result.text !== "") {
+                yield { type: "text.delta" as const, delta: result.text };
+              }
+              for (const call of result.toolCalls ?? []) {
+                yield { type: "tool.call" as const, call };
+              }
+              yield { type: "completed" as const, result };
+            })()
+          : deps.runner.stream(command, signal, lifecycle);
+        for await (const event of source) {
+          if (event.type === "text.delta") {
+            await stream.writeSSE({
+              data: JSON.stringify(
+                chunk(identity, {
                   index: 0,
-                  delta: {},
-                  finish_reason: event.result.finishReason,
-                },
-                event.result.usage ?? usage,
+                  delta: { content: event.delta },
+                  finish_reason: null,
+                }),
               ),
-            ),
-          });
-          await stream.writeSSE({ data: "[DONE]" });
-        } else {
-          await stream.writeSSE({
-            data: JSON.stringify(openAIErrorBody(event.error)),
-          });
-          return;
+            });
+          } else if (event.type === "tool.call") {
+            streamedToolCallIds.push(event.call.id);
+            await stream.writeSSE({
+              data: JSON.stringify(
+                chunk(identity, {
+                  index: 0,
+                  delta: {
+                    tool_calls: [
+                      {
+                        index: toolIndex,
+                        id: event.call.id,
+                        type: "function",
+                        function: {
+                          name: event.call.name,
+                          arguments: JSON.stringify(event.call.arguments),
+                        },
+                      },
+                    ],
+                  },
+                  finish_reason: null,
+                }),
+              ),
+            });
+            toolIndex += 1;
+          } else if (event.type === "usage") {
+            usage = event.usage;
+          } else if (event.type === "completed") {
+            await stream.writeSSE({
+              data: JSON.stringify(
+                chunk(
+                  identity,
+                  {
+                    index: 0,
+                    delta: {},
+                    finish_reason: event.result.finishReason,
+                  },
+                  event.result.usage ?? usage,
+                ),
+              ),
+            });
+            await stream.writeSSE({ data: "[DONE]" });
+          } else if (event.type === "failed") {
+            await stream.writeSSE({
+              data: JSON.stringify(openAIErrorBody(event.error)),
+            });
+            return;
+          }
         }
+      } catch (error) {
+        deps.runner.tools.invalidateCalls(streamedToolCallIds);
+        throw error;
       }
     });
   };

@@ -150,7 +150,9 @@ interface Statements {
   deleteStaleLeases: StatementSync;
   insertLease: StatementSync;
   releaseLease: StatementSync;
+  promoteLease: StatementSync;
   losePendingResponses: StatementSync;
+  losePendingResponse: StatementSync;
   deleteOldGenerationLeases: StatementSync;
   hasCompleteDescendant: StatementSync;
   deletableThreads: StatementSync;
@@ -278,10 +280,20 @@ export class ConversationStore {
         DELETE FROM thread_leases
         WHERE thread_id = ? AND owner_request_id = ?
       `),
+      promoteLease: database.prepare(`
+        UPDATE thread_leases
+        SET kind = 'tool', expires_at = ?
+        WHERE thread_id = ? AND owner_request_id = ?
+      `),
       losePendingResponses: database.prepare(`
         UPDATE responses
         SET state = 'lost', last_access_at = ?, expires_at = ?
         WHERE state = 'pending'
+      `),
+      losePendingResponse: database.prepare(`
+        UPDATE responses
+        SET state = 'lost', last_access_at = ?, expires_at = ?
+        WHERE response_id = ? AND state = 'pending'
       `),
       deleteOldGenerationLeases: database.prepare(`
         DELETE FROM thread_leases
@@ -740,6 +752,64 @@ export class ConversationStore {
     });
   }
 
+  suspendOperation(responseId: string): void {
+    this.#transaction(() => {
+      const operation = this.#operationRow(responseId);
+      if (
+        operation?.state !== "active" ||
+        operation.thread_id === null ||
+        operation.turn_id === null
+      ) {
+        throw new Error(
+          `Suspend response operation ${responseId} does not exist`,
+        );
+      }
+      const existing = this.#responseRow(responseId);
+      if (existing?.state !== "pending") {
+        const parentThreadId =
+          operation.action === "fork" ? operation.source_thread_id : null;
+        const forkedAtTurnId =
+          operation.action === "fork" ? operation.source_turn_id : null;
+        this.#statements.insertLineage.run(
+          operation.thread_id,
+          parentThreadId,
+          forkedAtTurnId,
+        );
+        const now = this.#clock.now();
+        this.#statements.insertResponse.run(
+          operation.response_id,
+          operation.thread_id,
+          operation.parent_response_id,
+          operation.parent_response_id,
+          operation.response_id,
+          operation.stored,
+          operation.process_generation,
+          operation.created_at,
+          now,
+          now + this.#responseTtlMs,
+        );
+      }
+      const leaseThreadId = operation.source_thread_id ?? operation.thread_id;
+      const expiresAt = this.#clock.now() + this.#toolLeaseMs;
+      if (
+        this.#statements.promoteLease.run(
+          expiresAt,
+          leaseThreadId,
+          operation.owner_request_id,
+        ).changes !== 1 &&
+        this.#statements.insertLease.run(
+          leaseThreadId,
+          operation.owner_request_id,
+          "tool",
+          operation.process_generation,
+          expiresAt,
+        ).changes !== 1
+      ) {
+        throw new Error(`Could not retain tool lease for ${responseId}`);
+      }
+    });
+  }
+
   completeOperation(responseId: string): string | undefined {
     return this.#transaction(() => {
       const operation = this.#operationRow(responseId);
@@ -763,18 +833,29 @@ export class ConversationStore {
           parentThreadId,
           forkedAtTurnId,
         );
-        this.#statements.insertCompletedResponse.run(
-          operation.response_id,
-          operation.thread_id,
-          operation.turn_id,
-          operation.parent_response_id,
-          operation.parent_response_id,
-          operation.response_id,
-          operation.process_generation,
-          operation.created_at,
-          now,
-          now + this.#responseTtlMs,
-        );
+        const pending = this.#responseRow(operation.response_id);
+        if (pending?.state === "pending") {
+          this.#statements.completeResponse.run(
+            operation.turn_id,
+            now,
+            now + this.#responseTtlMs,
+            now,
+            operation.response_id,
+          );
+        } else {
+          this.#statements.insertCompletedResponse.run(
+            operation.response_id,
+            operation.thread_id,
+            operation.turn_id,
+            operation.parent_response_id,
+            operation.parent_response_id,
+            operation.response_id,
+            operation.process_generation,
+            operation.created_at,
+            now,
+            now + this.#responseTtlMs,
+          );
+        }
       }
       this.#releaseOperationLease(operation);
       this.#statements.deleteOperation.run(responseId);
@@ -789,7 +870,7 @@ export class ConversationStore {
   ): string | undefined {
     return this.#transaction(() => {
       const operation = this.#operationRow(responseId);
-      if (!operation) return undefined;
+      if (operation?.state !== "active") return undefined;
       this.#releaseOperationLease(operation);
       let cleanupThreadId = operation.thread_id;
       if (
@@ -823,6 +904,16 @@ export class ConversationStore {
       this.#statements.deleteOperation.run(responseId);
       return undefined;
     });
+  }
+
+  loseOperation(responseId: string): string | undefined {
+    const now = this.#clock.now();
+    this.#statements.losePendingResponse.run(
+      now,
+      now + this.#responseTtlMs,
+      responseId,
+    );
+    return this.abandonOperation(responseId);
   }
 
   abandonedThreads(): string[] {
@@ -1007,6 +1098,12 @@ export class ConversationStore {
     if (operation.source_thread_id !== null) {
       this.#statements.releaseLease.run(
         operation.source_thread_id,
+        operation.owner_request_id,
+      );
+    }
+    if (operation.thread_id !== null) {
+      this.#statements.releaseLease.run(
+        operation.thread_id,
         operation.owner_request_id,
       );
     }
