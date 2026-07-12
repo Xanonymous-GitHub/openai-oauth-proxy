@@ -61,11 +61,12 @@ export async function start(
   let activeHost: CodexHost | undefined;
   const modelHost: Pick<CodexHost, "generation" | "modelList"> = {
     get generation() {
-      return activeHost?.generation ?? 0;
+      if (!activeHost) throw new Error("Codex host not ready");
+      return activeHost.generation;
     },
     modelList: (params, signal) => {
-      if (!host) return Promise.reject(new Error("Codex host not started"));
-      return host.then((value) => value.modelList(params, signal));
+      if (!activeHost) return Promise.reject(new Error("Codex host not ready"));
+      return activeHost.modelList(params, signal);
     },
   };
   const dataApp = createDataApp({

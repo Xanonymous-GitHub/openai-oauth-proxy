@@ -14,6 +14,16 @@ function createHost() {
   } as unknown as CodexHost;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((settle, fail) => {
+    resolve = settle;
+    reject = fail;
+  });
+  return { promise, reject, resolve };
+}
+
 function createApp(host: CodexHost) {
   return createDataApp({
     health: () => true,
@@ -184,6 +194,65 @@ it("deduplicates concurrent cold catalog loads", async () => {
   expect((await first).status).toBe(200);
   expect((await second).status).toBe(200);
   expect(host.modelList).toHaveBeenCalledTimes(1);
+});
+
+it("keeps a shared cold load alive when its first waiter aborts", async () => {
+  const page = deferred<ReturnType<typeof fakeModelListResponse>>();
+  const host = createHost();
+  vi.mocked(host.modelList).mockImplementationOnce((_params, signal) => {
+    signal?.addEventListener("abort", () => page.reject(signal.reason), {
+      once: true,
+    });
+    return page.promise;
+  });
+  const catalog = new ModelCatalog(host);
+  const firstController = new AbortController();
+
+  const first = catalog.list(firstController.signal);
+  const second = catalog.list();
+  await vi.waitFor(() => expect(host.modelList).toHaveBeenCalledTimes(1));
+  const firstResult = expect(first).rejects.toMatchObject({
+    name: "AbortError",
+  });
+  const secondResult = expect(second).resolves.toMatchObject({
+    object: "list",
+  });
+  firstController.abort();
+  page.resolve(fakeModelListResponse());
+
+  await firstResult;
+  await secondResult;
+  expect(host.modelList).toHaveBeenCalledTimes(1);
+});
+
+it("reloads after an in-flight load completes for an old generation", async () => {
+  const oldPage = deferred<ReturnType<typeof fakeModelListResponse>>();
+  const currentPage = deferred<ReturnType<typeof fakeModelListResponse>>();
+  const host = createHost();
+  vi.mocked(host.modelList)
+    .mockReturnValueOnce(oldPage.promise)
+    .mockReturnValueOnce(currentPage.promise);
+  const catalog = new ModelCatalog(host);
+
+  const oldWaiter = catalog.list();
+  await vi.waitFor(() => expect(host.modelList).toHaveBeenCalledTimes(1));
+  (host as { generation: number }).generation = 2;
+  const currentWaiter = catalog.list();
+  await vi.waitFor(() => expect(host.modelList).toHaveBeenCalledTimes(2));
+  oldPage.resolve(
+    fakeModelListResponse({ data: [fakeModel({ id: "old-generation" })] }),
+  );
+  currentPage.resolve(
+    fakeModelListResponse({ data: [fakeModel({ id: "current-generation" })] }),
+  );
+
+  for (const result of await Promise.all([oldWaiter, currentWaiter])) {
+    expect(result.data.map(({ id }) => id)).toEqual(["current-generation"]);
+  }
+  await expect(catalog.list()).resolves.toMatchObject({
+    data: [{ id: "current-generation" }],
+  });
+  expect(host.modelList).toHaveBeenCalledTimes(2);
 });
 
 it("sanitizes host and upstream authentication failures as 503", async () => {

@@ -31,6 +31,29 @@ interface PendingLoad {
 
 type ModelHost = Pick<CodexHost, "generation" | "modelList">;
 
+function observeAbort<T>(
+  promise: Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (!signal) return promise;
+  signal.throwIfAborted();
+
+  return new Promise<T>((resolve, reject) => {
+    const abort = (): void => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    void promise.then(
+      (value) => {
+        signal.removeEventListener("abort", abort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", abort);
+        reject(error);
+      },
+    );
+  });
+}
+
 export class ModelCatalog {
   readonly #host: ModelHost;
   #snapshot: CatalogSnapshot | undefined;
@@ -64,6 +87,7 @@ export class ModelCatalog {
     signal?: AbortSignal,
   ): Promise<Map<string, ModelCapabilities>> {
     while (true) {
+      signal?.throwIfAborted();
       const generation = this.#host.generation;
       const snapshot = this.#snapshot;
       if (
@@ -75,26 +99,31 @@ export class ModelCatalog {
 
       let pending = this.#pending;
       if (pending?.generation !== generation) {
+        const controller = new AbortController();
         pending = {
           generation,
-          promise: this.fetchAll(signal),
+          promise: this.fetchAll(controller.signal).then((models) => {
+            if (this.#host.generation === generation) {
+              this.#snapshot = {
+                generation,
+                expiresAt: Date.now() + CACHE_TTL_MS,
+                models,
+              };
+            }
+            return models;
+          }),
         };
         this.#pending = pending;
+        const completed = pending;
+        const clear = (): void => {
+          if (this.#pending === completed) this.#pending = undefined;
+        };
+        void pending.promise.then(clear, clear);
       }
 
-      let models: Map<string, ModelCapabilities>;
-      try {
-        models = await pending.promise;
-      } finally {
-        if (this.#pending === pending) this.#pending = undefined;
-      }
+      const models = await observeAbort(pending.promise, signal);
 
       if (this.#host.generation !== generation) continue;
-      this.#snapshot = {
-        generation,
-        expiresAt: Date.now() + CACHE_TTL_MS,
-        models,
-      };
       return models;
     }
   }

@@ -1,6 +1,8 @@
 import { type AddressInfo, createServer } from "node:net";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { createDataApp } from "../src/app.js";
+import { fakeModelListResponse } from "../src/codex/fake.js";
+import type { CodexHost } from "../src/codex/host.js";
 import { start } from "../src/main.js";
 
 async function availablePort(): Promise<number> {
@@ -157,4 +159,73 @@ it("serves probes during initial recovery and after terminal exhaustion", async 
   await expect(service.host).rejects.toThrow("recovery budget exhausted");
   await service.close();
   expect(stops).toBe(1);
+});
+
+it("rejects model requests before the first host is ready without a generation-zero load", async () => {
+  const dataPort = await availablePort();
+  let resolveHost!: (host: CodexHost) => void;
+  const hostPromise = new Promise<CodexHost>((resolve) => {
+    resolveHost = resolve;
+  });
+  const modelList = vi.fn(async () => fakeModelListResponse());
+  const supervisor = {
+    health: () => true,
+    ready: () => false,
+    start: () => hostPromise,
+    stop: async () => undefined,
+  };
+  const service = await start(
+    {
+      dataHost: "0.0.0.0",
+      dataPort,
+      adminHost: "127.0.0.1",
+      adminPort: 0,
+      dataDir: "/data",
+      codexHome: "/data/codex",
+      codexBin: "codex",
+      bifrostProxyToken: "b".repeat(32),
+      metricsToken: "m".repeat(32),
+      maxActiveTurns: 4,
+      queueCapacity: 32,
+      turnTimeoutMs: 600_000,
+      toolTimeoutMs: 900_000,
+      responseTtlMs: 604_800_000,
+    },
+    { supervisor },
+  );
+
+  try {
+    const request = fetch(`http://127.0.0.1:${dataPort}/v1/models`, {
+      headers: { authorization: `Bearer ${"b".repeat(32)}` },
+    });
+    const beforeReady = await Promise.race([
+      request,
+      new Promise<"pending">((resolve) =>
+        setTimeout(() => resolve("pending"), 250),
+      ),
+    ]);
+    expect(modelList).not.toHaveBeenCalled();
+
+    resolveHost({ generation: 7, modelList } as unknown as CodexHost);
+    const initialResponse = await request;
+    const readyResponse = await fetch(
+      `http://127.0.0.1:${dataPort}/v1/models`,
+      { headers: { authorization: `Bearer ${"b".repeat(32)}` } },
+    );
+
+    expect(beforeReady).not.toBe("pending");
+    expect(initialResponse.status).toBe(503);
+    expect(await initialResponse.json()).toEqual({
+      error: {
+        message: "Service unavailable",
+        type: "server_error",
+        param: null,
+        code: "codex_unavailable",
+      },
+    });
+    expect(readyResponse.status).toBe(200);
+    expect(modelList).toHaveBeenCalledTimes(1);
+  } finally {
+    await service.close();
+  }
 });
