@@ -16,6 +16,7 @@ import {
 export interface DataAppDependencies {
   health(): boolean;
   ready(): boolean;
+  accountReady(): boolean;
   draining(): boolean;
   bifrostToken: string;
   metricsToken: string;
@@ -36,6 +37,13 @@ export function createDataApp(deps: DataAppDependencies): Hono {
   );
   app.use("/v1/*", async (context, next) => {
     authenticateBearer(context.req.header("authorization"), deps.bifrostToken);
+    if (!deps.ready() || !deps.accountReady()) {
+      throw new ProxyError(
+        503,
+        "authentication_required",
+        "Authentication required",
+      );
+    }
     await next();
   });
   app.use("/metrics", async (context, next) => {
@@ -49,7 +57,7 @@ export function createDataApp(deps: DataAppDependencies): Hono {
       : context.body(null, 500),
   );
   app.get("/readyz", (context) =>
-    deps.ready() && !deps.draining()
+    deps.ready() && deps.accountReady() && !deps.draining()
       ? context.body(null, 200)
       : context.body(null, 503),
   );

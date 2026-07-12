@@ -51,6 +51,13 @@ type EventWaiter = {
   reject(error: unknown): void;
 };
 
+export type AccountHostNotification = Extract<
+  HostNotification,
+  { method: "account/updated" | "account/login/completed" }
+>;
+
+type AccountEventListener = (event: AccountHostNotification) => void;
+
 export class TurnEventSubscription implements AsyncIterable<HostNotification> {
   readonly #events: HostNotification[] = [];
   readonly #waiters: EventWaiter[] = [];
@@ -162,6 +169,7 @@ function eventIdentity(
 export class HostEventDispatcher {
   readonly #active = new Map<string, TurnEventSubscription>();
   readonly #pending = new Map<string, Set<TurnEventSubscription>>();
+  readonly #accountListeners = new Set<AccountEventListener>();
   readonly #host: CodexHost;
   #consuming = false;
 
@@ -180,6 +188,12 @@ export class HostEventDispatcher {
     }
     this.ensureConsumer();
     return subscription;
+  }
+
+  subscribeAccount(listener: AccountEventListener): () => void {
+    this.#accountListeners.add(listener);
+    this.ensureConsumer();
+    return () => this.#accountListeners.delete(listener);
   }
 
   bind(subscription: TurnEventSubscription, turnId: string): void {
@@ -229,6 +243,13 @@ export class HostEventDispatcher {
   }
 
   private dispatch(event: HostNotification): void {
+    if (
+      event.method === "account/updated" ||
+      event.method === "account/login/completed"
+    ) {
+      for (const listener of this.#accountListeners) listener(event);
+      return;
+    }
     const identity = eventIdentity(event);
     if (!identity) return;
 

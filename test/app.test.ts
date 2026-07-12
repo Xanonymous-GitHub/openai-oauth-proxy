@@ -66,9 +66,12 @@ class EventQueue implements AsyncIterable<HostNotification> {
 
 it("exposes minimal probes and rejects unknown v1 routes", async () => {
   let draining = false;
+  let ready = false;
+  let accountReady = false;
   const app = createDataApp({
     health: () => true,
-    ready: () => false,
+    ready: () => ready,
+    accountReady: () => accountReady,
     draining: () => draining,
     bifrostToken: "b".repeat(32),
     metricsToken: "m".repeat(32),
@@ -79,6 +82,22 @@ it("exposes minimal probes and rejects unknown v1 routes", async () => {
   });
   expect((await app.request("/healthz")).status).toBe(200);
   expect((await app.request("/readyz")).status).toBe(503);
+  const unavailable = await app.request("/v1/models", {
+    headers: { authorization: `Bearer ${"b".repeat(32)}` },
+  });
+  expect(unavailable.status).toBe(503);
+  expect(await unavailable.json()).toEqual({
+    error: {
+      message: "Service unavailable",
+      type: "server_error",
+      param: null,
+      code: "authentication_required",
+    },
+  });
+  const unauthenticated = await app.request("/v1/models");
+  expect(unauthenticated.status).toBe(401);
+  ready = true;
+  accountReady = true;
   const missing = await app.request("/v1/embeddings", {
     headers: { authorization: `Bearer ${"b".repeat(32)}` },
   });
@@ -90,6 +109,45 @@ it("exposes minimal probes and rejects unknown v1 routes", async () => {
   draining = true;
   expect((await app.request("/healthz")).status).toBe(500);
   expect((await app.request("/readyz")).status).toBe(503);
+});
+
+it("serves the admin app, not the data app, on the admin listener", async () => {
+  const adminPort = await availablePort();
+  const supervisor = {
+    health: () => true,
+    ready: () => false,
+    start: () => new Promise<never>(() => undefined),
+    stop: async () => undefined,
+  };
+  const service = await start(
+    {
+      dataHost: "0.0.0.0",
+      dataPort: 0,
+      adminHost: "127.0.0.1",
+      adminPort,
+      dataDir: testDataDir,
+      codexHome: join(testDataDir, "codex"),
+      codexBin: "codex",
+      bifrostProxyToken: "b".repeat(32),
+      metricsToken: "m".repeat(32),
+      maxActiveTurns: 4,
+      queueCapacity: 32,
+      turnTimeoutMs: 600_000,
+      toolTimeoutMs: 900_000,
+      responseTtlMs: 604_800_000,
+    },
+    { supervisor },
+  );
+
+  try {
+    const page = await fetch(`http://127.0.0.1:${adminPort}/`);
+    const dataRoute = await fetch(`http://127.0.0.1:${adminPort}/healthz`);
+    expect(page.status).toBe(200);
+    expect(await page.text()).toContain("Codex authentication");
+    expect(dataRoute.status).toBe(404);
+  } finally {
+    await service.close();
+  }
 });
 
 it("starts two listeners and removes shutdown handlers when closed", async () => {
@@ -264,6 +322,7 @@ it("serves probes during initial recovery and after terminal exhaustion", async 
 
 it("rejects model requests before the first host is ready without a generation-zero load", async () => {
   const dataPort = await availablePort();
+  let supervisorReady = false;
   let resolveHost!: (host: CodexHost) => void;
   const hostPromise = new Promise<CodexHost>((resolve) => {
     resolveHost = resolve;
@@ -271,7 +330,7 @@ it("rejects model requests before the first host is ready without a generation-z
   const modelList = vi.fn(async () => fakeModelListResponse());
   const supervisor = {
     health: () => true,
-    ready: () => false,
+    ready: () => supervisorReady,
     start: () => hostPromise,
     stop: async () => undefined,
   };
@@ -307,8 +366,21 @@ it("rejects model requests before the first host is ready without a generation-z
     ]);
     expect(modelList).not.toHaveBeenCalled();
 
-    resolveHost({ generation: 7, modelList } as unknown as CodexHost);
+    supervisorReady = true;
+    resolveHost({
+      generation: 7,
+      modelList,
+      accountRead: async () => ({
+        account: {
+          type: "chatgpt" as const,
+          email: "person@example.com",
+          planType: "plus" as const,
+        },
+        requiresOpenaiAuth: true,
+      }),
+    } as unknown as CodexHost);
     const initialResponse = await request;
+    await nextTurn();
     const readyResponse = await fetch(
       `http://127.0.0.1:${dataPort}/v1/models`,
       { headers: { authorization: `Bearer ${"b".repeat(32)}` } },
@@ -321,7 +393,7 @@ it("rejects model requests before the first host is ready without a generation-z
         message: "Service unavailable",
         type: "server_error",
         param: null,
-        code: "codex_unavailable",
+        code: "authentication_required",
       },
     });
     expect(readyResponse.status).toBe(200);
@@ -341,6 +413,14 @@ it("serves Chat and Responses through the production listener after host readine
   const threadDelete = vi.fn(async () => ({}));
   const host = {
     generation: 1,
+    accountRead: vi.fn(async () => ({
+      account: {
+        type: "chatgpt" as const,
+        email: "person@example.com",
+        planType: "plus" as const,
+      },
+      requiresOpenaiAuth: true,
+    })),
     modelList: vi.fn(async () =>
       fakeModelListResponse({
         data: [fakeModel({ id: "gpt-5.4", model: "gpt-5.4" })],

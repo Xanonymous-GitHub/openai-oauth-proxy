@@ -28,6 +28,7 @@ function createApp(host: CodexHost) {
   return createDataApp({
     health: () => true,
     ready: () => true,
+    accountReady: () => true,
     draining: () => false,
     bifrostToken,
     metricsToken,

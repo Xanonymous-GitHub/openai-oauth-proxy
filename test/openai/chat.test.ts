@@ -276,6 +276,7 @@ function createFixture(
   const app = createDataApp({
     health: () => true,
     ready: () => true,
+    accountReady: () => true,
     draining: () => false,
     bifrostToken,
     metricsToken: "m".repeat(32),

@@ -1,8 +1,11 @@
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { type ServerType, serve } from "@hono/node-server";
-import { Hono } from "hono";
+import type { Hono } from "hono";
+import { createAdminApp } from "./admin/app.js";
+import { SessionStore } from "./admin/sessions.js";
 import { createDataApp } from "./app.js";
+import { AccountManager } from "./codex/account.js";
 import type { CodexHost } from "./codex/host.js";
 import { createSupervisor } from "./codex/supervisor.js";
 import { type Config, loadConfig } from "./config.js";
@@ -103,9 +106,11 @@ export async function start(
     timeoutMs: config.turnTimeoutMs,
     toolTimeoutMs: config.toolTimeoutMs,
   });
+  const account = new AccountManager(lazyHost);
   const dataApp = createDataApp({
     health: () => supervisor.health(),
     ready: () => supervisor.ready(),
+    accountReady: () => account.ready(),
     draining: () => draining,
     bifrostToken: config.bifrostProxyToken,
     metricsToken: config.metricsToken,
@@ -127,7 +132,11 @@ export async function start(
       },
     },
   });
-  const adminApp = new Hono();
+  const adminApp = createAdminApp({
+    account,
+    sessions: new SessionStore(),
+    allowedOrigins: new Set(["http://127.0.0.1:8081", "http://localhost:8081"]),
+  });
   let dataServer: ServerType;
   try {
     dataServer = await listen(dataApp, config.dataHost, config.dataPort);
@@ -189,6 +198,7 @@ export async function start(
       if (draining) return;
       activeHost = value;
       conversationStore.markContinuationLost(value.generation);
+      void account.start();
       responseSweeper = startResponseSweeper({
         store: conversationStore,
         deleteThread: async (threadId) => {
