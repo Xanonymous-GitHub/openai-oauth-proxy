@@ -580,8 +580,8 @@ export class TurnRunner {
             return result;
           },
           invalidate: async () => {
-            await toolLifecycle.lost?.(activeThreadId, activeTurnId);
             requestCancellation("timeout");
+            await toolLifecycle.lost?.(activeThreadId, activeTurnId);
           },
         };
         this.tools.attach(toolContext, (call) => {

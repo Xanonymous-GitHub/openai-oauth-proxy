@@ -265,7 +265,13 @@ function createFixture(
   };
 }
 
-function createToolFixture() {
+function createToolFixture(
+  options: {
+    deleteThreadError?: Error;
+    streamAbortAt?: number;
+    streamWriteFailureAt?: number;
+  } = {},
+) {
   const store = openStore();
   const operationWorkingDirectory = mkdtempSync(
     join(tmpdir(), "responses-tool-operations-"),
@@ -273,7 +279,10 @@ function createToolFixture() {
   directories.add(operationWorkingDirectory);
   const events = new AsyncQueue<HostNotification>();
   const tools = new AsyncQueue<PendingServerToolCall>();
-  const deleteThread = vi.fn(async () => undefined);
+  const deleteThread = vi.fn(async () => {
+    if (options.deleteThreadError) throw options.deleteThreadError;
+  });
+  const streamEvents: string[] = [];
   const host = {
     generation: 1,
     modelList: vi.fn(async () =>
@@ -321,6 +330,51 @@ function createToolFixture() {
       processGeneration: () => host.generation,
       operationWorkingDirectory,
       deleteThread,
+      ...(options.streamAbortAt === undefined &&
+      options.streamWriteFailureAt === undefined
+        ? {}
+        : {
+            streamSSE: ((
+              _context: unknown,
+              callback: (stream: unknown) => Promise<void>,
+            ) => {
+              let writes = 0;
+              let onAbort: () => void = () => undefined;
+              let payload = "";
+              const body = new ReadableStream({
+                start(controller) {
+                  const stream = {
+                    onAbort(callback: () => void) {
+                      onAbort = callback;
+                    },
+                    async writeSSE(event: { event?: string; data: string }) {
+                      writes += 1;
+                      if (writes === options.streamAbortAt) {
+                        onAbort();
+                        return;
+                      }
+                      if (writes === options.streamWriteFailureAt) {
+                        throw new Error(`stream write ${writes} failed`);
+                      }
+                      if (event.event !== undefined)
+                        streamEvents.push(event.event);
+                      payload += `${event.event ? `event: ${event.event}\n` : ""}data: ${event.data}\n\n`;
+                    },
+                  };
+                  void callback(stream).then(
+                    () => {
+                      controller.enqueue(new TextEncoder().encode(payload));
+                      controller.close();
+                    },
+                    (error) => controller.error(error),
+                  );
+                },
+              });
+              return new Response(body, {
+                headers: { "content-type": "text/event-stream" },
+              });
+            }) as never,
+          }),
     },
   });
   const complete = (text: string) => {
@@ -349,7 +403,18 @@ function createToolFixture() {
       },
     });
   };
-  return { app, complete, deleteThread, events, host, runner, store, tools };
+  return {
+    app,
+    complete,
+    deleteThread,
+    events,
+    host,
+    operationWorkingDirectory,
+    runner,
+    store,
+    streamEvents,
+    tools,
+  };
 }
 
 async function postResponse(
@@ -759,6 +824,209 @@ describe("POST /v1/responses", () => {
       expect(fixture.store.lookup(body.id)).toMatchObject({ state: "lost" }),
     );
     expect(fixture.host.turnInterrupt).not.toHaveBeenCalled();
+  });
+
+  it("interrupts and releases the lease when durable loss cleanup rejects", async () => {
+    const fixture = createToolFixture({
+      deleteThreadError: new Error("sensitive delete failure"),
+    });
+    vi.mocked(fixture.host.turnStart).mockImplementationOnce(async () => {
+      fixture.tools.push({
+        generation: 1,
+        id: "rpc-cleanup-reject",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          callId: "internal-cleanup-reject",
+          namespace: null,
+          tool: "lookup",
+          arguments: {},
+        },
+        respond: vi.fn(),
+        reject: vi.fn(),
+      });
+      return { turn: fakeTurn() };
+    });
+    const suspended = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      input: "lookup",
+      tools: [{ type: "function", name: "lookup", parameters: {} }],
+    });
+    const body = (await suspended.json()) as { id: string };
+
+    fixture.runner.tools.invalidateResponse(body.id);
+
+    await vi.waitFor(() =>
+      expect(fixture.host.turnInterrupt).toHaveBeenCalledOnce(),
+    );
+    expect(fixture.deleteThread).toHaveBeenCalledOnce();
+    expect(fixture.store.lookup(body.id)).toMatchObject({ state: "lost" });
+    expect(
+      fixture.store.acquireLease("thread-1", "lease-probe", "turn", 1),
+    ).toBe(true);
+    expect(readdirSync(fixture.operationWorkingDirectory)).toEqual([]);
+  });
+
+  it("rejects a strict definition change without consuming the pending call", async () => {
+    const fixture = createToolFixture();
+    const respond = vi.fn(() => fixture.complete("strict complete"));
+    vi.mocked(fixture.host.turnStart).mockImplementationOnce(async () => {
+      fixture.tools.push({
+        generation: 1,
+        id: "rpc-strict",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          callId: "internal-strict",
+          namespace: null,
+          tool: "lookup",
+          arguments: {},
+        },
+        respond,
+        reject: vi.fn(),
+      });
+      return { turn: fakeTurn() };
+    });
+    const strictTools = [
+      {
+        type: "function" as const,
+        name: "lookup",
+        parameters: {},
+        strict: true,
+      },
+    ];
+    const suspended = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      input: "lookup",
+      tools: strictTools,
+    });
+    const body = (await suspended.json()) as {
+      id: string;
+      output: Array<{ call_id: string }>;
+    };
+    const callId = body.output[0]?.call_id ?? "missing";
+
+    const mismatch = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      previous_response_id: body.id,
+      tools: [{ ...strictTools[0], strict: false }],
+      input: [
+        { type: "function_call_output", call_id: callId, output: "found" },
+      ],
+    });
+
+    expect(mismatch.status).toBe(400);
+    expect(await mismatch.json()).toMatchObject({
+      error: { code: "tool_definitions_changed" },
+    });
+    expect(respond).not.toHaveBeenCalled();
+    expect(fixture.store.lookup(body.id)).toMatchObject({ state: "pending" });
+
+    const completed = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      previous_response_id: body.id,
+      tools: strictTools,
+      input: [
+        { type: "function_call_output", call_id: callId, output: "found" },
+      ],
+    });
+    expect(completed.status).toBe(200);
+  });
+
+  it.each([
+    ["initial write", { streamWriteFailureAt: 1 }],
+    ["mid-item write", { streamWriteFailureAt: 3 }],
+    ["final write", { streamWriteFailureAt: 10 }],
+    [
+      "write with cleanup rejection",
+      {
+        streamWriteFailureAt: 1,
+        deleteThreadError: new Error("sensitive delete failure"),
+      },
+    ],
+    ["abort", { streamAbortAt: 2 }],
+  ] as const)("invalidates every repeated call after a continuation stream %s failure", async (_name, streamFailure) => {
+    const fixture = createToolFixture(streamFailure);
+    const repeatedRejects = [vi.fn(), vi.fn()];
+    const firstRespond = vi.fn(() => {
+      for (const [index, tool] of ["second", "third"].entries()) {
+        fixture.tools.push({
+          generation: 1,
+          id: `rpc-repeat-${index}`,
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            callId: `internal-repeat-${index}`,
+            namespace: null,
+            tool,
+            arguments: { index },
+          },
+          respond: vi.fn(),
+          reject: repeatedRejects[index] ?? vi.fn(),
+        });
+      }
+    });
+    vi.mocked(fixture.host.turnStart).mockImplementationOnce(async () => {
+      fixture.tools.push({
+        generation: 1,
+        id: "rpc-first",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          callId: "internal-first",
+          namespace: null,
+          tool: "first",
+          arguments: {},
+        },
+        respond: firstRespond,
+        reject: vi.fn(),
+      });
+      return { turn: fakeTurn() };
+    });
+    const definitions = ["first", "second", "third"].map((name) => ({
+      type: "function" as const,
+      name,
+      parameters: { type: "object" },
+    }));
+    const suspended = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      input: "start",
+      tools: definitions,
+    });
+    const body = (await suspended.json()) as {
+      id: string;
+      output: Array<{ call_id: string }>;
+    };
+    const continuation = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      previous_response_id: body.id,
+      tools: definitions,
+      stream: true,
+      input: [
+        {
+          type: "function_call_output",
+          call_id: body.output[0]?.call_id ?? "missing",
+          output: "first result",
+        },
+      ],
+    });
+
+    if (_name === "abort")
+      await expect(continuation.text()).resolves.toBeDefined();
+    else
+      await expect(continuation.text()).rejects.toThrow(
+        /stream write \d+ failed/,
+      );
+    await vi.waitFor(() =>
+      expect(fixture.host.turnInterrupt).toHaveBeenCalledOnce(),
+    );
+    expect(repeatedRejects[0]).toHaveBeenCalledOnce();
+    expect(repeatedRejects[1]).toHaveBeenCalledOnce();
+    expect(fixture.deleteThread).toHaveBeenCalledOnce();
+    expect(fixture.streamEvents).not.toContain("response.completed");
+    expect(
+      fixture.store.acquireLease("thread-1", "lease-probe", "turn", 1),
+    ).toBe(true);
   });
 
   it("returns response_not_found for outputs targeting an unknown response", async () => {

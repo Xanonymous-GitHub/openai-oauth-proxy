@@ -177,6 +177,48 @@ describe("ToolBridge", () => {
     );
   });
 
+  it("canonicalizes every accepted endpoint definition field", () => {
+    const { bridge } = createBridge();
+    const fingerprintDefinitions = (
+      bridge as unknown as {
+        fingerprintDefinitions(tools: unknown[]): string;
+      }
+    ).fingerprintDefinitions.bind(bridge);
+    const first = [
+      {
+        type: "function",
+        name: "lookup",
+        description: "Lookup",
+        parameters: {
+          required: ["id"],
+          properties: { id: { type: "number" } },
+          type: "object",
+        },
+        strict: true,
+      },
+    ];
+    const reorderedKeys = [
+      {
+        strict: true,
+        parameters: {
+          type: "object",
+          properties: { id: { type: "number" } },
+          required: ["id"],
+        },
+        description: "Lookup",
+        name: "lookup",
+        type: "function",
+      },
+    ];
+
+    expect(fingerprintDefinitions(first)).toBe(
+      fingerprintDefinitions(reorderedKeys),
+    );
+    expect(fingerprintDefinitions(first)).not.toBe(
+      fingerprintDefinitions([{ ...reorderedKeys[0], strict: false }]),
+    );
+  });
+
   it("registers opaque generation-bound IDs and fans in all results", async () => {
     const { bridge } = createBridge();
     const turn = context();

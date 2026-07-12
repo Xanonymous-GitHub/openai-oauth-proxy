@@ -93,11 +93,14 @@ async function loseResponseOperation(
 ): Promise<void> {
   const operationCwd = deps.store.lookupOperation(responseId)?.operationCwd;
   const cleanupThreadId = deps.store.loseOperation(responseId);
-  if (cleanupThreadId !== undefined) {
-    await deps.deleteThread(cleanupThreadId);
-    deps.store.finishAbandonedThread(cleanupThreadId);
+  try {
+    if (cleanupThreadId !== undefined) {
+      await deps.deleteThread(cleanupThreadId);
+      deps.store.finishAbandonedThread(cleanupThreadId);
+    }
+  } finally {
+    removeOperationDirectory(operationCwd);
   }
-  removeOperationDirectory(operationCwd);
 }
 
 async function threadsForOperation(
@@ -433,7 +436,9 @@ export function createResponsesHandler(
       request.tools ?? [],
     );
     const dynamicTools = request.tool_choice === "none" ? [] : validatedTools;
-    const toolFingerprint = deps.runner.tools.fingerprint(dynamicTools);
+    const toolFingerprint = deps.runner.tools.fingerprintDefinitions(
+      request.tools ?? [],
+    );
     const outputs = functionOutputs(request);
     if (outputs.length > 0) {
       if (
@@ -480,7 +485,9 @@ export function createResponsesHandler(
       try {
         result = await continuation.result;
       } catch (error) {
-        await loseResponseOperation(deps, request.previous_response_id);
+        await loseResponseOperation(deps, request.previous_response_id).catch(
+          () => undefined,
+        );
         throw error;
       }
       const identity: ResponseIdentity = {
@@ -496,94 +503,123 @@ export function createResponsesHandler(
       if (!request.stream) return context.json(responseBody(identity, result));
       const sendStream = deps.streamSSE ?? streamSSE;
       return sendStream(context, async (stream) => {
+        let aborted = false;
+        const invalidate = (): void => {
+          aborted = true;
+          if (result.finishReason === "tool_calls") {
+            deps.runner.tools.invalidateResponse(identity.responseId);
+          }
+        };
+        stream.onAbort(invalidate);
+        const writeSSE = async (
+          event: Parameters<typeof stream.writeSSE>[0],
+        ): Promise<void> => {
+          if (aborted) throw new DOMException("aborted", "AbortError");
+          await stream.writeSSE(event);
+          if (aborted) throw new DOMException("aborted", "AbortError");
+        };
         let sequenceNumber = 0;
-        await stream.writeSSE({
-          event: "response.created",
-          data: JSON.stringify({
-            type: "response.created",
-            sequence_number: sequenceNumber,
-            response: {
-              id: identity.responseId,
-              object: "response",
-              created_at: identity.createdAt,
-              status: "in_progress",
-              model: identity.model,
-              output: [],
-            },
-          }),
-        });
-        sequenceNumber += 1;
-        if (result.finishReason === "stop") {
-          await stream.writeSSE({
-            event: "response.output_text.done",
+        try {
+          await writeSSE({
+            event: "response.created",
             data: JSON.stringify({
-              type: "response.output_text.done",
+              type: "response.created",
               sequence_number: sequenceNumber,
-              item_id: identity.messageId,
-              output_index: 0,
-              content_index: 0,
-              text: result.text,
-              logprobs: [],
+              response: {
+                id: identity.responseId,
+                object: "response",
+                created_at: identity.createdAt,
+                status: "in_progress",
+                model: identity.model,
+                output: [],
+              },
             }),
           });
           sequenceNumber += 1;
+          if (result.finishReason === "stop") {
+            await writeSSE({
+              event: "response.output_text.done",
+              data: JSON.stringify({
+                type: "response.output_text.done",
+                sequence_number: sequenceNumber,
+                item_id: identity.messageId,
+                output_index: 0,
+                content_index: 0,
+                text: result.text,
+                logprobs: [],
+              }),
+            });
+            sequenceNumber += 1;
+          }
+          for (const [outputIndex, call] of (
+            result.toolCalls ?? []
+          ).entries()) {
+            const item = responseBody(identity, {
+              ...result,
+              toolCalls: [call],
+            }).output[0];
+            await writeSSE({
+              event: "response.output_item.added",
+              data: JSON.stringify({
+                type: "response.output_item.added",
+                sequence_number: sequenceNumber,
+                output_index: outputIndex,
+                item,
+              }),
+            });
+            sequenceNumber += 1;
+            await writeSSE({
+              event: "response.function_call_arguments.delta",
+              data: JSON.stringify({
+                type: "response.function_call_arguments.delta",
+                sequence_number: sequenceNumber,
+                item_id: item?.id,
+                output_index: outputIndex,
+                delta: JSON.stringify(call.arguments),
+              }),
+            });
+            sequenceNumber += 1;
+            await writeSSE({
+              event: "response.function_call_arguments.done",
+              data: JSON.stringify({
+                type: "response.function_call_arguments.done",
+                sequence_number: sequenceNumber,
+                item_id: item?.id,
+                output_index: outputIndex,
+                arguments: JSON.stringify(call.arguments),
+              }),
+            });
+            sequenceNumber += 1;
+            await writeSSE({
+              event: "response.output_item.done",
+              data: JSON.stringify({
+                type: "response.output_item.done",
+                sequence_number: sequenceNumber,
+                output_index: outputIndex,
+                item,
+              }),
+            });
+            sequenceNumber += 1;
+          }
+          await writeSSE({
+            event: "response.completed",
+            data: JSON.stringify({
+              type: "response.completed",
+              sequence_number: sequenceNumber,
+              response: responseBody(identity, result),
+            }),
+          });
+        } catch (error) {
+          invalidate();
+          if (
+            aborted &&
+            error instanceof DOMException &&
+            error.name === "AbortError"
+          ) {
+            return;
+          }
+          throw error;
         }
-        for (const [outputIndex, call] of (result.toolCalls ?? []).entries()) {
-          const item = responseBody(identity, {
-            ...result,
-            toolCalls: [call],
-          }).output[0];
-          await stream.writeSSE({
-            event: "response.output_item.added",
-            data: JSON.stringify({
-              type: "response.output_item.added",
-              sequence_number: sequenceNumber,
-              output_index: outputIndex,
-              item,
-            }),
-          });
-          sequenceNumber += 1;
-          await stream.writeSSE({
-            event: "response.function_call_arguments.delta",
-            data: JSON.stringify({
-              type: "response.function_call_arguments.delta",
-              sequence_number: sequenceNumber,
-              item_id: item?.id,
-              output_index: outputIndex,
-              delta: JSON.stringify(call.arguments),
-            }),
-          });
-          sequenceNumber += 1;
-          await stream.writeSSE({
-            event: "response.function_call_arguments.done",
-            data: JSON.stringify({
-              type: "response.function_call_arguments.done",
-              sequence_number: sequenceNumber,
-              item_id: item?.id,
-              output_index: outputIndex,
-              arguments: JSON.stringify(call.arguments),
-            }),
-          });
-          sequenceNumber += 1;
-          await stream.writeSSE({
-            event: "response.output_item.done",
-            data: JSON.stringify({
-              type: "response.output_item.done",
-              sequence_number: sequenceNumber,
-              output_index: outputIndex,
-              item,
-            }),
-          });
-          sequenceNumber += 1;
-        }
-        await stream.writeSSE({
-          event: "response.completed",
-          data: JSON.stringify({
-            type: "response.completed",
-            sequence_number: sequenceNumber,
-            response: responseBody(identity, result),
-          }),
-        });
       });
     }
     assertOrdinaryRequest(request);

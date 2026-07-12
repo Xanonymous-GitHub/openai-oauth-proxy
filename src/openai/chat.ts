@@ -16,6 +16,7 @@ export interface ChatHandlerDependencies {
   runner: TurnRunner;
   deleteThread(threadId: string, signal?: AbortSignal): void | Promise<void>;
   release?: () => void | Promise<void>;
+  streamSSE?: typeof streamSSE;
 }
 
 interface ChatIdentity {
@@ -147,7 +148,9 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
       request.tools ?? [],
     );
     const dynamicTools = request.tool_choice === "none" ? [] : validatedTools;
-    const toolFingerprint = deps.runner.tools.fingerprint(dynamicTools);
+    const toolFingerprint = deps.runner.tools.fingerprintDefinitions(
+      request.tools ?? [],
+    );
     const outputs = toolOutputs(request.messages);
 
     const images = imageParts(request.messages);
@@ -285,17 +288,34 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
     }
 
     context.header("X-Accel-Buffering", "no");
-    return streamSSE(context, async (stream) => {
+    const sendStream = deps.streamSSE ?? streamSSE;
+    return sendStream(context, async (stream) => {
       const controller = new AbortController();
       const signal = AbortSignal.any([
         context.req.raw.signal,
         controller.signal,
       ]);
-      stream.onAbort(() => controller.abort());
       const streamedToolCallIds: string[] = [];
+      let aborted = false;
+      stream.onAbort(() => {
+        aborted = true;
+        controller.abort();
+        deps.runner.tools.invalidateCalls(streamedToolCallIds);
+      });
+      const writeSSE = async (event: { data: string }): Promise<void> => {
+        if (aborted) throw new DOMException("aborted", "AbortError");
+        await stream.writeSSE(event);
+        if (aborted) throw new DOMException("aborted", "AbortError");
+      };
 
       try {
-        await stream.writeSSE({
+        const continuationStage = continuationResult
+          ? await continuationResult
+          : undefined;
+        for (const call of continuationStage?.toolCalls ?? []) {
+          streamedToolCallIds.push(call.id);
+        }
+        await writeSSE({
           data: JSON.stringify(
             chunk(identity, {
               index: 0,
@@ -307,21 +327,23 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
 
         let usage: TokenUsage | undefined;
         let toolIndex = 0;
-        const source = continuationResult
+        const source = continuationStage
           ? (async function* () {
-              const result = await continuationResult;
-              if (result.text !== "") {
-                yield { type: "text.delta" as const, delta: result.text };
+              if (continuationStage.text !== "") {
+                yield {
+                  type: "text.delta" as const,
+                  delta: continuationStage.text,
+                };
               }
-              for (const call of result.toolCalls ?? []) {
+              for (const call of continuationStage.toolCalls ?? []) {
                 yield { type: "tool.call" as const, call };
               }
-              yield { type: "completed" as const, result };
+              yield { type: "completed" as const, result: continuationStage };
             })()
           : deps.runner.stream(command, signal, lifecycle);
         for await (const event of source) {
           if (event.type === "text.delta") {
-            await stream.writeSSE({
+            await writeSSE({
               data: JSON.stringify(
                 chunk(identity, {
                   index: 0,
@@ -331,8 +353,10 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
               ),
             });
           } else if (event.type === "tool.call") {
-            streamedToolCallIds.push(event.call.id);
-            await stream.writeSSE({
+            if (!streamedToolCallIds.includes(event.call.id)) {
+              streamedToolCallIds.push(event.call.id);
+            }
+            await writeSSE({
               data: JSON.stringify(
                 chunk(identity, {
                   index: 0,
@@ -357,7 +381,7 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
           } else if (event.type === "usage") {
             usage = event.usage;
           } else if (event.type === "completed") {
-            await stream.writeSSE({
+            await writeSSE({
               data: JSON.stringify(
                 chunk(
                   identity,
@@ -370,9 +394,9 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
                 ),
               ),
             });
-            await stream.writeSSE({ data: "[DONE]" });
+            await writeSSE({ data: "[DONE]" });
           } else if (event.type === "failed") {
-            await stream.writeSSE({
+            await writeSSE({
               data: JSON.stringify(openAIErrorBody(event.error)),
             });
             return;
@@ -380,6 +404,13 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
         }
       } catch (error) {
         deps.runner.tools.invalidateCalls(streamedToolCallIds);
+        if (
+          aborted &&
+          error instanceof DOMException &&
+          error.name === "AbortError"
+        ) {
+          return;
+        }
         throw error;
       }
     });

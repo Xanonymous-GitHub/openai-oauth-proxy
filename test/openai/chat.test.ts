@@ -152,6 +152,8 @@ function createFixture(
     withUsage?: boolean;
     timeoutMs?: number;
     lifecycleWaitMs?: number;
+    streamAbortAt?: number;
+    streamWriteFailureAt?: number;
     turnStart?: CodexHost["turnStart"];
     threadInjectItems?: CodexHost["threadInjectItems"];
   } = {},
@@ -159,6 +161,7 @@ function createFixture(
   const events = new EventQueue();
   const tools = new ToolQueue();
   const release = vi.fn(async () => undefined);
+  const streamPayloads: string[] = [];
   const host = {
     generation: 1,
     modelList: vi.fn(async () =>
@@ -215,6 +218,57 @@ function createFixture(
       : { lifecycleWaitMs: options.lifecycleWaitMs }),
     interruptWaitMs: 10,
   });
+  const chat = {
+    runner,
+    release,
+    deleteThread: async (threadId: string, signal?: AbortSignal) => {
+      await host.threadDelete({ threadId }, signal);
+    },
+    ...(options.streamAbortAt === undefined &&
+    options.streamWriteFailureAt === undefined
+      ? {}
+      : {
+          streamSSE: ((
+            _context: unknown,
+            callback: (stream: unknown) => Promise<void>,
+          ) => {
+            let writes = 0;
+            let onAbort: () => void = () => undefined;
+            let payload = "";
+            const body = new ReadableStream({
+              start(controller) {
+                const stream = {
+                  onAbort(callback: () => void) {
+                    onAbort = callback;
+                  },
+                  async writeSSE(event: { data: string }) {
+                    writes += 1;
+                    if (writes === options.streamAbortAt) {
+                      onAbort();
+                      return;
+                    }
+                    if (writes === options.streamWriteFailureAt) {
+                      throw new Error(`stream write ${writes} failed`);
+                    }
+                    streamPayloads.push(event.data);
+                    payload += `data: ${event.data}\n\n`;
+                  },
+                };
+                void callback(stream).then(
+                  () => {
+                    controller.enqueue(new TextEncoder().encode(payload));
+                    controller.close();
+                  },
+                  (error) => controller.error(error),
+                );
+              },
+            });
+            return new Response(body, {
+              headers: { "content-type": "text/event-stream" },
+            });
+          }) as never,
+        }),
+  };
   const app = createDataApp({
     health: () => true,
     ready: () => true,
@@ -222,15 +276,9 @@ function createFixture(
     bifrostToken,
     metricsToken: "m".repeat(32),
     host,
-    chat: {
-      runner,
-      release,
-      deleteThread: async (threadId: string, signal?: AbortSignal) => {
-        await host.threadDelete({ threadId }, signal);
-      },
-    },
+    chat,
   });
-  return { app, events, host, release, tools };
+  return { app, events, host, release, streamPayloads, tools };
 }
 
 function post(
@@ -876,6 +924,99 @@ describe("POST /v1/chat/completions", () => {
     });
     expect(completed.status).toBe(200);
     expect(host.turnStart).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["write", { streamWriteFailureAt: 2 }],
+    ["abort", { streamAbortAt: 2 }],
+  ] as const)("invalidates mixed text and parallel repeated calls when text streaming %s fails", async (_name, streamFailure) => {
+    const { app, events, host, release, streamPayloads, tools } =
+      createFixture(streamFailure);
+    const repeatedRejects = [vi.fn(), vi.fn()];
+    const firstRespond = vi.fn(() => {
+      events.push({
+        method: "item/completed",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          completedAtMs: 1,
+          item: {
+            type: "agentMessage",
+            id: "message-preamble",
+            text: "tool preamble",
+            phase: null,
+            memoryCitation: null,
+          },
+        },
+      });
+      for (const [index, tool] of ["second", "third"].entries()) {
+        tools.push({
+          generation: 1,
+          id: `rpc-repeat-${index}`,
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            callId: `internal-repeat-${index}`,
+            namespace: null,
+            tool,
+            arguments: { index },
+          },
+          respond: vi.fn(),
+          reject: repeatedRejects[index] ?? vi.fn(),
+        });
+      }
+    });
+    vi.mocked(host.turnStart).mockImplementationOnce(async () => {
+      tools.push({
+        generation: 1,
+        id: "rpc-first",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          callId: "internal-first",
+          namespace: null,
+          tool: "first",
+          arguments: {},
+        },
+        respond: firstRespond,
+        reject: vi.fn(),
+      });
+      return { turn: fakeTurn() };
+    });
+    const definitions = ["first", "second", "third"].map((name) => ({
+      type: "function" as const,
+      function: { name, parameters: { type: "object" } },
+    }));
+    const suspended = await post(app, {
+      ...ordinaryRequest,
+      tools: definitions,
+    });
+    const body = (await suspended.json()) as {
+      choices: Array<{
+        message: { tool_calls: Array<{ id: string }> };
+      }>;
+    };
+    const firstCallId = body.choices[0]?.message.tool_calls[0]?.id ?? "missing";
+    const continuation = await post(app, {
+      model: "gpt-5.4",
+      tools: definitions,
+      stream: true,
+      messages: [
+        ...ordinaryRequest.messages,
+        body.choices[0]?.message,
+        { role: "tool", tool_call_id: firstCallId, content: "first result" },
+      ],
+    });
+
+    if (_name === "abort")
+      await expect(continuation.text()).resolves.toBeDefined();
+    else await expect(continuation.text()).rejects.toThrow();
+    await vi.waitFor(() => expect(host.turnInterrupt).toHaveBeenCalledOnce());
+    expect(repeatedRejects[0]).toHaveBeenCalledOnce();
+    expect(repeatedRejects[1]).toHaveBeenCalledOnce();
+    expect(host.threadDelete).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledOnce();
+    expect(streamPayloads).not.toContain("[DONE]");
   });
 
   it("emits a sanitized SSE error when a stream fails before text", async () => {

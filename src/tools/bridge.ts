@@ -90,17 +90,18 @@ export interface ToolBridgeOptions {
 
 type ToolCallListener = (call: ExternalToolCall) => void;
 
-function stableJson(value: JsonValue | DynamicToolSpec[]): string {
+function stableJson(value: unknown): string {
   if (Array.isArray(value)) {
-    return `[${value.map((item) => stableJson(item as JsonValue)).join(",")}]`;
+    return `[${value.map((item) => stableJson(item)).join(",")}]`;
   }
   if (value !== null && typeof value === "object") {
     return `{${Object.keys(value)
+      .filter((key) => (value as Record<string, unknown>)[key] !== undefined)
       .sort()
       .map(
         (key) =>
           `${JSON.stringify(key)}:${stableJson(
-            (value as Record<string, JsonValue>)[key] as JsonValue,
+            (value as Record<string, unknown>)[key],
           )}`,
       )
       .join(",")}}`;
@@ -187,9 +188,13 @@ export class ToolBridge {
   }
 
   fingerprint(tools: readonly DynamicToolSpec[]): string {
-    return createHash("sha256")
-      .update(stableJson(tools as DynamicToolSpec[]))
-      .digest("base64url");
+    return createHash("sha256").update(stableJson(tools)).digest("base64url");
+  }
+
+  fingerprintDefinitions(
+    tools: readonly (ChatFunctionTool | ResponsesFunctionTool)[],
+  ): string {
+    return createHash("sha256").update(stableJson(tools)).digest("base64url");
   }
 
   register(
