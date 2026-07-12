@@ -117,3 +117,22 @@ Verification after the second remediation:
 - `graphify update .` completed; `graphify-out/` remains untracked and excluded from commits.
 
 Remaining concern: Graphify still reports the non-blocking installed-skill/package version mismatch (`0.4.3` versus `0.9.4`). No implementation blocker remains.
+
+## Final Finding Remediation
+
+Implementation commit: `7c35079` (`fix: abort Responses cleanup on drain`).
+
+- Every Responses handler-owned thread deletion now receives the relevant combined request/admission drain signal, including ordinary and `store: false` completion, stream failure/cancellation, and durable continuation-loss cleanup. Sweep and recovery deletion remains independent of expired request signals.
+- Forced drain can now abort a transport deletion blocked until signal cancellation. The handler first durably abandons the operation, then releases admission and terminal telemetry after the aborted cleanup attempt, allowing store, supervisor, signal listeners, and HTTP listeners to close after the 30-second deadline.
+- Aborted deletion does not finalize the abandoned operation. Its SQLite thread identity remains retryable, and startup recovery can later delete the thread and reconcile the operation.
+- TDD RED produced seven focused failures because all exercised cleanup paths received no signal. GREEN passes the production-listener forced-drain/reopen/recovery regression and signal assertions for ordinary, `store: false`, attachment failure, stream failure, cancellation, and tool-loss cleanup.
+
+Verification after the final remediation:
+
+- Focused app, drain, Responses, tool bridge, and runner suites: `102` tests passed.
+- Full Vitest suite: `358` tests passed.
+- `bun run protocol:check`, `bun run typecheck`, and `bun run build` exited `0`.
+- `bunx biome check src test` exited `0`.
+- `graphify update .` completed; `graphify-out/` remains untracked and excluded from commits.
+
+Remaining concern: Graphify still reports the non-blocking installed-skill/package version mismatch (`0.4.3` versus `0.9.4`). No implementation blocker remains.
