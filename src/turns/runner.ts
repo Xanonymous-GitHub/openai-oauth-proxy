@@ -143,7 +143,7 @@ export class TurnRunner {
     signal?: AbortSignal,
     lifecycle?: TurnLifecycleCallbacks,
   ): Promise<TurnResult> {
-    for await (const event of this.stream(command, signal, lifecycle)) {
+    for await (const event of this.execute(command, signal, lifecycle, false)) {
       if (event.type === "completed") return event.result;
       if (event.type === "failed") throw event.error;
     }
@@ -154,10 +154,19 @@ export class TurnRunner {
     );
   }
 
-  async *stream(
+  stream(
     command: TurnCommand,
     signal?: AbortSignal,
     lifecycle?: TurnLifecycleCallbacks,
+  ): AsyncIterable<ProxyStreamEvent> {
+    return this.execute(command, signal, lifecycle, true);
+  }
+
+  private async *execute(
+    command: TurnCommand,
+    signal: AbortSignal | undefined,
+    lifecycle: TurnLifecycleCallbacks | undefined,
+    projectLifecycleFailures: boolean,
   ): AsyncIterable<ProxyStreamEvent> {
     const generation = this.#host.generation;
     let threadId: string | undefined;
@@ -184,6 +193,7 @@ export class TurnRunner {
       }
       const knownTurnId = turnId ?? subscription.turnId;
       if (!knownTurnId) return;
+      const knownThreadId = threadId;
       turnId = knownTurnId;
       try {
         this.assertGeneration(generation);
@@ -199,8 +209,13 @@ export class TurnRunner {
         subscription?.fail(cancellationError(cancellationCause ?? "abort"));
       }, this.#interruptWaitMs);
       interruptWait.unref?.();
-      interruptPromise = this.#host
-        .turnInterrupt({ threadId, turnId: knownTurnId })
+      interruptPromise = Promise.resolve()
+        .then(() =>
+          this.#host.turnInterrupt({
+            threadId: knownThreadId,
+            turnId: knownTurnId,
+          }),
+        )
         .then(() => {
           this.assertGeneration(generation);
         })
@@ -388,7 +403,16 @@ export class TurnRunner {
               ? cancellationError(cancellationCause)
               : completedTurnError(event.params.turn);
             const lifecycleError = await finalize();
-            if (lifecycleError !== undefined) throw lifecycleError;
+            if (lifecycleError !== undefined) {
+              if (projectLifecycleFailures) {
+                yield {
+                  type: "failed",
+                  error: normalizeError(lifecycleError),
+                };
+                return;
+              }
+              throw lifecycleError;
+            }
             if (error) {
               yield { type: "failed", error };
               return;
@@ -407,7 +431,13 @@ export class TurnRunner {
       }
     } catch (error) {
       const lifecycleError = await finalize();
-      if (lifecycleError !== undefined) throw lifecycleError;
+      if (lifecycleError !== undefined) {
+        if (projectLifecycleFailures) {
+          yield { type: "failed", error: normalizeError(lifecycleError) };
+          return;
+        }
+        throw lifecycleError;
+      }
       yield { type: "failed", error: normalizeError(error) };
     } finally {
       await finalize();

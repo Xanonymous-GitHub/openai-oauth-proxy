@@ -124,6 +124,7 @@ function createFixture(
     supportsImage?: boolean;
     withUsage?: boolean;
     timeoutMs?: number;
+    lifecycleWaitMs?: number;
     turnStart?: CodexHost["turnStart"];
     threadInjectItems?: CodexHost["threadInjectItems"];
   } = {},
@@ -180,6 +181,9 @@ function createFixture(
     ...(options.timeoutMs === undefined
       ? {}
       : { timeoutMs: options.timeoutMs }),
+    ...(options.lifecycleWaitMs === undefined
+      ? {}
+      : { lifecycleWaitMs: options.lifecycleWaitMs }),
     interruptWaitMs: 10,
   });
   const app = createDataApp({
@@ -192,8 +196,8 @@ function createFixture(
     chat: {
       runner,
       release,
-      deleteThread: async (threadId: string) => {
-        await host.threadDelete({ threadId });
+      deleteThread: async (threadId: string, signal?: AbortSignal) => {
+        await host.threadDelete({ threadId }, signal);
       },
     },
   });
@@ -310,7 +314,10 @@ describe("POST /v1/chat/completions", () => {
       expect.any(AbortSignal),
     );
     expect(host.threadDelete).toHaveBeenCalledOnce();
-    expect(host.threadDelete).toHaveBeenCalledWith({ threadId: "thread-1" });
+    expect(host.threadDelete).toHaveBeenCalledWith(
+      { threadId: "thread-1" },
+      expect.any(AbortSignal),
+    );
     expect(release).toHaveBeenCalledOnce();
   });
 
@@ -542,6 +549,42 @@ describe("POST /v1/chat/completions", () => {
     expect(payload).not.toContain('"finish_reason":"stop"');
     expect(payload).not.toContain("data: [DONE]");
     expect(host.threadDelete).toHaveBeenCalledOnce();
+  });
+
+  it("emits a sanitized SSE error when thread deletion rejects", async () => {
+    const { app, host, release } = createFixture();
+    vi.mocked(host.threadDelete).mockRejectedValue(
+      new Error("sensitive thread deletion failure"),
+    );
+    const response = await post(app, { ...ordinaryRequest, stream: true });
+    const payload = await response.text();
+
+    expect(payload).toContain('"code":"codex_host_error"');
+    expect(payload).toContain('"message":"Upstream service error"');
+    expect(payload).not.toContain("sensitive thread deletion failure");
+    expect(payload).not.toContain('"finish_reason":"stop"');
+    expect(payload).not.toContain("data: [DONE]");
+    expect(host.threadDelete).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it("emits a sanitized SSE error when lifecycle cleanup times out", async () => {
+    const { app, host, release } = createFixture({ lifecycleWaitMs: 5 });
+    vi.mocked(host.threadDelete).mockImplementation(
+      async (_params, signal) =>
+        new Promise((resolve) =>
+          signal?.addEventListener("abort", () => resolve({}), { once: true }),
+        ),
+    );
+    const response = await post(app, { ...ordinaryRequest, stream: true });
+    const payload = await response.text();
+
+    expect(payload).toContain('"code":"turn_lifecycle_timeout"');
+    expect(payload).toContain('"message":"Upstream service error"');
+    expect(payload).not.toContain('"finish_reason":"stop"');
+    expect(payload).not.toContain("data: [DONE]");
+    expect(host.threadDelete).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledOnce();
   });
 
   it("interrupts, releases, and deletes once when the stream disconnects", async () => {

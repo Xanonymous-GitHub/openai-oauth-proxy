@@ -773,6 +773,32 @@ describe("TurnRunner", () => {
     expect(cleanup).toHaveBeenCalledOnce();
   });
 
+  it("settles lifecycle when turn interrupt throws synchronously", async () => {
+    const { host } = createHost();
+    const release = vi.fn();
+    const cleanup = vi.fn();
+    vi.mocked(host.turnInterrupt).mockImplementation(() => {
+      throw new Error("sensitive synchronous interrupt failure");
+    });
+    const controller = new AbortController();
+    const result = createRunner(host, {
+      interruptWaitMs: 5,
+      release,
+      cleanup,
+    }).run(command(), controller.signal);
+
+    await vi.waitFor(() => expect(host.turnStart).toHaveBeenCalledOnce());
+    controller.abort();
+
+    await expect(result).rejects.toMatchObject({
+      code: "codex_host_error",
+      status: 502,
+    });
+    expect(host.turnInterrupt).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledOnce();
+    expect(cleanup).toHaveBeenCalledOnce();
+  });
+
   it("preserves timeout status when its interrupt RPC hangs", async () => {
     const { host } = createHost();
     const release = vi.fn();
