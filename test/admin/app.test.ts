@@ -8,6 +8,10 @@ const allowedOrigins = new Set([
   "http://localhost:8081",
 ]);
 
+function flush(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
 function fixture(state: AccountState = { type: "signed_out" }) {
   let now = 0;
   let sequence = 0;
@@ -259,6 +263,74 @@ it("serves a framework-free page and external script under a restrictive CSP", a
     /React|Vue|innerHTML|outerHTML|insertAdjacentHTML/,
   );
   expect(javascript).toContain("textContent");
+  expect(javascript).toContain(
+    "response.status === 401 || response.status === 403",
+  );
+});
+
+it("bootstraps a fresh session after a forbidden mutation without rendering missing state", async () => {
+  const { app } = fixture();
+  const script = await app.request("/app.js");
+  const javascript = await script.text();
+  const listeners = new Map<string, Map<string, (event?: Event) => void>>();
+  const elements = new Map(
+    [
+      "status",
+      "email",
+      "plan",
+      "verification-url",
+      "user-code",
+      "login-form",
+      "refresh",
+      "cancel",
+      "logout",
+    ].map((id) => [
+      id,
+      {
+        textContent: "",
+        addEventListener(type: string, listener: (event?: Event) => void) {
+          const byType = listeners.get(id) ?? new Map();
+          byType.set(type, listener);
+          listeners.set(id, byType);
+        },
+      },
+    ]),
+  );
+  const document = {
+    getElementById(id: string) {
+      return elements.get(id);
+    },
+  };
+  const fetchMock = vi
+    .fn<typeof fetch>()
+    .mockResolvedValueOnce(
+      Response.json({
+        state: { type: "signed_out" },
+        csrfToken: "initial-csrf",
+      }),
+    )
+    .mockResolvedValueOnce(
+      Response.json({ error: "forbidden" }, { status: 403 }),
+    )
+    .mockResolvedValueOnce(
+      Response.json({
+        state: { type: "signed_out" },
+        csrfToken: "replacement-csrf",
+      }),
+    );
+
+  new Function("document", "fetch", javascript)(document, fetchMock);
+  await flush();
+  listeners.get("refresh")?.get("click")?.();
+  await flush();
+  await flush();
+
+  expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
+    "/api/state",
+    "/api/refresh",
+    "/api/state",
+  ]);
+  expect(elements.get("status")?.textContent).toBe("signed_out");
 });
 
 it("sanitizes account-operation failures", async () => {

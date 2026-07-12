@@ -39,7 +39,8 @@ export class AccountManager implements AccountController {
   #generation: number | undefined;
   #readingGeneration: number | undefined;
   #loginId: string | undefined;
-  #readSequence = 0;
+  #operationEpoch = 0;
+  #logoutEpoch: number | undefined;
   #started = false;
   #startPromise: Promise<void> | undefined;
   #unsubscribe: (() => void) | undefined;
@@ -76,8 +77,11 @@ export class AccountManager implements AccountController {
   }
 
   async login(): Promise<AccountState> {
+    if (this.#logoutEpoch !== undefined) {
+      throw new Error("Device login unavailable");
+    }
     const generation = this.currentGeneration();
-    const sequence = ++this.#readSequence;
+    const epoch = ++this.#operationEpoch;
     this.#state = { type: "checking" };
     try {
       const response = await this.#host.loginStart({
@@ -86,7 +90,7 @@ export class AccountManager implements AccountController {
       if (
         response.type !== "chatgptDeviceCode" ||
         generation === undefined ||
-        sequence !== this.#readSequence ||
+        epoch !== this.#operationEpoch ||
         this.currentGeneration() !== generation
       ) {
         throw new Error("Device login unavailable");
@@ -101,7 +105,7 @@ export class AccountManager implements AccountController {
       };
       return this.#state;
     } catch {
-      if (sequence === this.#readSequence) {
+      if (epoch === this.#operationEpoch) {
         this.#state = AUTHENTICATION_ERROR;
       }
       throw new Error("Device login unavailable");
@@ -109,31 +113,45 @@ export class AccountManager implements AccountController {
   }
 
   async cancel(): Promise<void> {
+    if (this.#logoutEpoch !== undefined) return;
+    const epoch = ++this.#operationEpoch;
     const loginId = this.#loginId;
     this.#loginId = undefined;
-    this.#readSequence += 1;
     this.#state = { type: "signed_out" };
     if (!loginId) return;
     try {
       await this.#host.loginCancel({ loginId });
     } catch {
-      this.#state = AUTHENTICATION_ERROR;
+      if (epoch === this.#operationEpoch) this.#state = AUTHENTICATION_ERROR;
       throw new Error("Authentication unavailable");
     }
   }
 
   refresh(): Promise<void> {
+    if (this.#logoutEpoch !== undefined) return Promise.resolve();
     return this.readCurrentGeneration();
   }
 
   async logout(): Promise<void> {
+    const epoch = ++this.#operationEpoch;
+    this.#logoutEpoch = epoch;
     this.#loginId = undefined;
-    this.#readSequence += 1;
     this.#state = { type: "signed_out" };
     try {
       await this.#host.logout();
+      if (this.#logoutEpoch !== epoch) return;
+      this.#operationEpoch += 1;
+      this.#logoutEpoch = undefined;
+      this.#readingGeneration = undefined;
+      this.#generation = this.currentGeneration();
+      this.#state = { type: "signed_out" };
     } catch {
-      this.#state = AUTHENTICATION_ERROR;
+      if (this.#logoutEpoch === epoch) {
+        this.#operationEpoch += 1;
+        this.#logoutEpoch = undefined;
+        this.#readingGeneration = undefined;
+        this.#state = AUTHENTICATION_ERROR;
+      }
       throw new Error("Authentication unavailable");
     }
   }
@@ -146,6 +164,7 @@ export class AccountManager implements AccountController {
   }
 
   private handleNotification(event: AccountHostNotification): void {
+    if (this.#logoutEpoch !== undefined) return;
     const generation = this.currentGeneration();
     if (generation === undefined || event.generation !== generation) return;
     if (event.method === "account/updated") {
@@ -155,7 +174,7 @@ export class AccountManager implements AccountController {
     if (!this.#loginId || event.params.loginId !== this.#loginId) return;
     this.#loginId = undefined;
     if (!event.params.success) {
-      this.#readSequence += 1;
+      this.#operationEpoch += 1;
       this.#generation = generation;
       this.#state = AUTHENTICATION_ERROR;
       return;
@@ -164,7 +183,7 @@ export class AccountManager implements AccountController {
   }
 
   private ensureGeneration(): void {
-    if (!this.#started) return;
+    if (!this.#started || this.#logoutEpoch !== undefined) return;
     const generation = this.currentGeneration();
     if (generation === undefined || generation === this.#generation) return;
     if (generation === this.#readingGeneration) return;
@@ -174,6 +193,7 @@ export class AccountManager implements AccountController {
   }
 
   private readCurrentGeneration(): Promise<void> {
+    if (this.#logoutEpoch !== undefined) return Promise.resolve();
     const generation = this.currentGeneration();
     if (generation === undefined) {
       this.#state = AUTHENTICATION_ERROR;
@@ -183,13 +203,14 @@ export class AccountManager implements AccountController {
   }
 
   private async readGeneration(generation: number): Promise<void> {
-    const sequence = ++this.#readSequence;
+    if (this.#logoutEpoch !== undefined) return;
+    const epoch = ++this.#operationEpoch;
     this.#readingGeneration = generation;
     this.#state = { type: "checking" };
     try {
       const response = await this.#host.accountRead(true);
       if (
-        sequence !== this.#readSequence ||
+        epoch !== this.#operationEpoch ||
         this.currentGeneration() !== generation
       ) {
         return;
@@ -205,7 +226,7 @@ export class AccountManager implements AccountController {
           : { type: "signed_out" };
     } catch (error) {
       if (
-        sequence !== this.#readSequence ||
+        epoch !== this.#operationEpoch ||
         this.currentGeneration() !== generation
       ) {
         return;
@@ -215,7 +236,7 @@ export class AccountManager implements AccountController {
       }
       this.#state = AUTHENTICATION_ERROR;
     } finally {
-      if (sequence === this.#readSequence) this.#readingGeneration = undefined;
+      if (epoch === this.#operationEpoch) this.#readingGeneration = undefined;
     }
   }
 

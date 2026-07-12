@@ -1,5 +1,7 @@
 import { expect, it, vi } from "vitest";
-import { AccountManager, type AccountState } from "../../src/codex/account.js";
+import { createAdminApp } from "../../src/admin/app.js";
+import { SessionStore } from "../../src/admin/sessions.js";
+import { AccountManager } from "../../src/codex/account.js";
 import type { GetAccountResponse } from "../../src/codex/generated/v2/GetAccountResponse.js";
 import type { CodexHost, HostNotification } from "../../src/codex/host.js";
 import { eventDispatcherFor } from "../../src/turns/events.js";
@@ -48,15 +50,16 @@ function fakeHost(
     verificationUrl: "https://example.com/device",
     userCode: "ABCD-EFGH",
   }));
+  const logout = vi.fn(async () => ({}));
   const host = {
     generation: 1,
     accountRead,
     loginStart,
     loginCancel: vi.fn(async () => ({ status: "canceled" as const })),
-    logout: vi.fn(async () => ({})),
+    logout,
     events: vi.fn(() => events),
   } as unknown as CodexHost;
-  return { host, events, accountRead, loginStart };
+  return { host, events, accountRead, loginStart, logout };
 }
 
 it.each([
@@ -312,18 +315,171 @@ it("ignores a delayed login response after logout", async () => {
   expect(manager.state()).toEqual({ type: "signed_out" });
 });
 
-it("AccountState contains only the documented safe fields", () => {
-  const states: AccountState[] = [
-    { type: "checking" },
-    { type: "signed_out" },
-    { type: "ready", email: null, planType: "unknown" },
-    {
-      type: "login_pending",
-      loginId: "login",
-      verificationUrl: "https://example.com",
-      userCode: "code",
+it("does not let account updates start reads while logout is active", async () => {
+  let resolveLogout!: () => void;
+  const fixture = fakeHost(
+    vi
+      .fn<CodexHost["accountRead"]>()
+      .mockResolvedValueOnce({
+        account: {
+          type: "chatgpt",
+          email: "person@example.com",
+          planType: "plus",
+        },
+        requiresOpenaiAuth: true,
+      })
+      .mockResolvedValueOnce({
+        account: {
+          type: "chatgpt",
+          email: "old-account@example.com",
+          planType: "plus",
+        },
+        requiresOpenaiAuth: true,
+      }),
+  );
+  fixture.logout.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        resolveLogout = () => resolve({});
+      }),
+  );
+  const manager = new AccountManager(fixture.host);
+  await manager.start();
+
+  const logout = manager.logout();
+  fixture.events.push({
+    generation: 1,
+    method: "account/updated",
+    params: { authMode: "chatgpt", planType: "plus" },
+  });
+  fixture.events.push({
+    generation: 1,
+    method: "account/login/completed",
+    params: { loginId: "login-1", success: true, error: null },
+  });
+  await flush();
+
+  expect(fixture.accountRead).toHaveBeenCalledOnce();
+  expect(manager.state()).toEqual({ type: "signed_out" });
+  resolveLogout();
+  await logout;
+  expect(manager.state()).toEqual({ type: "signed_out" });
+});
+
+it("keeps successful logout authoritative over forced and notification reads", async () => {
+  let resolveForcedRead!: (value: GetAccountResponse) => void;
+  let resolveLogout!: () => void;
+  const forcedRead = new Promise<GetAccountResponse>((resolve) => {
+    resolveForcedRead = resolve;
+  });
+  const fixture = fakeHost(
+    vi
+      .fn<CodexHost["accountRead"]>()
+      .mockResolvedValueOnce({
+        account: {
+          type: "chatgpt",
+          email: "person@example.com",
+          planType: "plus",
+        },
+        requiresOpenaiAuth: true,
+      })
+      .mockImplementationOnce(() => forcedRead)
+      .mockResolvedValueOnce({
+        account: {
+          type: "chatgpt",
+          email: "old-account@example.com",
+          planType: "plus",
+        },
+        requiresOpenaiAuth: true,
+      }),
+  );
+  fixture.logout.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        resolveLogout = () => resolve({});
+      }),
+  );
+  const manager = new AccountManager(fixture.host);
+  await manager.start();
+
+  const refresh = manager.refresh();
+  const logout = manager.logout();
+  fixture.events.push({
+    generation: 1,
+    method: "account/updated",
+    params: { authMode: "chatgpt", planType: "plus" },
+  });
+  await flush();
+  resolveLogout();
+  await logout;
+  resolveForcedRead({
+    account: {
+      type: "chatgpt",
+      email: "old-account@example.com",
+      planType: "plus",
     },
-    { type: "error", code: "authentication_required" },
-  ];
-  expect(states).toHaveLength(5);
+    requiresOpenaiAuth: true,
+  });
+  await refresh;
+  await flush();
+
+  expect(fixture.accountRead).toHaveBeenCalledTimes(2);
+  expect(manager.state()).toEqual({ type: "signed_out" });
+  expect(manager.ready()).toBe(false);
+});
+
+it("serializes only safe fields from real account transitions", async () => {
+  const fixture = fakeHost();
+  const manager = new AccountManager(fixture.host);
+  const app = createAdminApp({
+    account: manager,
+    sessions: new SessionStore(),
+    allowedOrigins: new Set(["http://127.0.0.1:8081"]),
+  });
+  const serializedState = async () => {
+    const response = await app.request("/api/state");
+    const text = await response.text();
+    const body = JSON.parse(text) as { state: Record<string, unknown> };
+    return { state: body.state, text };
+  };
+  const assertSafe = (
+    state: Record<string, unknown>,
+    text: string,
+    keys: string[],
+  ) => {
+    expect(Object.keys(state).sort()).toEqual(keys.sort());
+    expect(text).not.toMatch(
+      /auth\.json|access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|credential|\/home\//i,
+    );
+  };
+
+  await manager.start();
+  const ready = await serializedState();
+  assertSafe(ready.state, ready.text, ["email", "planType", "type"]);
+
+  await manager.login();
+  const pending = await serializedState();
+  assertSafe(pending.state, pending.text, [
+    "loginId",
+    "type",
+    "userCode",
+    "verificationUrl",
+  ]);
+
+  fixture.events.push({
+    generation: 1,
+    method: "account/login/completed",
+    params: {
+      loginId: "login-1",
+      success: false,
+      error: "access_token from /home/person/.codex/auth.json",
+    },
+  });
+  await flush();
+  const error = await serializedState();
+  assertSafe(error.state, error.text, ["code", "type"]);
+
+  await manager.logout();
+  const signedOut = await serializedState();
+  assertSafe(signedOut.state, signedOut.text, ["type"]);
 });

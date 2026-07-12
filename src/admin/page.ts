@@ -44,6 +44,33 @@ function render(state) {
   fields.userCode.textContent = state.type === "login_pending" ? state.userCode : "-";
 }
 
+function showReload() {
+  fields.status.textContent = "Session unavailable. Reload this page.";
+}
+
+async function responseJson(response) {
+  try {
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+async function bootstrap() {
+  try {
+    const response = await fetch("/api/state");
+    const result = await responseJson(response);
+    if (!response.ok || !result || !result.state) {
+      showReload();
+      return;
+    }
+    csrfToken = result.csrfToken || "";
+    render(result.state);
+  } catch {
+    showReload();
+  }
+}
+
 async function request(path, body) {
   const options = body === undefined ? {} : {
     method: "POST",
@@ -51,7 +78,16 @@ async function request(path, body) {
     body: JSON.stringify(body),
   };
   const response = await fetch(path, options);
-  const result = await response.json();
+  if (response.status === 401 || response.status === 403) {
+    csrfToken = "";
+    await bootstrap();
+    return;
+  }
+  const result = await responseJson(response);
+  if (!result || !result.state) {
+    showReload();
+    return;
+  }
   if (result.csrfToken) csrfToken = result.csrfToken;
   render(result.state);
 }
@@ -63,5 +99,5 @@ document.getElementById("login-form").addEventListener("submit", (event) => {
 document.getElementById("refresh").addEventListener("click", () => void request("/api/refresh", {}));
 document.getElementById("cancel").addEventListener("click", () => void request("/api/cancel", {}));
 document.getElementById("logout").addEventListener("click", () => void request("/api/logout", {}));
-void request("/api/state");
+void bootstrap();
 `;
