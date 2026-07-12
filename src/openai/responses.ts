@@ -1,9 +1,14 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { mkdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import type { Handler } from "hono";
 import { streamSSE } from "hono/streaming";
+import type { Thread } from "../codex/generated/v2/Thread.js";
+import type { CodexHost } from "../codex/host.js";
 import type {
   ConversationClock,
   ConversationStore,
+  OperationDecision,
 } from "../conversations/store.js";
 import { openAIErrorBody, ProxyError } from "../http/errors.js";
 import type { TokenUsage, TurnCommand, TurnResult } from "../turns/events.js";
@@ -23,6 +28,7 @@ const SWEEP_INTERVAL_MS = 60 * 60 * 1_000;
 export interface ResponseSweepDependencies {
   store: ConversationStore;
   deleteThread(threadId: string): void | Promise<void>;
+  host?: Pick<CodexHost, "threadList" | "threadDelete">;
 }
 
 export interface ResponseSweepTimers {
@@ -41,6 +47,7 @@ export interface ResponsesHandlerDependencies {
   store: ConversationStore;
   clock: ConversationClock;
   processGeneration(): number;
+  operationWorkingDirectory: string;
   deleteThread(threadId: string, signal?: AbortSignal): void | Promise<void>;
   streamSSE?: typeof streamSSE;
 }
@@ -61,6 +68,70 @@ export interface ProxyResponse {
   usage?: { input_tokens: number; output_tokens: number; total_tokens: number };
 }
 
+interface ResponseRecoveryDependencies {
+  store: ConversationStore;
+  host: Pick<CodexHost, "threadList" | "threadDelete">;
+}
+
+function removeOperationDirectory(cwd: string | undefined): void {
+  if (cwd !== undefined) rmSync(cwd, { recursive: true, force: true });
+}
+
+async function threadsForOperation(
+  host: Pick<CodexHost, "threadList">,
+  cwd: string,
+): Promise<Thread[]> {
+  const matches = new Map<string, Thread>();
+  const cursors = new Set<string>();
+  let cursor: string | undefined;
+  do {
+    const response = await host.threadList({
+      cwd,
+      sourceKinds: ["appServer"],
+      limit: 100,
+      ...(cursor === undefined ? {} : { cursor }),
+    });
+    for (const thread of response.data) {
+      if (thread.cwd === cwd) matches.set(thread.id, thread);
+    }
+    if (matches.size > 1 || response.nextCursor === null) break;
+    if (cursors.has(response.nextCursor)) break;
+    cursors.add(response.nextCursor);
+    cursor = response.nextCursor;
+  } while (cursor !== undefined);
+  return [...matches.values()];
+}
+
+export async function recoverResponseOperations(
+  deps: ResponseRecoveryDependencies,
+): Promise<void> {
+  for (const operation of deps.store.recoveryOperations()) {
+    if (operation.action === "resume") {
+      deps.store.abandonOperation(operation.responseId);
+      continue;
+    }
+    if (operation.threadId === undefined) {
+      if (operation.operationCwd === undefined) continue;
+      const matches = await threadsForOperation(
+        deps.host,
+        operation.operationCwd,
+      );
+      if (matches.length !== 1) continue;
+      const thread = matches[0];
+      if (thread === undefined) continue;
+      deps.store.attachOperation(operation.responseId, thread.id);
+    }
+    deps.store.abandonOperation(operation.responseId);
+  }
+
+  for (const operation of deps.store.abandonedOperations()) {
+    if (operation.threadId === undefined) continue;
+    await deps.host.threadDelete({ threadId: operation.threadId });
+    deps.store.finishAbandonedOperation(operation.responseId);
+    removeOperationDirectory(operation.operationCwd);
+  }
+}
+
 interface ResponseIdentity {
   responseId: string;
   messageId: string;
@@ -71,6 +142,9 @@ interface ResponseIdentity {
 export async function sweepExpiredResponses(
   deps: ResponseSweepDependencies,
 ): Promise<void> {
+  if (deps.host !== undefined) {
+    await recoverResponseOperations({ store: deps.store, host: deps.host });
+  }
   for (const threadId of deps.store.abandonedThreads()) {
     try {
       await deps.deleteThread(threadId);
@@ -322,22 +396,37 @@ export function createResponsesHandler(
     const requestId =
       context.req.header("x-request-id") ?? `req_${randomUUID()}`;
     const stored = request.store !== false;
-    const decision = deps.store.reserveOperation({
-      responseId: identity.responseId,
-      ...(request.previous_response_id === undefined
-        ? {}
-        : { previousResponseId: request.previous_response_id }),
-      ownerRequestId: requestId,
-      stored,
-      processGeneration: deps.processGeneration(),
-    });
+    const operationCwd = join(
+      deps.operationWorkingDirectory,
+      identity.responseId,
+    );
+    mkdirSync(deps.operationWorkingDirectory, { mode: 0o700, recursive: true });
+    mkdirSync(operationCwd, { mode: 0o700 });
+    let decision: OperationDecision;
+    try {
+      decision = deps.store.reserveOperation({
+        responseId: identity.responseId,
+        ...(request.previous_response_id === undefined
+          ? {}
+          : { previousResponseId: request.previous_response_id }),
+        ownerRequestId: requestId,
+        stored,
+        processGeneration: deps.processGeneration(),
+        operationCwd,
+      });
+    } catch (error) {
+      removeOperationDirectory(operationCwd);
+      throw error;
+    }
     if (
       decision.type === "busy" ||
       decision.type === "not_found" ||
       decision.type === "lost"
     ) {
+      removeOperationDirectory(operationCwd);
       throw decisionError(decision.type);
     }
+    if (decision.type === "resume") removeOperationDirectory(operationCwd);
 
     const command: TurnCommand = {
       action:
@@ -350,6 +439,7 @@ export function createResponsesHandler(
                 threadId: decision.threadId,
                 lastTurnId: decision.lastTurnId,
               },
+      ...(decision.type === "resume" ? {} : { cwd: operationCwd }),
       model: model.id,
       history,
       input,
@@ -379,6 +469,7 @@ export function createResponsesHandler(
     let cleanupSucceeded = false;
     let cleanupError: unknown;
     let abandonPromise: Promise<void> | undefined;
+    let upstreamAttempted = false;
     const cleanupThread = async (threadId: string): Promise<void> => {
       if (cleanupAttempted) {
         if (cleanupError !== undefined) throw cleanupError;
@@ -399,6 +490,7 @@ export function createResponsesHandler(
         const durableThreadId = deps.store.abandonOperation(
           identity.responseId,
           openedThreadId,
+          upstreamAttempted,
         );
         const threadId =
           durableThreadId ??
@@ -407,7 +499,14 @@ export function createResponsesHandler(
             : undefined);
         if (threadId !== undefined) {
           if (!cleanupAttempted) await cleanupThread(threadId);
-          if (cleanupSucceeded) deps.store.finishAbandonedThread(threadId);
+          if (cleanupSucceeded) {
+            deps.store.finishAbandonedThread(threadId);
+            removeOperationDirectory(operationCwd);
+          }
+        } else if (decision.type === "start" || decision.type === "fork") {
+          if (deps.store.lookupOperation(identity.responseId) === undefined) {
+            removeOperationDirectory(operationCwd);
+          }
         }
         finalized = true;
       })();
@@ -415,12 +514,14 @@ export function createResponsesHandler(
     };
     const complete = async (result: TurnResult): Promise<void> => {
       if (!stored) await cleanupThread(result.threadId);
-      deps.store.completeOperation(identity.responseId);
+      const completedCwd = deps.store.completeOperation(identity.responseId);
       finalized = true;
+      removeOperationDirectory(completedCwd);
     };
 
     if (!request.stream) {
       try {
+        upstreamAttempted = true;
         const result = await deps.runner.run(
           command,
           context.req.raw.signal,
@@ -464,6 +565,7 @@ export function createResponsesHandler(
         });
         sequenceNumber += 1;
 
+        upstreamAttempted = true;
         for await (const event of deps.runner.stream(
           command,
           signal,
@@ -517,6 +619,7 @@ export function createResponsesHandler(
               }),
             });
             sequenceNumber += 1;
+            await complete(event.result);
             await stream.writeSSE({
               event: "response.completed",
               data: JSON.stringify({
@@ -525,8 +628,6 @@ export function createResponsesHandler(
                 response: body,
               }),
             });
-            deps.store.completeOperation(identity.responseId);
-            finalized = true;
             return;
           } else if (event.type === "failed") {
             let failure: unknown = event.error;

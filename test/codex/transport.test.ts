@@ -194,6 +194,7 @@ describe("JSONL transport", () => {
         "threadStart",
         "threadResume",
         "threadFork",
+        "threadList",
         "threadInjectItems",
         "threadDelete",
         "turnStart",
@@ -232,6 +233,12 @@ describe("JSONL transport", () => {
       "thread/fork",
       [{ threadId: "thread-1" }],
       { threadId: "thread-1" },
+    ],
+    [
+      "threadList",
+      "thread/list",
+      [{ cwd: "/tmp/operation" }],
+      { cwd: "/tmp/operation" },
     ],
     [
       "threadInjectItems",

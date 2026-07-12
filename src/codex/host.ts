@@ -16,6 +16,8 @@ import type { ThreadForkParams } from "./generated/v2/ThreadForkParams.js";
 import type { ThreadForkResponse } from "./generated/v2/ThreadForkResponse.js";
 import type { ThreadInjectItemsParams } from "./generated/v2/ThreadInjectItemsParams.js";
 import type { ThreadInjectItemsResponse } from "./generated/v2/ThreadInjectItemsResponse.js";
+import type { ThreadListParams } from "./generated/v2/ThreadListParams.js";
+import type { ThreadListResponse } from "./generated/v2/ThreadListResponse.js";
 import type { ThreadResumeParams } from "./generated/v2/ThreadResumeParams.js";
 import type { ThreadResumeResponse } from "./generated/v2/ThreadResumeResponse.js";
 import type { ThreadStartParams } from "./generated/v2/ThreadStartParams.js";
@@ -56,6 +58,10 @@ export interface CodexHost {
     params: ThreadForkParams,
     signal?: AbortSignal,
   ): Promise<ThreadForkResponse>;
+  threadList(
+    params: ThreadListParams,
+    signal?: AbortSignal,
+  ): Promise<ThreadListResponse>;
   threadInjectItems(
     params: ThreadInjectItemsParams,
     signal?: AbortSignal,

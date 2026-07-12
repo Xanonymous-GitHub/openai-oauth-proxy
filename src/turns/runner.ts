@@ -469,7 +469,7 @@ export class TurnRunner {
         const response = await this.#host.threadStart(
           {
             model: command.model,
-            cwd: this.#emptyWorkingDirectory,
+            cwd: command.cwd ?? this.#emptyWorkingDirectory,
             approvalPolicy: "never",
             sandbox: "read-only",
             baseInstructions: this.#neutralInstructions,
@@ -495,6 +495,7 @@ export class TurnRunner {
           {
             threadId: command.action.threadId,
             lastTurnId: command.action.lastTurnId,
+            ...(command.cwd === undefined ? {} : { cwd: command.cwd }),
           },
           signal,
         );

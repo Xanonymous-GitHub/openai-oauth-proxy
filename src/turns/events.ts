@@ -18,6 +18,7 @@ export interface TokenUsage {
 
 export interface TurnCommand {
   action: ThreadAction;
+  cwd?: string;
   model: string;
   history: ResponseItem[];
   input: UserInput[];

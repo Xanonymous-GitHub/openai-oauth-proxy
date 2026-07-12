@@ -258,7 +258,7 @@ git commit -m "chore: bootstrap proxy service"
 
 **Interfaces:**
 - Produces: `JsonlTransport.request(method, params, signal): Promise<unknown>` as a private module API
-- Produces: `CodexHost` with only `accountRead`, `loginStart`, `loginCancel`, `logout`, `modelList`, `threadStart`, `threadResume`, `threadFork`, `threadInjectItems`, `threadDelete`, `turnStart`, and `turnInterrupt`
+- Produces: `CodexHost` with only `accountRead`, `loginStart`, `loginCancel`, `logout`, `modelList`, `threadStart`, `threadResume`, `threadFork`, recovery-only `threadList`, `threadInjectItems`, `threadDelete`, `turnStart`, and `turnInterrupt`
 - Produces: `CodexHost.events(): AsyncIterable<HostNotification>` and `CodexHost.toolCalls(): AsyncIterable<PendingServerToolCall>`
 - Produces: `PendingServerToolCall.respond(result: DynamicToolCallResponse): void` and `.reject(code: number, message: string): void`
 
@@ -294,6 +294,7 @@ export const ALLOWED_CLIENT_METHODS = new Set([
   "thread/start",
   "thread/resume",
   "thread/fork",
+  "thread/list",
   "thread/inject_items",
   "thread/delete",
   "turn/start",
@@ -350,6 +351,7 @@ export interface CodexHost {
   threadStart(params: ThreadStartParams, signal?: AbortSignal): Promise<ThreadStartResponse>;
   threadResume(params: ThreadResumeParams, signal?: AbortSignal): Promise<ThreadResumeResponse>;
   threadFork(params: ThreadForkParams, signal?: AbortSignal): Promise<ThreadForkResponse>;
+  threadList(params: ThreadListParams, signal?: AbortSignal): Promise<ThreadListResponse>;
   threadInjectItems(params: ThreadInjectItemsParams, signal?: AbortSignal): Promise<ThreadInjectItemsResponse>;
   threadDelete(params: ThreadDeleteParams, signal?: AbortSignal): Promise<ThreadDeleteResponse>;
   turnStart(params: TurnStartParams, signal?: AbortSignal): Promise<TurnStartResponse>;
@@ -953,7 +955,7 @@ Expected: FAIL with route `404`.
 
 - [ ] **Step 4: Implement the Responses state machine**
 
-Reserve a response ID and lease transactionally before calling App Server. Dispatch `start`, `resume`, or `fork` exactly from `ContinuationDecision`. Record the returned `threadId` and `turnId`, complete the mapping only after authoritative turn completion, and release a normal lease in `finally`. Preserve the lease when Task 10 returns pending tool calls.
+Reserve a response ID and lease transactionally before calling App Server. Persist a unique empty operation `cwd` for every start/fork and pass it to App Server; persist the known source thread immediately for resume. On startup recovery, use recovery-only `thread/list` filtered by the exact operation `cwd` to attach and delete one orphan, retaining zero or multiple matches for retry without guessing. Dispatch `start`, `resume`, or `fork` exactly from `ContinuationDecision`. Record the returned `threadId` and `turnId`, persist the completed mapping and mark the handler finalized before emitting `response.completed`, and release a normal lease in `finally`. A failed final SSE write preserves the resumable mapping; failed SQLite completion emits no completed event. Remove operation directories after completion or final orphan cleanup. Preserve the lease when Task 10 returns pending tool calls.
 
 Build this minimum non-streaming result shape:
 

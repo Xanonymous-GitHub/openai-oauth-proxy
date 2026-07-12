@@ -14,6 +14,7 @@ export const ALLOWED_CLIENT_METHODS = new Set([
   "thread/start",
   "thread/resume",
   "thread/fork",
+  "thread/list",
   "thread/inject_items",
   "thread/delete",
   "turn/start",

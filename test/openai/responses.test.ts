@@ -1,15 +1,26 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDataApp } from "../../src/app.js";
-import { fakeModel, fakeModelListResponse } from "../../src/codex/fake.js";
+import {
+  fakeModel,
+  fakeModelListResponse,
+  fakeThread,
+} from "../../src/codex/fake.js";
 import type { CodexHost } from "../../src/codex/host.js";
 import {
   type ConversationClock,
   ConversationStore,
 } from "../../src/conversations/store.js";
 import {
+  recoverResponseOperations,
   startResponseSweeper,
   sweepExpiredResponses,
 } from "../../src/openai/responses.js";
@@ -69,8 +80,13 @@ function createFixture(
   } = {},
 ) {
   const store = openStore();
+  const operationWorkingDirectory = mkdtempSync(
+    join(tmpdir(), "responses-operations-"),
+  );
+  directories.add(operationWorkingDirectory);
   const invocations: RunnerInvocation[] = [];
   const deleteThread = vi.fn(async () => undefined);
+  const streamEvents: string[] = [];
   let call = 0;
 
   const execute = async (
@@ -165,6 +181,7 @@ function createFixture(
       store,
       clock,
       processGeneration: () => host.generation,
+      operationWorkingDirectory,
       deleteThread,
       ...(options.streamWriteFailureAt === undefined
         ? {}
@@ -184,6 +201,8 @@ function createFixture(
                       if (writes === options.streamWriteFailureAt) {
                         throw new Error(`stream write ${writes} failed`);
                       }
+                      if (event.event !== undefined)
+                        streamEvents.push(event.event);
                       payload += `${event.event ? `event: ${event.event}\n` : ""}data: ${event.data}\n\n`;
                     },
                   };
@@ -204,7 +223,16 @@ function createFixture(
     },
   });
 
-  return { app, deleteThread, host, invocations, runner, store };
+  return {
+    app,
+    deleteThread,
+    host,
+    invocations,
+    operationWorkingDirectory,
+    runner,
+    store,
+    streamEvents,
+  };
 }
 
 async function postResponse(
@@ -448,14 +476,16 @@ describe("POST /v1/responses", () => {
   it("durably reserves start, resume, and fork identities before invoking the runner", async () => {
     const start = createFixture();
     const startReserve = vi.spyOn(start.store, "reserveOperation");
-    vi.mocked(start.runner.run).mockImplementationOnce(async () => {
+    vi.mocked(start.runner.run).mockImplementationOnce(async (command) => {
       const responseId = startReserve.mock.calls[0]?.[0].responseId;
-      expect(
-        start.store.lookupOperation(responseId ?? "missing"),
-      ).toMatchObject({
+      const operation = start.store.lookupOperation(responseId ?? "missing");
+      expect(operation).toMatchObject({
         action: "start",
         state: "active",
+        operationCwd: command.cwd,
       });
+      expect(command.cwd).toBeDefined();
+      expect(readdirSync(command.cwd ?? "missing")).toEqual([]);
       throw new Error("start crash window");
     });
     expect(
@@ -467,7 +497,10 @@ describe("POST /v1/responses", () => {
       vi.mocked(start.runner.run).mock.invocationCallOrder[0] ?? Infinity,
     );
     const startId = startReserve.mock.calls[0]?.[0].responseId;
-    expect(start.store.lookupOperation(startId ?? "missing")).toBeUndefined();
+    expect(start.store.lookupOperation(startId ?? "missing")).toMatchObject({
+      action: "start",
+      recoveryPending: true,
+    });
 
     const resume = createFixture();
     const resumeSource = await postJson(resume.app, {
@@ -513,7 +546,7 @@ describe("POST /v1/responses", () => {
       previous_response_id: forkSource.id,
     });
     const forkReserve = vi.spyOn(fork.store, "reserveOperation");
-    vi.mocked(fork.runner.run).mockImplementationOnce(async () => {
+    vi.mocked(fork.runner.run).mockImplementationOnce(async (command) => {
       const responseId = forkReserve.mock.calls[0]?.[0].responseId;
       expect(fork.store.lookupOperation(responseId ?? "missing")).toMatchObject(
         {
@@ -521,8 +554,11 @@ describe("POST /v1/responses", () => {
           sourceThreadId: "thread-1",
           sourceTurnId: "turn-1",
           state: "active",
+          operationCwd: command.cwd,
         },
       );
+      expect(command.cwd).toBeDefined();
+      expect(readdirSync(command.cwd ?? "missing")).toEqual([]);
       throw new Error("fork crash window");
     });
     expect(
@@ -539,7 +575,10 @@ describe("POST /v1/responses", () => {
       vi.mocked(fork.runner.run).mock.invocationCallOrder.at(-1) ?? Infinity,
     );
     const forkId = forkReserve.mock.calls[0]?.[0].responseId;
-    expect(fork.store.lookupOperation(forkId ?? "missing")).toBeUndefined();
+    expect(fork.store.lookupOperation(forkId ?? "missing")).toMatchObject({
+      action: "fork",
+      recoveryPending: true,
+    });
   });
 
   it("deletes a returned new thread once when durable thread attachment fails", async () => {
@@ -776,6 +815,53 @@ describe("POST /v1/responses", () => {
     });
   });
 
+  it("does not emit response.completed when SQLite completion fails", async () => {
+    const fixture = createFixture({
+      streamWriteFailureAt: Number.MAX_SAFE_INTEGER,
+    });
+    const complete = vi
+      .spyOn(fixture.store, "completeOperation")
+      .mockImplementationOnce(() => {
+        throw new Error("SQLite completion failed");
+      });
+    const response = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      input: "stream",
+      stream: true,
+    });
+
+    await expect(response.text()).rejects.toThrow("SQLite completion failed");
+    expect(fixture.streamEvents).not.toContain("response.completed");
+    expect(complete).toHaveBeenCalledOnce();
+  });
+
+  it("preserves the complete mapping when the response.completed write fails", async () => {
+    const fixture = createFixture({ streamWriteFailureAt: 4 });
+    const reserve = vi.spyOn(fixture.store, "reserveOperation");
+    const response = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      input: "stream",
+      stream: true,
+    });
+
+    await expect(response.text()).rejects.toThrow("stream write 4 failed");
+    const responseId = reserve.mock.calls[0]?.[0].responseId ?? "missing";
+    expect(fixture.store.lookup(responseId)).toMatchObject({
+      state: "complete",
+      threadId: "thread-1",
+      turnId: "turn-1",
+    });
+    expect(fixture.deleteThread).not.toHaveBeenCalled();
+  });
+
+  it("removes the operation cwd after successful finalization", async () => {
+    const fixture = createFixture();
+
+    await postJson(fixture.app, { model: "gpt-5.4", input: "complete" });
+
+    expect(readdirSync(fixture.operationWorkingDirectory)).toEqual([]);
+  });
+
   it("emits an error and no success completion after streaming lifecycle failure", async () => {
     const fixture = createFixture();
     fixture.deleteThread.mockRejectedValueOnce(
@@ -943,6 +1029,7 @@ describe("Responses expiry cleanup", () => {
       ownerRequestId: "req-crashed-start",
       stored: true,
       processGeneration: 1,
+      operationCwd: "/tmp/resp_crashed_start",
     });
     store.attachOperation("resp_crashed_start", "thread-crashed-start");
     store.markContinuationLost(2);
@@ -1018,5 +1105,155 @@ describe("Responses expiry cleanup", () => {
     await sweeper.stop();
 
     expect(store.deletableLeafThreads()).toEqual([]);
+  });
+
+  it("reconciles exact start and fork crash-window threads by operation cwd", async () => {
+    const store = openStore();
+    const operationRoot = mkdtempSync(join(tmpdir(), "reconcile-operations-"));
+    directories.add(operationRoot);
+    const startCwd = join(operationRoot, "resp_crashed_start");
+    const forkCwd = join(operationRoot, "resp_crashed_fork");
+    mkdirSync(startCwd);
+    mkdirSync(forkCwd);
+    store.reserveOperation({
+      responseId: "resp_crashed_start",
+      ownerRequestId: "req-start",
+      stored: true,
+      processGeneration: 1,
+      operationCwd: startCwd,
+    });
+    const sourceId = complete(store, "thread-source", "turn-source");
+    store.reserveOperation({
+      responseId: "resp_crashed_fork",
+      previousResponseId: sourceId,
+      ownerRequestId: "req-fork",
+      stored: false,
+      processGeneration: 1,
+      operationCwd: forkCwd,
+    });
+    store.markContinuationLost(2);
+    const threadList = vi.fn(
+      async ({ cwd }: { cwd?: string | string[] | null }) => ({
+        data: [
+          fakeThread({
+            id: cwd === startCwd ? "thread-orphan-start" : "thread-orphan-fork",
+            cwd: cwd as string,
+          }),
+        ],
+        nextCursor: null,
+        backwardsCursor: null,
+      }),
+    );
+    const threadDelete = vi.fn(async (_params: { threadId: string }) => ({}));
+    const host = { threadList, threadDelete } as unknown as CodexHost;
+
+    await recoverResponseOperations({ store, host });
+
+    expect(threadList).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cwd: startCwd,
+        sourceKinds: ["appServer"],
+      }),
+    );
+    expect(threadList).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cwd: forkCwd,
+        sourceKinds: ["appServer"],
+      }),
+    );
+    expect(
+      threadDelete.mock.calls.map(([{ threadId }]) => threadId).sort(),
+    ).toEqual(["thread-orphan-fork", "thread-orphan-start"]);
+    expect(store.lookupOperation("resp_crashed_start")).toBeUndefined();
+    expect(store.lookupOperation("resp_crashed_fork")).toBeUndefined();
+    expect(existsSync(startCwd)).toBe(false);
+    expect(existsSync(forkCwd)).toBe(false);
+    expect(store.lookup(sourceId)).toMatchObject({ state: "complete" });
+  });
+
+  it("retries zero and ambiguous cwd matches without deleting any thread", async () => {
+    const store = openStore();
+    const operationRoot = mkdtempSync(join(tmpdir(), "ambiguous-operations-"));
+    directories.add(operationRoot);
+    const zeroCwd = join(operationRoot, "resp_zero");
+    const ambiguousCwd = join(operationRoot, "resp_ambiguous");
+    mkdirSync(zeroCwd);
+    mkdirSync(ambiguousCwd);
+    for (const [responseId, operationCwd] of [
+      ["resp_zero", zeroCwd],
+      ["resp_ambiguous", ambiguousCwd],
+    ] as const) {
+      store.reserveOperation({
+        responseId,
+        ownerRequestId: `req_${responseId}`,
+        stored: true,
+        processGeneration: 1,
+        operationCwd,
+      });
+    }
+    store.markContinuationLost(2);
+    const threadList = vi.fn(
+      async ({ cwd }: { cwd?: string | string[] | null }) => ({
+        data:
+          cwd === zeroCwd
+            ? [fakeThread({ id: "thread-unrelated", cwd: "/tmp/unrelated" })]
+            : [
+                fakeThread({ id: "thread-match-a", cwd: ambiguousCwd }),
+                fakeThread({ id: "thread-match-b", cwd: ambiguousCwd }),
+                fakeThread({ id: "thread-unrelated", cwd: "/tmp/unrelated" }),
+              ],
+        nextCursor: null,
+        backwardsCursor: null,
+      }),
+    );
+    const threadDelete = vi.fn(async (_params: { threadId: string }) => ({}));
+    const host = { threadList, threadDelete } as unknown as CodexHost;
+
+    await recoverResponseOperations({ store, host });
+
+    expect(threadDelete).not.toHaveBeenCalled();
+    expect(store.lookupOperation("resp_zero")).toBeDefined();
+    expect(store.lookupOperation("resp_ambiguous")).toBeDefined();
+    expect(existsSync(zeroCwd)).toBe(true);
+    expect(existsSync(ambiguousCwd)).toBe(true);
+  });
+
+  it("retains a reconciled orphan and its cwd until deletion succeeds", async () => {
+    const store = openStore();
+    const operationRoot = mkdtempSync(join(tmpdir(), "retry-operation-"));
+    directories.add(operationRoot);
+    const operationCwd = join(operationRoot, "resp_retry_orphan");
+    mkdirSync(operationCwd);
+    store.reserveOperation({
+      responseId: "resp_retry_orphan",
+      ownerRequestId: "req-retry",
+      stored: true,
+      processGeneration: 1,
+      operationCwd,
+    });
+    store.markContinuationLost(2);
+    const host = {
+      threadList: vi.fn(async () => ({
+        data: [fakeThread({ id: "thread-retry-orphan", cwd: operationCwd })],
+        nextCursor: null,
+        backwardsCursor: null,
+      })),
+      threadDelete: vi
+        .fn(async (_params: { threadId: string }) => ({}))
+        .mockRejectedValueOnce(new Error("delete unavailable")),
+    } as unknown as CodexHost;
+
+    await expect(recoverResponseOperations({ store, host })).rejects.toThrow(
+      "delete unavailable",
+    );
+    expect(store.lookupOperation("resp_retry_orphan")).toMatchObject({
+      state: "abandoned",
+      threadId: "thread-retry-orphan",
+    });
+    expect(existsSync(operationCwd)).toBe(true);
+
+    await recoverResponseOperations({ store, host });
+    expect(store.lookupOperation("resp_retry_orphan")).toBeUndefined();
+    expect(existsSync(operationCwd)).toBe(false);
   });
 });

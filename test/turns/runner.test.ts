@@ -364,6 +364,36 @@ describe("TurnRunner", () => {
     );
   });
 
+  it("uses a response operation cwd for new and forked threads", async () => {
+    const { events, host } = createHost();
+    vi.mocked(host.turnStart).mockImplementation(async ({ threadId }) => {
+      emitCompletedTurn(events, threadId, "turn-1", "final", false);
+      return { turn: fakeTurn() };
+    });
+    const runner = createRunner(host);
+
+    await runner.run(command({ cwd: "/tmp/work/resp_start" }));
+    await runner.run(
+      command({
+        action: {
+          type: "fork",
+          threadId: "thread-existing",
+          lastTurnId: "turn-parent",
+        },
+        cwd: "/tmp/work/resp_fork",
+      }),
+    );
+
+    expect(host.threadStart).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: "/tmp/work/resp_start" }),
+      undefined,
+    );
+    expect(host.threadFork).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: "/tmp/work/resp_fork" }),
+      undefined,
+    );
+  });
+
   it("routes four concurrent turns through one dispatcher", async () => {
     const { events, host } = createHost();
     vi.mocked(host.turnStart).mockImplementation(async ({ threadId }) => {

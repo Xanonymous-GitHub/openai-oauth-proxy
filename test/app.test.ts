@@ -440,7 +440,8 @@ it("serves Chat and Responses through the production listener after host readine
     });
 
     expect(responses.status).toBe(200);
-    expect(await responses.json()).toMatchObject({
+    const responseBody = (await responses.json()) as { id: string };
+    expect(responseBody).toMatchObject({
       object: "response",
       status: "completed",
       model: "gpt-5.4",
@@ -451,6 +452,13 @@ it("serves Chat and Responses through the production listener after host readine
         },
       ],
     });
+    expect(host.threadStart).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        cwd: `/tmp/response-operations/${responseBody.id}`,
+      }),
+      expect.any(AbortSignal),
+    );
     expect(threadDelete).toHaveBeenCalledOnce();
   } finally {
     await service.close();

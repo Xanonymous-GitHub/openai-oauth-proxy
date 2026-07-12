@@ -14,6 +14,7 @@ import {
 import { TurnRunner } from "./turns/runner.js";
 
 const EMPTY_WORKING_DIRECTORY = "/tmp/work";
+const RESPONSE_OPERATION_DIRECTORY = "/tmp/response-operations";
 const NEUTRAL_INSTRUCTIONS =
   "Respond only through supplied text or client function tools. Internal tools and a local repository are unavailable. Follow the requested output format.";
 
@@ -119,6 +120,7 @@ export async function start(
       store: conversationStore,
       clock,
       processGeneration: () => lazyHost.generation,
+      operationWorkingDirectory: RESPONSE_OPERATION_DIRECTORY,
       deleteThread: async (threadId, signal) => {
         await lazyHost.threadDelete({ threadId }, signal);
       },
@@ -191,6 +193,7 @@ export async function start(
         deleteThread: async (threadId) => {
           await value.threadDelete({ threadId });
         },
+        host: value,
       });
       void responseSweeper.startup.catch(() => undefined);
     },

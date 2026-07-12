@@ -178,7 +178,7 @@ Responsibilities:
 
 Generated TypeScript and JSON schemas from the pinned Codex binary define its wire contract.
 
-The host does not expose a generic `send(method, params)` interface. Its outgoing RPC allowlist is limited to initialization, account login/read/logout, model listing, and the thread/turn methods required by this design. The only accepted App Server request is `item/tool/call`. Unexpected approval, process, command, filesystem, shell, or other server requests are denied and treated as redacted protocol violations. No HTTP field can select an App Server method.
+The host does not expose a generic `send(method, params)` interface. Its outgoing RPC allowlist is limited to initialization, account login/read/logout, model listing, and the thread/turn methods required by this design. `thread/list` is exposed only as a narrow typed operation for internal crash reconciliation; no HTTP field or client-selected value can invoke it. The only accepted App Server request is `item/tool/call`. Unexpected approval, process, command, filesystem, shell, or other server requests are denied and treated as redacted protocol violations. No HTTP field can select an App Server method.
 
 ### Admin Module
 
@@ -489,7 +489,7 @@ Codex configuration disables:
 - capability roots;
 - network access for sandboxed tools.
 
-No skill roots or skill items are installed or passed to App Server. Every thread uses read-only sandboxing and approval policy `never`. The working directory is an empty dedicated directory. Tool capability configuration and the Codex Host RPC allowlist are verified at startup and by integration tests. Enabling `experimentalApi` for dynamic tools does not make any other experimental RPC reachable through the host interface.
+No skill roots or skill items are installed or passed to App Server. Every thread uses read-only sandboxing and approval policy `never`. Each new or forked Responses operation uses a persisted unique empty working directory so startup recovery can correlate an otherwise unrecorded thread through recovery-only `thread/list`; zero or multiple exact matches are retained for retry and never guessed. Operation directories are removed after final completion or orphan cleanup. Tool capability configuration and the Codex Host RPC allowlist are verified at startup and by integration tests. Enabling `experimentalApi` for dynamic tools does not make any other experimental RPC reachable through the host interface.
 
 ## Container and Kubernetes Security
 

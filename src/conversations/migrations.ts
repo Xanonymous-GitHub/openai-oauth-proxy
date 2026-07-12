@@ -71,6 +71,15 @@ const MIGRATIONS: Migration[] = [
         ON response_operations(state, thread_id);
     `,
   },
+  {
+    version: 4,
+    sql: `
+      ALTER TABLE response_operations ADD COLUMN operation_cwd TEXT;
+      ALTER TABLE response_operations ADD COLUMN recovery_pending INTEGER NOT NULL DEFAULT 0 CHECK (recovery_pending IN (0,1));
+      CREATE INDEX response_operations_recovery_idx
+        ON response_operations(recovery_pending, state);
+    `,
+  },
 ];
 
 interface VersionRow {
@@ -132,6 +141,12 @@ const REQUIRED_COLUMNS = [
         "created_at",
         "expires_at",
       ],
+    },
+  },
+  {
+    version: 4,
+    tables: {
+      response_operations: ["operation_cwd", "recovery_pending"],
     },
   },
 ] as const;

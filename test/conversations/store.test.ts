@@ -413,7 +413,7 @@ describe("ConversationStore", () => {
     });
   });
 
-  it("durably reserves start operations before a thread exists and recovers them after restart", () => {
+  it("retains an uncorrelated start operation for recovery retry after restart", () => {
     const path = databasePath();
     const first = open(path);
 
@@ -423,6 +423,7 @@ describe("ConversationStore", () => {
         ownerRequestId: "req-start",
         stored: true,
         processGeneration: 1,
+        operationCwd: "/tmp/resp_start_operation",
       }),
     ).toEqual({ type: "start" });
     expect(first.lookupOperation("resp_start_operation")).toMatchObject({
@@ -435,7 +436,11 @@ describe("ConversationStore", () => {
     const restarted = open(path);
     expect(restarted.lookupOperation("resp_start_operation")).toBeDefined();
     restarted.markContinuationLost(2);
-    expect(restarted.lookupOperation("resp_start_operation")).toBeUndefined();
+    expect(restarted.lookupOperation("resp_start_operation")).toMatchObject({
+      state: "active",
+      recoveryPending: true,
+      operationCwd: "/tmp/resp_start_operation",
+    });
   });
 
   it("recovers stale operations when a restarted process reuses the same generation number", () => {
@@ -446,13 +451,16 @@ describe("ConversationStore", () => {
       ownerRequestId: "req-same-generation",
       stored: true,
       processGeneration: 1,
+      operationCwd: "/tmp/resp_same_generation",
     });
     close(first);
 
     const restarted = open(path);
     restarted.markContinuationLost(1);
 
-    expect(restarted.lookupOperation("resp_same_generation")).toBeUndefined();
+    expect(restarted.lookupOperation("resp_same_generation")).toMatchObject({
+      recoveryPending: true,
+    });
   });
 
   it("atomically reserves resume operations with the source lease and recovers without deleting the source", () => {
@@ -471,6 +479,7 @@ describe("ConversationStore", () => {
         ownerRequestId: "req-resume",
         stored: true,
         processGeneration: 1,
+        operationCwd: "/tmp/resp_resume_operation",
       }),
     ).toEqual({
       type: "resume",
@@ -485,6 +494,7 @@ describe("ConversationStore", () => {
         ownerRequestId: "req-competing",
         stored: true,
         processGeneration: 1,
+        operationCwd: "/tmp/resp_competing_operation",
       }),
     ).toEqual({ type: "busy" });
     close(first);
@@ -503,6 +513,7 @@ describe("ConversationStore", () => {
         ownerRequestId: "req-after-restart",
         stored: true,
         processGeneration: 2,
+        operationCwd: "/tmp/resp_after_restart",
       }),
     ).toMatchObject({ type: "resume" });
   });
@@ -523,6 +534,7 @@ describe("ConversationStore", () => {
         ownerRequestId: "req-disposable",
         stored: false,
         processGeneration: 1,
+        operationCwd: "/tmp/resp_disposable_fork",
       }),
     ).toEqual({
       type: "fork",
@@ -553,6 +565,7 @@ describe("ConversationStore", () => {
         ownerRequestId: "req-attached",
         stored: true,
         processGeneration: 1,
+        operationCwd: "/tmp/resp_attached",
       }),
     ).toEqual({ type: "start" });
 
@@ -571,6 +584,57 @@ describe("ConversationStore", () => {
       turnId: "turn_attached",
       state: "complete",
     });
+  });
+
+  it("persists operation cwd for start and fork and the source thread for resume", () => {
+    const store = open();
+    store.reserveOperation({
+      responseId: "resp_cwd_start",
+      ownerRequestId: "req-start",
+      stored: true,
+      processGeneration: 1,
+      operationCwd: "/tmp/work/resp_cwd_start",
+    });
+    const sourceId = completeResponse(
+      store,
+      { threadId: "thr_cwd_source", stored: true, processGeneration: 1 },
+      "turn_cwd_source",
+    );
+
+    store.reserveOperation({
+      responseId: "resp_cwd_resume",
+      previousResponseId: sourceId,
+      ownerRequestId: "req-resume",
+      stored: true,
+      processGeneration: 1,
+      operationCwd: "/tmp/work/unused-resume",
+    });
+    expect(store.lookupOperation("resp_cwd_resume")).toMatchObject({
+      action: "resume",
+      threadId: "thr_cwd_source",
+    });
+    expect(store.lookupOperation("resp_cwd_resume")).not.toHaveProperty(
+      "operationCwd",
+    );
+    store.abandonOperation("resp_cwd_resume");
+    store.reserveOperation({
+      responseId: "resp_cwd_fork",
+      previousResponseId: sourceId,
+      ownerRequestId: "req-fork",
+      stored: false,
+      processGeneration: 1,
+      operationCwd: "/tmp/work/resp_cwd_fork",
+    });
+
+    expect(store.lookupOperation("resp_cwd_start")).toMatchObject({
+      action: "start",
+      operationCwd: "/tmp/work/resp_cwd_start",
+    });
+    expect(store.lookupOperation("resp_cwd_fork")).toMatchObject({
+      action: "fork",
+      operationCwd: "/tmp/work/resp_cwd_fork",
+    });
+    expect(store.lookupOperation("resp_cwd_resume")).toBeUndefined();
   });
 
   it("does not delete an expired thread while its own lease is live", () => {
@@ -716,7 +780,7 @@ describe("conversation migrations", () => {
       previousApplication
         .prepare("SELECT version FROM schema_migrations ORDER BY version")
         .all(),
-    ).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
+    ).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }]);
     expect(
       previousApplication
         .prepare(
@@ -744,7 +808,7 @@ describe("conversation migrations", () => {
         id INTEGER PRIMARY KEY,
         value TEXT NOT NULL
       );
-      INSERT INTO schema_migrations(version, applied_at) VALUES (4, ${now});
+       INSERT INTO schema_migrations(version, applied_at) VALUES (5, ${now});
       COMMIT;
     `);
     futureApplication.close();
@@ -770,7 +834,7 @@ describe("conversation migrations", () => {
       previousApplication
         .prepare("SELECT version FROM schema_migrations ORDER BY version")
         .all(),
-    ).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
+    ).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }]);
     expect(
       previousApplication
         .prepare(
@@ -790,9 +854,10 @@ describe("conversation migrations", () => {
         applied_at INTEGER NOT NULL
       );
       INSERT INTO schema_migrations(version, applied_at) VALUES
-        (1, ${now}),
-        (2, ${now}),
-        (3, ${now});
+         (1, ${now}),
+         (2, ${now}),
+         (3, ${now}),
+         (4, ${now});
     `);
     database.close();
 

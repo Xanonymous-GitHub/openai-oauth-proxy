@@ -321,6 +321,8 @@ export class CodexSupervisor {
         this.readyHost().threadResume(params, signal),
       threadFork: (params, signal) =>
         this.readyHost().threadFork(params, signal),
+      threadList: (params, signal) =>
+        this.readyHost().threadList(params, signal),
       threadInjectItems: (params, signal) =>
         this.readyHost().threadInjectItems(params, signal),
       threadDelete: (params, signal) =>

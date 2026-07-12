@@ -45,6 +45,7 @@ export interface ReserveOperationInput {
   ownerRequestId: string;
   stored: boolean;
   processGeneration: number;
+  operationCwd: string;
 }
 
 export type OperationDecision =
@@ -70,6 +71,8 @@ export interface ResponseOperation {
   sourceTurnId?: string;
   threadId?: string;
   turnId?: string;
+  operationCwd?: string;
+  recoveryPending: boolean;
   processGeneration: number;
   createdAt: number;
   expiresAt: number;
@@ -130,6 +133,8 @@ interface OperationRow {
   process_generation: number;
   created_at: number;
   expires_at: number;
+  operation_cwd: string | null;
+  recovery_pending: number;
 }
 
 interface Statements {
@@ -160,11 +165,15 @@ interface Statements {
   attachOperationTurn: StatementSync;
   insertCompletedResponse: StatementSync;
   abandonOperation: StatementSync;
+  retainOperationForRecovery: StatementSync;
   deleteOperation: StatementSync;
   abandonOldOperations: StatementSync;
-  deleteOldOperationsWithoutCleanup: StatementSync;
+  deleteRecoveryResumes: StatementSync;
+  operationsForRecovery: StatementSync;
   abandonedThreads: StatementSync;
+  abandonedOperations: StatementSync;
   finishAbandonedThread: StatementSync;
+  finishAbandonedOperation: StatementSync;
 }
 
 export class ConversationStore {
@@ -373,13 +382,15 @@ export class ConversationStore {
         INSERT INTO response_operations(
           response_id, owner_request_id, action, state, stored,
           parent_response_id, source_thread_id, source_turn_id,
-          thread_id, turn_id, process_generation, created_at, expires_at
-        ) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, NULL, NULL, ?, ?, ?)
+          thread_id, turn_id, process_generation, created_at, expires_at,
+          operation_cwd, recovery_pending
+        ) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 0)
       `),
       readOperation: database.prepare(`
         SELECT response_id, owner_request_id, action, state, stored,
                parent_response_id, source_thread_id, source_turn_id,
-               thread_id, turn_id, process_generation, created_at, expires_at
+               thread_id, turn_id, process_generation, created_at, expires_at,
+               operation_cwd, recovery_pending
         FROM response_operations
         WHERE response_id = ?
       `),
@@ -419,19 +430,38 @@ export class ConversationStore {
         SET state = 'abandoned'
         WHERE response_id = ? AND state = 'active'
       `),
+      retainOperationForRecovery: database.prepare(`
+        UPDATE response_operations
+        SET recovery_pending = 1
+        WHERE response_id = ? AND state = 'active'
+          AND action IN ('start', 'fork') AND thread_id IS NULL
+          AND operation_cwd IS NOT NULL
+      `),
       deleteOperation: database.prepare(`
         DELETE FROM response_operations WHERE response_id = ?
       `),
       abandonOldOperations: database.prepare(`
         UPDATE response_operations
-        SET state = 'abandoned'
+        SET state = CASE
+              WHEN action IN ('start', 'fork') AND thread_id IS NOT NULL
+                THEN 'abandoned'
+              ELSE state
+            END,
+            recovery_pending = CASE action WHEN 'resume' THEN 0 ELSE 1 END
         WHERE state = 'active'
-          AND action IN ('start', 'fork') AND thread_id IS NOT NULL
       `),
-      deleteOldOperationsWithoutCleanup: database.prepare(`
+      deleteRecoveryResumes: database.prepare(`
         DELETE FROM response_operations
-        WHERE state = 'active'
-          AND (thread_id IS NULL OR action = 'resume')
+        WHERE state = 'active' AND action = 'resume'
+      `),
+      operationsForRecovery: database.prepare(`
+        SELECT response_id, owner_request_id, action, state, stored,
+               parent_response_id, source_thread_id, source_turn_id,
+               thread_id, turn_id, process_generation, created_at, expires_at,
+               operation_cwd, recovery_pending
+        FROM response_operations
+        WHERE recovery_pending = 1
+        ORDER BY created_at, response_id
       `),
       abandonedThreads: database.prepare(`
         SELECT DISTINCT thread_id
@@ -440,9 +470,24 @@ export class ConversationStore {
           AND action IN ('start', 'fork')
         ORDER BY thread_id
       `),
+      abandonedOperations: database.prepare(`
+        SELECT response_id, owner_request_id, action, state, stored,
+               parent_response_id, source_thread_id, source_turn_id,
+               thread_id, turn_id, process_generation, created_at, expires_at,
+               operation_cwd, recovery_pending
+        FROM response_operations
+        WHERE state = 'abandoned' AND thread_id IS NOT NULL
+          AND action IN ('start', 'fork')
+        ORDER BY created_at, response_id
+      `),
       finishAbandonedThread: database.prepare(`
         DELETE FROM response_operations
         WHERE state = 'abandoned' AND thread_id = ?
+          AND action IN ('start', 'fork')
+      `),
+      finishAbandonedOperation: database.prepare(`
+        DELETE FROM response_operations
+        WHERE response_id = ? AND state = 'abandoned'
           AND action IN ('start', 'fork')
       `),
     };
@@ -668,9 +713,13 @@ export class ConversationStore {
 
   attachOperation(responseId: string, threadId: string): void {
     this.#transaction(() => {
-      if (
-        this.#statements.attachOperation.run(threadId, responseId).changes !== 1
-      ) {
+      const attached = this.#statements.attachOperation.run(
+        threadId,
+        responseId,
+      );
+      if (attached.changes === 1) return;
+      const operation = this.#operationRow(responseId);
+      if (operation?.state !== "active" || operation.thread_id !== threadId) {
         throw new Error(
           `Active response operation ${responseId} does not exist`,
         );
@@ -691,8 +740,8 @@ export class ConversationStore {
     });
   }
 
-  completeOperation(responseId: string): void {
-    this.#transaction(() => {
+  completeOperation(responseId: string): string | undefined {
+    return this.#transaction(() => {
       const operation = this.#operationRow(responseId);
       if (
         operation?.state !== "active" ||
@@ -729,12 +778,14 @@ export class ConversationStore {
       }
       this.#releaseOperationLease(operation);
       this.#statements.deleteOperation.run(responseId);
+      return operation.operation_cwd ?? undefined;
     });
   }
 
   abandonOperation(
     responseId: string,
     openedThreadId?: string,
+    retainUnattached = false,
   ): string | undefined {
     return this.#transaction(() => {
       const operation = this.#operationRow(responseId);
@@ -761,6 +812,14 @@ export class ConversationStore {
         this.#statements.abandonOperation.run(responseId);
         return cleanupThreadId;
       }
+      if (
+        retainUnattached &&
+        (operation.action === "start" || operation.action === "fork") &&
+        this.#statements.retainOperationForRecovery.run(responseId).changes ===
+          1
+      ) {
+        return undefined;
+      }
       this.#statements.deleteOperation.run(responseId);
       return undefined;
     });
@@ -774,8 +833,26 @@ export class ConversationStore {
     ).map((row) => row.thread_id);
   }
 
+  recoveryOperations(): ResponseOperation[] {
+    return (
+      this.#statements.operationsForRecovery.all() as unknown as OperationRow[]
+    ).map(mapOperation);
+  }
+
+  abandonedOperations(): ResponseOperation[] {
+    return (
+      this.#statements.abandonedOperations.all() as unknown as OperationRow[]
+    ).map(mapOperation);
+  }
+
   finishAbandonedThread(threadId: string): boolean {
     return this.#statements.finishAbandonedThread.run(threadId).changes > 0;
+  }
+
+  finishAbandonedOperation(responseId: string): boolean {
+    return (
+      this.#statements.finishAbandonedOperation.run(responseId).changes === 1
+    );
   }
 
   markContinuationLost(_currentProcessGeneration: number): number {
@@ -788,7 +865,7 @@ export class ConversationStore {
       );
       this.#statements.deleteOldGenerationLeases.run();
       this.#statements.abandonOldOperations.run();
-      const removed = this.#statements.deleteOldOperationsWithoutCleanup.run();
+      const removed = this.#statements.deleteRecoveryResumes.run();
       return Number(result.changes) + Number(removed.changes);
     });
   }
@@ -918,9 +995,11 @@ export class ConversationStore {
       input.previousResponseId ?? null,
       sourceThreadId ?? null,
       sourceTurnId ?? null,
+      action === "resume" ? (sourceThreadId ?? null) : null,
       input.processGeneration,
       now,
       now + this.#responseTtlMs,
+      action === "resume" ? null : input.operationCwd,
     );
   }
 
@@ -988,6 +1067,8 @@ function mapOperation(row: OperationRow): ResponseOperation {
       : { sourceTurnId: row.source_turn_id }),
     ...(row.thread_id === null ? {} : { threadId: row.thread_id }),
     ...(row.turn_id === null ? {} : { turnId: row.turn_id }),
+    ...(row.operation_cwd === null ? {} : { operationCwd: row.operation_cwd }),
+    recoveryPending: row.recovery_pending === 1,
     processGeneration: row.process_generation,
     createdAt: row.created_at,
     expiresAt: row.expires_at,

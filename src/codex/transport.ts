@@ -22,6 +22,7 @@ const ALLOWED_CLIENT_METHODS = new Set([
   "thread/start",
   "thread/resume",
   "thread/fork",
+  "thread/list",
   "thread/inject_items",
   "thread/delete",
   "turn/start",
@@ -158,6 +159,8 @@ class JsonlTransport implements CodexTransport {
         this.request("thread/resume", params, signal) as Promise<never>,
       threadFork: (params, signal) =>
         this.request("thread/fork", params, signal) as Promise<never>,
+      threadList: (params, signal) =>
+        this.request("thread/list", params, signal) as Promise<never>,
       threadInjectItems: (params, signal) =>
         this.request("thread/inject_items", params, signal) as Promise<never>,
       threadDelete: (params, signal) =>
