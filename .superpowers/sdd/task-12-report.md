@@ -98,3 +98,22 @@ Verification after remediation:
 - `graphify update .` completed; `graphify-out/` remains untracked and excluded from commits.
 
 Remaining concern: Graphify still reports the non-blocking installed-skill/package version mismatch (`0.4.3` versus `0.9.4`). No implementation blocker remains.
+
+## Second Independent Review Remediation
+
+Implementation commit: `c4cce06` (`fix: await stream drain cleanup`).
+
+- Responses no longer passes admission settlement to the runner lifecycle. JSON and SSE handlers finish admission from outer cleanup paths only after `completeOperation()` or `abandonOperation()` and related thread cleanup settle. Suspended tool turns carry the original admission signal and a handler-owned `finish` hook through `ToolBridge`; terminal continuations and loss cleanup invoke it only after durable operation cleanup.
+- Every Chat and Responses SSE write now uses one abort-aware writer that races the write against the request/admission signal and aborts the stream. A permanently backpressured initial write therefore cannot hold the drain registry open or start runner work after forced drain.
+- SSE handlers publish a cleanup barrier to request telemetry. Response-body cancellation invokes and awaits `reader.cancel()`, then awaits endpoint cleanup before taking the once-only terminal snapshot, so cancelled Responses logs include `leaseOutcome: "released"`.
+- Added regressions for drain versus delayed Responses cleanup ordering, permanently blocked initial writers, delayed cancellation telemetry, and awaitable tool invalidation cleanup.
+
+Verification after the second remediation:
+
+- Focused drain, Chat, Responses, tool bridge, and runner suites: `121` tests passed.
+- Full Vitest suite: `357` tests passed.
+- `bun run protocol:check`, `bun run typecheck`, and `bun run build` exited `0`.
+- `bunx biome check src test .superpowers/sdd/task-12-report.md` exited `0`; Biome processed `src` and `test` and ignored the report path by repository configuration.
+- `graphify update .` completed; `graphify-out/` remains untracked and excluded from commits.
+
+Remaining concern: Graphify still reports the non-blocking installed-skill/package version mismatch (`0.4.3` versus `0.9.4`). No implementation blocker remains.
