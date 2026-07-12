@@ -2,6 +2,7 @@ import type { ResponseItem } from "../codex/generated/ResponseItem.js";
 import type { JsonValue } from "../codex/generated/serde_json/JsonValue.js";
 import type { Turn } from "../codex/generated/v2/Turn.js";
 import type { CodexHost, HostNotification } from "../codex/host.js";
+import { CodexGenerationChangedError } from "../codex/transport.js";
 import { ProxyError } from "../http/errors.js";
 import {
   eventDispatcherFor,
@@ -14,7 +15,6 @@ import {
 
 const DEFAULT_TIMEOUT_MS = 600_000;
 const DEFAULT_INTERRUPT_WAIT_MS = 5_000;
-const neverAbortSignal = new AbortController().signal;
 
 type LifecycleCallback = () => void | Promise<void>;
 type CleanupCallback = (threadId: string) => void | Promise<void>;
@@ -60,10 +60,28 @@ function completedTurnError(turn: Turn): ProxyError | undefined {
 
 function normalizeError(error: unknown): ProxyError {
   if (error instanceof ProxyError) return error;
+  if (error instanceof CodexGenerationChangedError) {
+    return new ProxyError(
+      503,
+      "codex_generation_changed",
+      "Codex host generation changed",
+    );
+  }
   if (error instanceof DOMException && error.name === "AbortError") {
     return cancellationError("abort");
   }
   return new ProxyError(502, "codex_host_error", "Codex host request failed");
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(resolve, milliseconds);
+    timeout.unref?.();
+  });
+}
+
+function pending<T>(): Promise<T> {
+  return new Promise(() => undefined);
 }
 
 function usageFrom(
@@ -123,44 +141,98 @@ export class TurnRunner {
     command: TurnCommand,
     signal?: AbortSignal,
   ): AsyncIterable<ProxyStreamEvent> {
+    const generation = this.#host.generation;
     let threadId: string | undefined;
     let turnId: string | undefined;
     let subscription: TurnEventSubscription | undefined;
     let terminal = false;
     let cancellationCause: CancellationCause | undefined;
+    let generationFailure: CodexGenerationChangedError | undefined;
     let interruptPromise: Promise<void> | undefined;
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let interruptWait: ReturnType<typeof setTimeout> | undefined;
+    const turnStartController = new AbortController();
+    let resolveCancellation!: (cause: CancellationCause) => void;
+    const cancelled = new Promise<CancellationCause>((resolve) => {
+      resolveCancellation = resolve;
+    });
 
-    const requestInterrupt = (cause: CancellationCause): void => {
-      if (
-        terminal ||
-        cancellationCause ||
-        !threadId ||
-        !turnId ||
-        !subscription
-      ) {
+    const issueInterrupt = (): void => {
+      if (terminal || interruptPromise || !threadId || !subscription) {
         return;
       }
-      cancellationCause = cause;
+      const knownTurnId = turnId ?? subscription.turnId;
+      if (!knownTurnId) return;
+      turnId = knownTurnId;
+      try {
+        this.assertGeneration(generation);
+      } catch (error) {
+        if (error instanceof CodexGenerationChangedError) {
+          generationFailure = error;
+        }
+        subscription.fail(error);
+        return;
+      }
       interruptPromise = this.#host
-        .turnInterrupt({ threadId, turnId })
+        .turnInterrupt({ threadId, turnId: knownTurnId })
         .then(() => {
+          this.assertGeneration(generation);
           if (terminal) return;
           interruptWait = setTimeout(() => {
-            subscription?.fail(cancellationError(cause));
+            subscription?.fail(cancellationError(cancellationCause ?? "abort"));
           }, this.#interruptWaitMs);
           interruptWait.unref?.();
         })
         .catch((error: unknown) => {
+          if (error instanceof CodexGenerationChangedError) {
+            generationFailure = error;
+          }
           subscription?.fail(error);
         });
     };
-    const onAbort = (): void => requestInterrupt("abort");
+    const requestCancellation = (cause: CancellationCause): void => {
+      if (terminal || cancellationCause) return;
+      cancellationCause = cause;
+      turnStartController.abort();
+      resolveCancellation(cause);
+      issueInterrupt();
+    };
+    const onAbort = (): void => requestCancellation("abort");
+    let finalization: Promise<unknown | undefined> | undefined;
+    const finalize = (): Promise<unknown | undefined> => {
+      finalization ??= (async () => {
+        const shouldInterrupt = !terminal;
+        if (timeout) clearTimeout(timeout);
+        if (interruptWait) clearTimeout(interruptWait);
+        signal?.removeEventListener("abort", onAbort);
+
+        if (shouldInterrupt) issueInterrupt();
+        terminal = true;
+        if (interruptPromise) {
+          await Promise.race([
+            interruptPromise.catch(() => undefined),
+            delay(this.#interruptWaitMs),
+          ]);
+        }
+        subscription?.close();
+
+        const [release, cleanup] = await Promise.allSettled([
+          Promise.resolve().then(() => this.#release?.()),
+          Promise.resolve().then(() =>
+            threadId === undefined ? undefined : this.#cleanup?.(threadId),
+          ),
+        ]);
+        if (generationFailure) return generationFailure;
+        if (release.status === "rejected") return release.reason;
+        if (cleanup.status === "rejected") return cleanup.reason;
+        return undefined;
+      })();
+      return finalization;
+    };
 
     try {
       signal?.throwIfAborted();
-      threadId = await this.openThread(command, signal ?? neverAbortSignal);
+      threadId = await this.openThread(command, generation, signal);
       signal?.throwIfAborted();
 
       const items: ResponseItem[] = [...command.history];
@@ -172,37 +244,86 @@ export class TurnRunner {
         });
       }
       if (items.length > 0) {
+        this.assertGeneration(generation);
         await this.#host.threadInjectItems(
           { threadId, items: items as unknown as JsonValue[] },
-          signal ?? neverAbortSignal,
+          signal,
         );
+        this.assertGeneration(generation);
       }
       signal?.throwIfAborted();
 
-      subscription = this.#dispatcher.register(threadId);
-      const started = await this.#host.turnStart(
-        {
-          threadId,
-          input: command.input,
-          model: command.model,
-          ...(command.effort === undefined ? {} : { effort: command.effort }),
-          ...(command.outputSchema === undefined
-            ? {}
-            : { outputSchema: command.outputSchema }),
-        },
-        neverAbortSignal,
-      );
-      turnId = started.turn.id;
-      subscription.bind(turnId);
-
+      subscription = this.#dispatcher.register(threadId, generation);
+      const subscriptionFailure = subscription.whenFailed();
       signal?.addEventListener("abort", onAbort, { once: true });
-      if (signal?.aborted) onAbort();
-      timeout = setTimeout(() => requestInterrupt("timeout"), this.#timeoutMs);
+      timeout = setTimeout(
+        () => requestCancellation("timeout"),
+        this.#timeoutMs,
+      );
       timeout.unref?.();
+      if (signal?.aborted) onAbort();
+
+      this.assertGeneration(generation);
+      const turnStartOutcome = this.#host
+        .turnStart(
+          {
+            threadId,
+            input: command.input,
+            model: command.model,
+            ...(command.effort === undefined ? {} : { effort: command.effort }),
+            ...(command.outputSchema === undefined
+              ? {}
+              : { outputSchema: command.outputSchema }),
+          },
+          turnStartController.signal,
+        )
+        .then(
+          (response) => {
+            this.assertGeneration(generation);
+            return { type: "started" as const, response };
+          },
+          (error: unknown) => ({ type: "failed" as const, error }),
+        );
+      const start = await Promise.race([
+        turnStartOutcome,
+        cancelled.then((cause) => ({ type: "cancelled" as const, cause })),
+        subscriptionFailure,
+      ]);
+
+      if (start.type === "started") {
+        turnId = start.response.turn.id;
+        subscription.bind(turnId);
+        if (cancellationCause) issueInterrupt();
+      } else if (start.type === "failed" && !cancellationCause) {
+        throw start.error;
+      } else {
+        const cause =
+          start.type === "cancelled" ? start.cause : cancellationCause;
+        if (!cause) throw new Error("Missing turn cancellation cause");
+        const responseTurnId = turnStartOutcome.then((outcome) => {
+          if (outcome.type === "started") return outcome.response.turn.id;
+          if (outcome.error instanceof CodexGenerationChangedError) {
+            throw outcome.error;
+          }
+          return pending<string>();
+        });
+        const knownTurnId = await Promise.race([
+          responseTurnId,
+          subscription.whenBound(),
+          subscriptionFailure,
+          delay(this.#interruptWaitMs).then(() => undefined),
+        ]);
+        this.assertGeneration(generation);
+        if (!knownTurnId) throw cancellationError(cause);
+        turnId = knownTurnId;
+        if (subscription.turnId === undefined) subscription.bind(turnId);
+        issueInterrupt();
+      }
 
       let text = "";
       let usage: TokenUsage | undefined;
       for await (const event of subscription) {
+        this.assertGeneration(generation);
         switch (event.method) {
           case "item/agentMessage/delta":
             yield { type: "text.delta", delta: event.params.delta };
@@ -222,6 +343,8 @@ export class TurnRunner {
             const error = cancellationCause
               ? cancellationError(cancellationCause)
               : completedTurnError(event.params.turn);
+            const lifecycleError = await finalize();
+            if (lifecycleError !== undefined) throw lifecycleError;
             if (error) {
               yield { type: "failed", error };
               return;
@@ -239,39 +362,20 @@ export class TurnRunner {
         }
       }
     } catch (error) {
+      const lifecycleError = await finalize();
+      if (lifecycleError !== undefined) throw lifecycleError;
       yield { type: "failed", error: normalizeError(error) };
     } finally {
-      const shouldInterrupt = !terminal;
-      terminal = true;
-      if (timeout) clearTimeout(timeout);
-      if (interruptWait) clearTimeout(interruptWait);
-      signal?.removeEventListener("abort", onAbort);
-
-      if (
-        shouldInterrupt &&
-        threadId &&
-        turnId &&
-        !interruptPromise &&
-        subscription
-      ) {
-        interruptPromise = this.#host
-          .turnInterrupt({ threadId, turnId })
-          .then(() => undefined);
-      }
-      await interruptPromise?.catch(() => undefined);
-      subscription?.close();
-
-      const callbacks: Array<void | Promise<void>> = [];
-      if (this.#release) callbacks.push(this.#release());
-      if (this.#cleanup && threadId) callbacks.push(this.#cleanup(threadId));
-      await Promise.all(callbacks);
+      await finalize();
     }
   }
 
   private async openThread(
     command: TurnCommand,
-    signal: AbortSignal,
+    generation: number,
+    signal?: AbortSignal,
   ): Promise<string> {
+    this.assertGeneration(generation);
     switch (command.action.type) {
       case "start": {
         const response = await this.#host.threadStart(
@@ -289,6 +393,7 @@ export class TurnRunner {
           },
           signal,
         );
+        this.assertGeneration(generation);
         return response.thread.id;
       }
       case "resume": {
@@ -296,6 +401,7 @@ export class TurnRunner {
           { threadId: command.action.threadId },
           signal,
         );
+        this.assertGeneration(generation);
         return response.thread.id;
       }
       case "fork": {
@@ -306,8 +412,15 @@ export class TurnRunner {
           },
           signal,
         );
+        this.assertGeneration(generation);
         return response.thread.id;
       }
+    }
+  }
+
+  private assertGeneration(generation: number): void {
+    if (this.#host.generation !== generation) {
+      throw new CodexGenerationChangedError();
     }
   }
 }

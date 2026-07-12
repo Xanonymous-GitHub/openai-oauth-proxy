@@ -2,6 +2,7 @@ import type { ResponseItem } from "../codex/generated/ResponseItem.js";
 import type { JsonValue } from "../codex/generated/serde_json/JsonValue.js";
 import type { UserInput } from "../codex/generated/v2/UserInput.js";
 import type { CodexHost, HostNotification } from "../codex/host.js";
+import { CodexGenerationChangedError } from "../codex/transport.js";
 import type { ProxyError } from "../http/errors.js";
 
 export type ThreadAction =
@@ -47,17 +48,45 @@ type EventWaiter = {
 export class TurnEventSubscription implements AsyncIterable<HostNotification> {
   readonly #events: HostNotification[] = [];
   readonly #waiters: EventWaiter[] = [];
+  readonly #bound: Promise<string>;
+  readonly #failed: Promise<never>;
+  #resolveBound!: (turnId: string) => void;
+  #rejectFailed!: (error: unknown) => void;
   #failure: unknown;
   #closed = false;
   turnId?: string;
 
   constructor(
     readonly threadId: string,
+    readonly generation: number,
     private readonly dispatcher: HostEventDispatcher,
-  ) {}
+  ) {
+    this.#bound = new Promise((resolve) => {
+      this.#resolveBound = resolve;
+    });
+    this.#failed = new Promise((_, reject) => {
+      this.#rejectFailed = reject;
+    });
+    void this.#failed.catch(() => undefined);
+  }
 
   bind(turnId: string): void {
     this.dispatcher.bind(this, turnId);
+  }
+
+  whenBound(): Promise<string> {
+    return this.turnId === undefined
+      ? this.#bound
+      : Promise.resolve(this.turnId);
+  }
+
+  whenFailed(): Promise<never> {
+    return this.#failed;
+  }
+
+  setTurnId(turnId: string): void {
+    this.turnId = turnId;
+    this.#resolveBound(turnId);
   }
 
   push(event: HostNotification): void {
@@ -68,8 +97,10 @@ export class TurnEventSubscription implements AsyncIterable<HostNotification> {
   }
 
   fail(error: unknown): void {
-    if (this.#closed) return;
+    if (this.#closed || this.#failure !== undefined) return;
     this.#failure = error;
+    this.#events.length = 0;
+    this.#rejectFailed(error);
     for (const waiter of this.#waiters.splice(0)) waiter.reject(error);
   }
 
@@ -132,11 +163,15 @@ export class HostEventDispatcher {
     this.#host = host;
   }
 
-  register(threadId: string): TurnEventSubscription {
-    const subscription = new TurnEventSubscription(threadId, this);
+  register(threadId: string, generation: number): TurnEventSubscription {
+    const subscription = new TurnEventSubscription(threadId, generation, this);
     const pending = this.#pending.get(threadId) ?? new Set();
     pending.add(subscription);
     this.#pending.set(threadId, pending);
+    if (this.#host.generation !== generation) {
+      subscription.fail(new CodexGenerationChangedError());
+      return subscription;
+    }
     this.ensureConsumer();
     return subscription;
   }
@@ -152,7 +187,7 @@ export class HostEventDispatcher {
     if (existing && existing !== subscription) {
       throw new Error(`Duplicate turn event registration for ${key}`);
     }
-    subscription.turnId = turnId;
+    subscription.setTurnId(turnId);
     this.removePending(subscription);
     this.#active.set(key, subscription);
   }
@@ -195,6 +230,10 @@ export class HostEventDispatcher {
       this.key(identity.threadId, identity.turnId),
     );
     if (exact) {
+      if (event.generation !== exact.generation) {
+        exact.fail(new CodexGenerationChangedError());
+        return;
+      }
       exact.push(event);
       return;
     }
@@ -203,6 +242,10 @@ export class HostEventDispatcher {
     if (pending?.size !== 1) return;
     const subscription = pending.values().next().value;
     if (!subscription) return;
+    if (event.generation !== subscription.generation) {
+      subscription.fail(new CodexGenerationChangedError());
+      return;
+    }
     this.bind(subscription, identity.turnId);
     subscription.push(event);
   }

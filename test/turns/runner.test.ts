@@ -19,8 +19,8 @@ class EventQueue implements AsyncIterable<HostNotification> {
   }> = [];
   #failure: unknown;
 
-  push(event: Omit<HostNotification, "generation">): void {
-    const value = { ...event, generation: 1 } as HostNotification;
+  push(event: Omit<HostNotification, "generation">, generation = 1): void {
+    const value = { ...event, generation } as HostNotification;
     const waiter = this.#waiters.shift();
     if (waiter) waiter.resolve({ done: false, value });
     else this.#values.push(value);
@@ -43,6 +43,18 @@ class EventQueue implements AsyncIterable<HostNotification> {
       },
     };
   }
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
+function setGeneration(host: CodexHost, generation: number): void {
+  (host as { generation: number }).generation = generation;
 }
 
 function command(overrides: Partial<TurnCommand> = {}): TurnCommand {
@@ -267,7 +279,7 @@ describe("TurnRunner", () => {
         environments: [],
         selectedCapabilityRoots: [],
       }),
-      expect.anything(),
+      undefined,
     );
     expect(host.threadInjectItems).toHaveBeenCalledWith(
       {
@@ -283,7 +295,7 @@ describe("TurnRunner", () => {
           },
         ],
       },
-      expect.anything(),
+      undefined,
     );
     expect(host.threadInjectItems).toHaveBeenCalledBefore(
       vi.mocked(host.turnStart),
@@ -325,15 +337,15 @@ describe("TurnRunner", () => {
 
     expect(host.threadResume).toHaveBeenCalledWith(
       { threadId: "thread-existing" },
-      expect.anything(),
+      undefined,
     );
     expect(host.threadFork).toHaveBeenCalledWith(
       { threadId: "thread-existing", lastTurnId: "turn-parent" },
-      expect.anything(),
+      undefined,
     );
   });
 
-  it("routes immediate notifications for concurrent turns through one dispatcher", async () => {
+  it("routes four concurrent turns through one dispatcher", async () => {
     const { events, host } = createHost();
     vi.mocked(host.turnStart).mockImplementation(async ({ threadId }) => {
       const turnId = `turn-${threadId}`;
@@ -342,14 +354,115 @@ describe("TurnRunner", () => {
     });
     const runner = createRunner(host);
 
-    const [first, second] = await Promise.all([
-      runner.run(command({ action: { type: "resume", threadId: "a" } })),
-      runner.run(command({ action: { type: "resume", threadId: "b" } })),
-    ]);
+    const threadIds = ["a", "b", "c", "d"];
+    const results = await Promise.all(
+      threadIds.map((threadId) =>
+        runner.run(command({ action: { type: "resume", threadId } })),
+      ),
+    );
 
-    expect(first.text).toBe("answer-a");
-    expect(second.text).toBe("answer-b");
+    expect(results.map(({ text }) => text)).toEqual(
+      threadIds.map((threadId) => `answer-${threadId}`),
+    );
     expect(host.events).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails if generation changes while opening a thread", async () => {
+    const { host } = createHost();
+    const opening = deferred<Awaited<ReturnType<CodexHost["threadStart"]>>>();
+    vi.mocked(host.threadStart).mockReturnValue(opening.promise);
+    const result = createRunner(host).run(
+      command({
+        history: [
+          {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "history" }],
+          },
+        ],
+      }),
+    );
+
+    await vi.waitFor(() => expect(host.threadStart).toHaveBeenCalledOnce());
+    opening.resolve(fakeThreadStartResponse());
+    setGeneration(host, 2);
+
+    await expect(result).rejects.toMatchObject({
+      status: 503,
+      code: "codex_generation_changed",
+    });
+    expect(host.threadInjectItems).not.toHaveBeenCalled();
+    expect(host.turnStart).not.toHaveBeenCalled();
+  });
+
+  it("fails if generation changes while injecting history", async () => {
+    const { host } = createHost();
+    const injection =
+      deferred<Awaited<ReturnType<CodexHost["threadInjectItems"]>>>();
+    vi.mocked(host.threadInjectItems).mockReturnValue(injection.promise);
+    const result = createRunner(host).run(
+      command({
+        history: [
+          {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "history" }],
+          },
+        ],
+      }),
+    );
+
+    await vi.waitFor(() =>
+      expect(host.threadInjectItems).toHaveBeenCalledOnce(),
+    );
+    injection.resolve({});
+    setGeneration(host, 2);
+
+    await expect(result).rejects.toMatchObject({
+      status: 503,
+      code: "codex_generation_changed",
+    });
+    expect(host.turnStart).not.toHaveBeenCalled();
+  });
+
+  it("fails if generation changes while starting a turn", async () => {
+    const { host } = createHost();
+    const starting = deferred<Awaited<ReturnType<CodexHost["turnStart"]>>>();
+    vi.mocked(host.turnStart).mockReturnValue(starting.promise);
+    const result = createRunner(host).run(command());
+
+    await vi.waitFor(() => expect(host.turnStart).toHaveBeenCalledOnce());
+    starting.resolve({ turn: fakeTurn() });
+    setGeneration(host, 2);
+
+    await expect(result).rejects.toMatchObject({
+      status: 503,
+      code: "codex_generation_changed",
+    });
+  });
+
+  it("rejects a routed event from another generation", async () => {
+    const { events, host } = createHost();
+    vi.mocked(host.turnStart).mockImplementation(async () => {
+      events.push(
+        {
+          method: "item/agentMessage/delta",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            itemId: "item-1",
+            delta: "must not escape",
+          },
+        },
+        2,
+      );
+      return { turn: fakeTurn() };
+    });
+
+    await expect(createRunner(host).run(command())).rejects.toMatchObject({
+      status: 503,
+      code: "codex_generation_changed",
+    });
   });
 
   it("reconnects the central dispatcher for a later host generation", async () => {
@@ -459,6 +572,112 @@ describe("TurnRunner", () => {
     expect(release).toHaveBeenCalledOnce();
     expect(cleanup).toHaveBeenCalledOnce();
     expect(cleanup).toHaveBeenCalledWith("thread-1");
+  });
+
+  it("interrupts once when abort races a pending turn start", async () => {
+    const { events, host } = createHost();
+    let turnStartSignal: AbortSignal | undefined;
+    vi.mocked(host.turnStart).mockImplementation((_params, signal) => {
+      turnStartSignal = signal;
+      return new Promise((_, reject) => {
+        signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("aborted", "AbortError")),
+          { once: true },
+        );
+      });
+    });
+    vi.mocked(host.turnInterrupt).mockImplementation(
+      async ({ threadId, turnId }) => {
+        events.push({
+          method: "turn/completed",
+          params: {
+            threadId,
+            turn: fakeTurn({ id: turnId, status: "interrupted" }),
+          },
+        });
+        return {};
+      },
+    );
+    const release = vi.fn();
+    const cleanup = vi.fn();
+    const controller = new AbortController();
+    const result = createRunner(host, {
+      release,
+      cleanup,
+      interruptWaitMs: 20,
+    }).run(command(), controller.signal);
+
+    await vi.waitFor(() => expect(host.turnStart).toHaveBeenCalledOnce());
+    controller.abort();
+    await Promise.resolve();
+    events.push({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "item-1",
+        delta: "late",
+      },
+    });
+
+    await expect(result).rejects.toMatchObject({
+      status: 499,
+      code: "request_aborted",
+    });
+    expect(turnStartSignal?.aborted).toBe(true);
+    expect(host.turnInterrupt).toHaveBeenCalledTimes(1);
+    expect(host.turnInterrupt).toHaveBeenCalledWith({
+      threadId: "thread-1",
+      turnId: "turn-1",
+    });
+    expect(release).toHaveBeenCalledOnce();
+    expect(cleanup).toHaveBeenCalledOnce();
+  });
+
+  it("times out without hanging on a pending turn start", async () => {
+    const { host } = createHost();
+    let turnStartSignal: AbortSignal | undefined;
+    vi.mocked(host.turnStart).mockImplementation(async (_params, signal) => {
+      turnStartSignal = signal;
+      return new Promise(() => undefined);
+    });
+    const release = vi.fn();
+    const cleanup = vi.fn();
+
+    await expect(
+      createRunner(host, {
+        timeoutMs: 5,
+        interruptWaitMs: 5,
+        release,
+        cleanup,
+      }).run(command()),
+    ).rejects.toMatchObject({ status: 504, code: "turn_timeout" });
+    expect(turnStartSignal?.aborted).toBe(true);
+    expect(host.turnInterrupt).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledOnce();
+    expect(cleanup).toHaveBeenCalledOnce();
+  });
+
+  it("settles release and cleanup independently and reports release first", async () => {
+    const { events, host } = createHost();
+    vi.mocked(host.turnStart).mockImplementation(async () => {
+      emitCompletedTurn(events, "thread-1", "turn-1", "final", false);
+      return { turn: fakeTurn() };
+    });
+    const releaseError = new Error("release failed");
+    const release = vi.fn(() => {
+      throw releaseError;
+    });
+    const cleanup = vi.fn(async () => {
+      throw new Error("cleanup failed");
+    });
+
+    await expect(
+      createRunner(host, { release, cleanup }).run(command()),
+    ).rejects.toBe(releaseError);
+    expect(release).toHaveBeenCalledOnce();
+    expect(cleanup).toHaveBeenCalledOnce();
   });
 
   it("bounds the wait when interrupted completion is not emitted", async () => {
