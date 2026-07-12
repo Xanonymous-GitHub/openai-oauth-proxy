@@ -3,6 +3,7 @@ import type { Handler } from "hono";
 import { streamSSE } from "hono/streaming";
 import { openAIErrorBody, ProxyError } from "../http/errors.js";
 import { readJsonBody } from "../http/limits.js";
+import { writeSSEWithSignal } from "../http/sse.js";
 import type { TurnCapacity } from "../operations/capacity.js";
 import type { AdmittedTurn, TurnDrainRegistry } from "../operations/drain.js";
 import type { ObserveRequest } from "../operations/telemetry.js";
@@ -236,6 +237,9 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
           "messages",
         );
       }
+      if (continuation.signal) {
+        turnSignal = AbortSignal.any([turnSignal, continuation.signal]);
+      }
       continuationResult = continuation.result;
     }
 
@@ -295,6 +299,7 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
               kind: "chat" as const,
               leaseOwner: identity.id,
               toolFingerprint,
+              ...(admission === undefined ? {} : { signal: admission.signal }),
             },
           }),
     };
@@ -326,6 +331,8 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
 
     context.header("X-Accel-Buffering", "no");
     const sendStream = deps.streamSSE ?? streamSSE;
+    const streamCleanup = Promise.withResolvers<void>();
+    deps.observe?.(context.req.raw, { streamCleanup: streamCleanup.promise });
     let runnerStarted = false;
     const executeStream = async (
       stream: Parameters<Parameters<typeof sendStream>[1]>[0],
@@ -342,9 +349,7 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
         deps.runner.tools.invalidateCalls(streamedToolCallIds);
       });
       const writeSSE = async (event: { data: string }): Promise<void> => {
-        if (aborted) throw new DOMException("aborted", "AbortError");
-        await stream.writeSSE(event);
-        if (aborted) throw new DOMException("aborted", "AbortError");
+        await writeSSEWithSignal(stream, event, turnSignal);
       };
 
       try {
@@ -468,12 +473,15 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
           errorCode: openAIErrorBody(error).error.code,
         });
         throw error;
+      } finally {
+        streamCleanup.resolve();
       }
     };
     try {
       return sendStream(context, executeStream);
     } catch (error) {
       admission?.done();
+      streamCleanup.resolve();
       throw error;
     }
   };

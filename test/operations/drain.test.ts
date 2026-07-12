@@ -10,7 +10,10 @@ import { createResponsesHandler } from "../../src/openai/responses.js";
 import { TurnCapacity } from "../../src/operations/capacity.js";
 import { TurnDrainRegistry } from "../../src/operations/drain.js";
 import { Metrics } from "../../src/operations/metrics.js";
-import type { TurnRunner } from "../../src/turns/runner.js";
+import type {
+  TurnLifecycleCallbacks,
+  TurnRunner,
+} from "../../src/turns/runner.js";
 
 const directories = new Set<string>();
 afterEach(() => {
@@ -160,6 +163,192 @@ it("aborts a backpressured admitted stream before post-close runner work", async
   expect(store.abandonOperation).toHaveBeenCalledOnce();
   expect(releaseLease).toHaveBeenCalledOnce();
   expect(capacity.active).toBe(0);
+});
+
+it("settles a permanently blocked initial write within forced drain", async () => {
+  const capacity = new TurnCapacity(1, 0);
+  const drain = new TurnDrainRegistry();
+  let streamCallback: Promise<void> | undefined;
+  let onAbort: () => void = () => undefined;
+  const abortStream = vi.fn(() => onAbort());
+  const store = {
+    reserveOperation: vi.fn(() => ({ type: "start" as const })),
+    abandonOperation: vi.fn(() => undefined),
+    lookupOperation: vi.fn(() => undefined),
+  };
+  const runner = {
+    tools: {
+      toDynamicTools: vi.fn(() => []),
+      fingerprintDefinitions: vi.fn(() => "fingerprint"),
+      invalidateResponse: vi.fn(),
+    },
+    stream: vi.fn(() => {
+      throw new Error("runner must not start after drain");
+    }),
+  } as unknown as TurnRunner;
+  const operationWorkingDirectory = mkdtempSync(
+    join(tmpdir(), "blocked-drain-"),
+  );
+  directories.add(operationWorkingDirectory);
+  const app = new Hono();
+  app.post(
+    "/",
+    createResponsesHandler({
+      models: {
+        lookup: vi.fn(async () => ({
+          id: "gpt-5.4",
+          supportsImage: false,
+          supportedReasoningEfforts: [],
+        })),
+      },
+      runner,
+      store: store as never,
+      clock: { now: () => 1_700_000_000_000 },
+      processGeneration: () => 1,
+      operationWorkingDirectory,
+      deleteThread: vi.fn(),
+      capacity,
+      drain,
+      streamSSE: ((
+        _context: unknown,
+        callback: (stream: unknown) => Promise<void>,
+      ) => {
+        streamCallback = callback({
+          onAbort(callback: () => void) {
+            onAbort = callback;
+          },
+          abort: abortStream,
+          writeSSE: () => new Promise<void>(() => undefined),
+        });
+        void streamCallback.catch(() => undefined);
+        return new Response("");
+      }) as never,
+    }),
+  );
+
+  await app.request("/", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "gpt-5.4", input: "hello", stream: true }),
+  });
+  drain.beginDrain();
+  drain.abortAll();
+
+  const outcome = await Promise.race([
+    drain.whenIdle().then(() => "idle" as const),
+    new Promise<"timeout">((resolve) =>
+      setTimeout(() => resolve("timeout"), 50),
+    ),
+  ]);
+
+  expect(outcome).toBe("idle");
+  expect(abortStream).toHaveBeenCalledOnce();
+  expect(runner.stream).not.toHaveBeenCalled();
+  expect(store.abandonOperation).toHaveBeenCalledOnce();
+  expect(capacity.active).toBe(0);
+  await expect(streamCallback).resolves.toBeUndefined();
+});
+
+it("keeps Responses admission until delayed durable cleanup completes", async () => {
+  const capacity = new TurnCapacity(1, 0);
+  const drain = new TurnDrainRegistry();
+  let finishCleanup!: () => void;
+  const cleanup = new Promise<void>((resolve) => {
+    finishCleanup = resolve;
+  });
+  const sequence: string[] = [];
+  const store = {
+    reserveOperation: vi.fn(() => ({ type: "start" as const })),
+    attachOperation: vi.fn(),
+    attachOperationTurn: vi.fn(),
+    completeOperation: vi.fn(() => {
+      sequence.push("sqlite-complete");
+      return undefined;
+    }),
+    abandonOperation: vi.fn(() => undefined),
+    lookupOperation: vi.fn(() => undefined),
+  };
+  const runner = {
+    tools: {
+      toDynamicTools: vi.fn(() => []),
+      fingerprintDefinitions: vi.fn(() => "fingerprint"),
+    },
+    run: vi.fn(
+      async (
+        _command: unknown,
+        _signal: AbortSignal,
+        lifecycle?: TurnLifecycleCallbacks,
+      ) => {
+        await lifecycle?.opened?.("thread-1");
+        await lifecycle?.started?.("thread-1", "turn-1");
+        await lifecycle?.release?.();
+        await lifecycle?.settled?.();
+        return {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          text: "done",
+          finishReason: "stop" as const,
+        };
+      },
+    ),
+  } as unknown as TurnRunner;
+  const deleteThread = vi.fn(async () => {
+    sequence.push("cleanup-start");
+    await cleanup;
+    sequence.push("cleanup-finish");
+  });
+  const operationWorkingDirectory = mkdtempSync(
+    join(tmpdir(), "delayed-cleanup-drain-"),
+  );
+  directories.add(operationWorkingDirectory);
+  const app = new Hono();
+  app.post(
+    "/",
+    createResponsesHandler({
+      models: {
+        lookup: vi.fn(async () => ({
+          id: "gpt-5.4",
+          supportsImage: false,
+          supportedReasoningEfforts: [],
+        })),
+      },
+      runner,
+      store: store as never,
+      clock: { now: () => 1_700_000_000_000 },
+      processGeneration: () => 1,
+      operationWorkingDirectory,
+      deleteThread,
+      capacity,
+      drain,
+    }),
+  );
+
+  const response = app.request("/", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "gpt-5.4", input: "hello", store: false }),
+  });
+  await vi.waitFor(() => expect(deleteThread).toHaveBeenCalledOnce());
+  drain.beginDrain();
+  drain.abortAll();
+  let storeClosed = false;
+  const closeStore = drain.whenIdle().then(() => {
+    sequence.push("store-close");
+    storeClosed = true;
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(storeClosed).toBe(false);
+  finishCleanup();
+  expect((await response).status).toBe(200);
+  await closeStore;
+
+  expect(sequence).toEqual([
+    "cleanup-start",
+    "cleanup-finish",
+    "sqlite-complete",
+    "store-close",
+  ]);
 });
 
 it("counts every supervisor restart event before the first metrics scrape", async () => {

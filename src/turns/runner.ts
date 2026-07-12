@@ -39,6 +39,8 @@ export interface TurnToolLifecycle {
   responseId?: string;
   leaseOwner: string;
   toolFingerprint: string;
+  signal?: AbortSignal;
+  finish?: LifecycleCallback;
   suspended?: (threadId: string, turnId: string) => void | Promise<void>;
   lost?: (threadId: string, turnId: string) => void | Promise<void>;
 }
@@ -605,9 +607,20 @@ export class TurnRunner {
           leaseOwner: toolLifecycle.leaseOwner,
           generation,
           toolFingerprint: toolLifecycle.toolFingerprint,
+          ...(toolLifecycle.signal === undefined
+            ? {}
+            : { signal: toolLifecycle.signal }),
+          ...(toolLifecycle.finish === undefined
+            ? {}
+            : { finish: toolLifecycle.finish }),
           resume: (nextSignal) => {
             const result = accumulator.resume();
-            attachClient(nextSignal);
+            const resumedSignal = toolLifecycle.signal
+              ? nextSignal
+                ? AbortSignal.any([toolLifecycle.signal, nextSignal])
+                : toolLifecycle.signal
+              : nextSignal;
+            attachClient(resumedSignal);
             startTimeout();
             return result;
           },

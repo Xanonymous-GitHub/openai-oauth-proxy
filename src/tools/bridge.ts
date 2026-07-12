@@ -41,6 +41,8 @@ export interface ToolBridgeContext {
   leaseOwner: string;
   generation: number;
   toolFingerprint: string;
+  signal?: AbortSignal;
+  finish?(): void;
   resume(signal?: AbortSignal): Promise<TurnResult>;
   invalidate(): void | Promise<void>;
 }
@@ -65,6 +67,8 @@ export type ToolContinuation =
       threadId: string;
       turnId: string;
       result: Promise<TurnResult>;
+      signal?: AbortSignal;
+      finish?(): void;
     }
   | { type: "incomplete"; missingCallIds: string[] }
   | { type: "lost" };
@@ -79,6 +83,7 @@ interface PendingTurn {
   expiresAt: number;
   calls: Map<string, PendingCall>;
   invalidated: boolean;
+  invalidation: Promise<void> | undefined;
   timer: ReturnType<typeof setTimeout> | undefined;
 }
 
@@ -230,6 +235,7 @@ export class ToolBridge {
         expiresAt: this.#now() + this.#timeoutMs,
         calls: new Map(),
         invalidated: false,
+        invalidation: undefined,
         timer: undefined,
       };
       this.#turns.set(context, turn);
@@ -368,6 +374,12 @@ export class ToolBridge {
       threadId: turn.context.threadId,
       turnId: turn.context.turnId,
       result: nextResult,
+      ...(turn.context.signal === undefined
+        ? {}
+        : { signal: turn.context.signal }),
+      ...(turn.context.finish === undefined
+        ? {}
+        : { finish: turn.context.finish }),
     };
   }
 
@@ -391,9 +403,9 @@ export class ToolBridge {
     this.#unclaimed.clear();
   }
 
-  invalidateResponse(responseId: string): void {
+  invalidateResponse(responseId: string): Promise<void> {
     const turn = this.#responses.get(responseId);
-    if (turn) this.invalidate(turn);
+    return turn ? this.invalidate(turn) : Promise.resolve();
   }
 
   invalidateCalls(callIds: readonly string[]): void {
@@ -479,8 +491,8 @@ export class ToolBridge {
     return turns.size === 1 ? turns.values().next().value : undefined;
   }
 
-  private invalidate(turn: PendingTurn): void {
-    if (turn.invalidated) return;
+  private invalidate(turn: PendingTurn): Promise<void> {
+    if (turn.invalidated) return turn.invalidation ?? Promise.resolve();
     turn.invalidated = true;
     const lostUntil = this.#now() + this.#timeoutMs;
     if (turn.context.responseId !== undefined) {
@@ -495,7 +507,14 @@ export class ToolBridge {
       }
     }
     this.remove(turn);
-    void Promise.resolve(turn.context.invalidate()).catch(() => undefined);
+    try {
+      turn.invalidation = Promise.resolve(turn.context.invalidate()).catch(
+        () => undefined,
+      );
+    } catch {
+      turn.invalidation = Promise.resolve();
+    }
+    return turn.invalidation;
   }
 
   private remove(turn: PendingTurn): void {

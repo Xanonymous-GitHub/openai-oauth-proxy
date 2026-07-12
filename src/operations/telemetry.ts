@@ -4,6 +4,7 @@ export interface RequestTelemetryUpdate {
   streamOutcome?: "completed" | "cancelled" | "failed";
   queueOutcome?: "admitted" | "queued" | "full";
   leaseOutcome?: "acquired" | "busy" | "released";
+  streamCleanup?: Promise<void>;
 }
 
 export type ObserveRequest = (

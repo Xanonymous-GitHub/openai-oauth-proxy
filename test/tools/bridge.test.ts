@@ -387,4 +387,31 @@ describe("ToolBridge", () => {
     expect(bridge.pending).toBe(0);
     expect(bridge.expired).toBe(1);
   });
+
+  it("awaits Responses invalidation cleanup", async () => {
+    const { bridge } = createBridge();
+    let finishCleanup!: () => void;
+    const cleanup = new Promise<void>((resolve) => {
+      finishCleanup = resolve;
+    });
+    const turn = context({
+      kind: "responses",
+      responseId: "resp-1",
+      invalidate: vi.fn(() => cleanup),
+    });
+    bridge.register(serverCall("rpc-1", "lookup"), turn);
+    let settled = false;
+
+    const invalidation = Promise.resolve(
+      bridge.invalidateResponse("resp-1"),
+    ).then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+
+    expect(settled).toBe(false);
+    finishCleanup();
+    await invalidation;
+    expect(turn.invalidate).toHaveBeenCalledOnce();
+  });
 });

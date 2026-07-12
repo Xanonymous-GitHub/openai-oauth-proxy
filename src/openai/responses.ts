@@ -12,6 +12,7 @@ import type {
 } from "../conversations/store.js";
 import { openAIErrorBody, ProxyError } from "../http/errors.js";
 import { readJsonBody } from "../http/limits.js";
+import { writeSSEWithSignal } from "../http/sse.js";
 import type { Permit, TurnCapacity } from "../operations/capacity.js";
 import type { AdmittedTurn, TurnDrainRegistry } from "../operations/drain.js";
 import type { ObserveRequest } from "../operations/telemetry.js";
@@ -491,14 +492,17 @@ export function createResponsesHandler(
           "input",
         );
       }
+      const finishContinuation = (): void => continuation.finish?.();
       let result: TurnResult;
       try {
         result = await continuation.result;
       } catch (error) {
-        await loseResponseOperation(deps, request.previous_response_id).catch(
-          () => undefined,
-        );
-        deps.observe?.(context.req.raw, { leaseOutcome: "released" });
+        try {
+          await loseResponseOperation(deps, request.previous_response_id);
+          deps.observe?.(context.req.raw, { leaseOutcome: "released" });
+        } finally {
+          finishContinuation();
+        }
         throw error;
       }
       const identity: ResponseIdentity = {
@@ -508,31 +512,64 @@ export function createResponsesHandler(
         model: model.id,
       };
       if (result.finishReason === "stop") {
-        const operationCwd = deps.store.completeOperation(identity.responseId);
-        removeOperationDirectory(operationCwd);
-        deps.observe?.(context.req.raw, { leaseOutcome: "released" });
+        try {
+          const operationCwd = deps.store.completeOperation(
+            identity.responseId,
+          );
+          removeOperationDirectory(operationCwd);
+          deps.observe?.(context.req.raw, { leaseOutcome: "released" });
+        } catch (error) {
+          try {
+            await loseResponseOperation(deps, identity.responseId);
+            deps.observe?.(context.req.raw, { leaseOutcome: "released" });
+          } finally {
+            finishContinuation();
+          }
+          throw error;
+        }
       }
-      if (!request.stream) return context.json(responseBody(identity, result));
+      if (!request.stream) {
+        try {
+          return context.json(responseBody(identity, result));
+        } finally {
+          if (result.finishReason === "stop") finishContinuation();
+        }
+      }
       const sendStream = deps.streamSSE ?? streamSSE;
-      return sendStream(context, async (stream) => {
+      const streamCleanup = Promise.withResolvers<void>();
+      deps.observe?.(context.req.raw, { streamCleanup: streamCleanup.promise });
+      const executeStream = async (
+        stream: Parameters<Parameters<typeof sendStream>[1]>[0],
+      ) => {
+        const controller = new AbortController();
+        const signal = continuation.signal
+          ? AbortSignal.any([
+              context.req.raw.signal,
+              continuation.signal,
+              controller.signal,
+            ])
+          : AbortSignal.any([context.req.raw.signal, controller.signal]);
         let aborted = false;
-        const invalidate = (): void => {
+        let invalidation: Promise<void> | undefined;
+        const invalidate = (): Promise<void> => {
+          if (invalidation) return invalidation;
           aborted = true;
           deps.observe?.(context.req.raw, {
             streamOutcome: "cancelled",
             errorCode: "request_aborted",
           });
-          if (result.finishReason === "tool_calls") {
-            deps.runner.tools.invalidateResponse(identity.responseId);
-          }
+          controller.abort();
+          invalidation =
+            result.finishReason === "tool_calls"
+              ? deps.runner.tools.invalidateResponse(identity.responseId)
+              : Promise.resolve();
+          return invalidation;
         };
         stream.onAbort(invalidate);
         const writeSSE = async (
           event: Parameters<typeof stream.writeSSE>[0],
         ): Promise<void> => {
-          if (aborted) throw new DOMException("aborted", "AbortError");
-          await stream.writeSSE(event);
-          if (aborted) throw new DOMException("aborted", "AbortError");
+          await writeSSEWithSignal(stream, event, signal);
         };
         let sequenceNumber = 0;
         try {
@@ -627,7 +664,7 @@ export function createResponsesHandler(
           });
           deps.observe?.(context.req.raw, { streamOutcome: "completed" });
         } catch (error) {
-          invalidate();
+          await invalidate();
           if (
             aborted &&
             error instanceof DOMException &&
@@ -640,8 +677,18 @@ export function createResponsesHandler(
             errorCode: openAIErrorBody(error).error.code,
           });
           throw error;
+        } finally {
+          streamCleanup.resolve();
+          if (result.finishReason === "stop") finishContinuation();
         }
-      });
+      };
+      try {
+        return sendStream(context, executeStream);
+      } catch (error) {
+        streamCleanup.resolve();
+        if (result.finishReason === "stop") finishContinuation();
+        throw error;
+      }
     }
     assertOrdinaryRequest(request);
     const split = splitInput(request);
@@ -759,7 +806,6 @@ export function createResponsesHandler(
     let openedThreadId: string | undefined;
     const lifecycle: TurnLifecycleCallbacks = {
       ...(permit === undefined ? {} : { release: releasePermit }),
-      ...(admission === undefined ? {} : { settled: finishAdmission }),
       opened: (threadId) => {
         openedThreadId = threadId;
         deps.store.attachOperation(identity.responseId, threadId);
@@ -775,18 +821,33 @@ export function createResponsesHandler(
               responseId: identity.responseId,
               leaseOwner: requestId,
               toolFingerprint,
+              ...(admission === undefined
+                ? {}
+                : {
+                    signal: admission.signal,
+                    finish: finishAdmission,
+                  }),
               suspended: () => {
                 deps.store.suspendOperation(identity.responseId);
               },
               lost: async () => {
-                await loseResponseOperation(deps, identity.responseId);
-                finalized = true;
+                try {
+                  await loseResponseOperation(deps, identity.responseId);
+                  finalized = true;
+                  deps.observe?.(context.req.raw, {
+                    leaseOutcome: "released",
+                  });
+                } finally {
+                  cleanupSettled = true;
+                  finishAdmission();
+                }
               },
             },
           }),
     };
 
     let finalized = false;
+    let cleanupSettled = false;
     let cleanupAttempted = false;
     let cleanupSucceeded = false;
     let cleanupError: unknown;
@@ -809,38 +870,46 @@ export function createResponsesHandler(
     const abandon = async (): Promise<void> => {
       if (finalized) return;
       abandonPromise ??= (async () => {
-        const durableThreadId = deps.store.abandonOperation(
-          identity.responseId,
-          openedThreadId,
-          upstreamAttempted,
-        );
-        const threadId =
-          durableThreadId ??
-          (decision.type === "start" || decision.type === "fork"
-            ? openedThreadId
-            : undefined);
-        if (threadId !== undefined) {
-          if (!cleanupAttempted) await cleanupThread(threadId);
-          if (cleanupSucceeded) {
-            deps.store.finishAbandonedThread(threadId);
-            removeOperationDirectory(operationCwd);
+        try {
+          const durableThreadId = deps.store.abandonOperation(
+            identity.responseId,
+            openedThreadId,
+            upstreamAttempted,
+          );
+          const threadId =
+            durableThreadId ??
+            (decision.type === "start" || decision.type === "fork"
+              ? openedThreadId
+              : undefined);
+          if (threadId !== undefined) {
+            if (!cleanupAttempted) await cleanupThread(threadId);
+            if (cleanupSucceeded) {
+              deps.store.finishAbandonedThread(threadId);
+              removeOperationDirectory(operationCwd);
+            }
+          } else if (decision.type === "start" || decision.type === "fork") {
+            if (deps.store.lookupOperation(identity.responseId) === undefined) {
+              removeOperationDirectory(operationCwd);
+            }
           }
-        } else if (decision.type === "start" || decision.type === "fork") {
-          if (deps.store.lookupOperation(identity.responseId) === undefined) {
-            removeOperationDirectory(operationCwd);
-          }
+          finalized = true;
+          deps.observe?.(context.req.raw, { leaseOutcome: "released" });
+        } finally {
+          cleanupSettled = true;
         }
-        finalized = true;
-        deps.observe?.(context.req.raw, { leaseOutcome: "released" });
       })();
       await abandonPromise;
     };
     const complete = async (result: TurnResult): Promise<void> => {
-      if (!stored) await cleanupThread(result.threadId);
-      const completedCwd = deps.store.completeOperation(identity.responseId);
-      finalized = true;
-      removeOperationDirectory(completedCwd);
-      deps.observe?.(context.req.raw, { leaseOutcome: "released" });
+      try {
+        if (!stored) await cleanupThread(result.threadId);
+        const completedCwd = deps.store.completeOperation(identity.responseId);
+        finalized = true;
+        removeOperationDirectory(completedCwd);
+        deps.observe?.(context.req.raw, { leaseOutcome: "released" });
+      } finally {
+        cleanupSettled = true;
+      }
     };
 
     if (!request.stream) {
@@ -849,24 +918,28 @@ export function createResponsesHandler(
         const result = await deps.runner.run(command, turnSignal, lifecycle);
         if (result.finishReason === "stop") {
           await complete(result);
-          finishAdmission();
         }
         return context.json(responseBody(identity, result));
       } catch (error) {
         await abandon();
-        finishAdmission();
         throw error;
+      } finally {
+        if (cleanupSettled) finishAdmission();
       }
     }
 
     context.header("X-Accel-Buffering", "no");
     const sendStream = deps.streamSSE ?? streamSSE;
+    const streamCleanup = Promise.withResolvers<void>();
+    deps.observe?.(context.req.raw, { streamCleanup: streamCleanup.promise });
     const executeStream = async (
       stream: Parameters<Parameters<typeof sendStream>[1]>[0],
     ) => {
       const controller = new AbortController();
       const signal = AbortSignal.any([turnSignal, controller.signal]);
+      let aborted = false;
       stream.onAbort(() => {
+        aborted = true;
         deps.observe?.(context.req.raw, {
           streamOutcome: "cancelled",
           errorCode: "request_aborted",
@@ -875,8 +948,11 @@ export function createResponsesHandler(
       });
       let sequenceNumber = 0;
       let toolOutputIndex = 0;
+      const writeSSE = (
+        event: Parameters<typeof stream.writeSSE>[0],
+      ): Promise<void> => writeSSEWithSignal(stream, event, signal);
       try {
-        await stream.writeSSE({
+        await writeSSE({
           event: "response.created",
           data: JSON.stringify({
             type: "response.created",
@@ -901,7 +977,7 @@ export function createResponsesHandler(
           lifecycle,
         )) {
           if (event.type === "text.delta") {
-            await stream.writeSSE({
+            await writeSSE({
               event: "response.output_text.delta",
               data: JSON.stringify({
                 type: "response.output_text.delta",
@@ -922,7 +998,7 @@ export function createResponsesHandler(
               finishReason: "tool_calls",
               toolCalls: [event.call],
             }).output[0];
-            await stream.writeSSE({
+            await writeSSE({
               event: "response.output_item.added",
               data: JSON.stringify({
                 type: "response.output_item.added",
@@ -932,7 +1008,7 @@ export function createResponsesHandler(
               }),
             });
             sequenceNumber += 1;
-            await stream.writeSSE({
+            await writeSSE({
               event: "response.function_call_arguments.delta",
               data: JSON.stringify({
                 type: "response.function_call_arguments.delta",
@@ -943,7 +1019,7 @@ export function createResponsesHandler(
               }),
             });
             sequenceNumber += 1;
-            await stream.writeSSE({
+            await writeSSE({
               event: "response.function_call_arguments.done",
               data: JSON.stringify({
                 type: "response.function_call_arguments.done",
@@ -954,7 +1030,7 @@ export function createResponsesHandler(
               }),
             });
             sequenceNumber += 1;
-            await stream.writeSSE({
+            await writeSSE({
               event: "response.output_item.done",
               data: JSON.stringify({
                 type: "response.output_item.done",
@@ -967,7 +1043,7 @@ export function createResponsesHandler(
             toolOutputIndex += 1;
           } else if (event.type === "completed") {
             if (event.result.finishReason === "tool_calls") {
-              await stream.writeSSE({
+              await writeSSE({
                 event: "response.completed",
                 data: JSON.stringify({
                   type: "response.completed",
@@ -986,7 +1062,7 @@ export function createResponsesHandler(
               } catch (error) {
                 await abandon().catch(() => undefined);
                 const projected = openAIErrorBody(error).error;
-                await stream.writeSSE({
+                await writeSSE({
                   event: "error",
                   data: JSON.stringify({
                     type: "error",
@@ -1000,12 +1076,11 @@ export function createResponsesHandler(
                   streamOutcome: "failed",
                   errorCode: projected.code,
                 });
-                finishAdmission();
                 return;
               }
             }
             const body = responseBody(identity, event.result);
-            await stream.writeSSE({
+            await writeSSE({
               event: "response.output_text.done",
               data: JSON.stringify({
                 type: "response.output_text.done",
@@ -1019,8 +1094,7 @@ export function createResponsesHandler(
             });
             sequenceNumber += 1;
             await complete(event.result);
-            finishAdmission();
-            await stream.writeSSE({
+            await writeSSE({
               event: "response.completed",
               data: JSON.stringify({
                 type: "response.completed",
@@ -1038,7 +1112,7 @@ export function createResponsesHandler(
               failure = error;
             }
             const projected = openAIErrorBody(failure).error;
-            await stream.writeSSE({
+            await writeSSE({
               event: "error",
               data: JSON.stringify({
                 type: "error",
@@ -1052,7 +1126,6 @@ export function createResponsesHandler(
               streamOutcome: "failed",
               errorCode: projected.code,
             });
-            finishAdmission();
             return;
           }
         }
@@ -1065,10 +1138,16 @@ export function createResponsesHandler(
         controller.abort();
         if (!upstreamAttempted) releasePermit();
         if (dynamicTools.length > 0) {
-          deps.runner.tools.invalidateResponse(identity.responseId);
+          await deps.runner.tools.invalidateResponse(identity.responseId);
         }
         await abandon().catch(() => undefined);
-        if (!upstreamAttempted) finishAdmission();
+        if (
+          aborted &&
+          error instanceof DOMException &&
+          error.name === "AbortError"
+        ) {
+          return;
+        }
         deps.observe?.(context.req.raw, {
           streamOutcome:
             signal.aborted && context.req.raw.signal.aborted
@@ -1080,6 +1159,9 @@ export function createResponsesHandler(
               : openAIErrorBody(error).error.code,
         });
         throw error;
+      } finally {
+        if (cleanupSettled) finishAdmission();
+        streamCleanup.resolve();
       }
     };
     try {
@@ -1087,7 +1169,8 @@ export function createResponsesHandler(
     } catch (error) {
       if (!upstreamAttempted) releasePermit();
       await abandon().catch(() => undefined);
-      if (!upstreamAttempted) finishAdmission();
+      if (cleanupSettled) finishAdmission();
+      streamCleanup.resolve();
       throw error;
     }
   };

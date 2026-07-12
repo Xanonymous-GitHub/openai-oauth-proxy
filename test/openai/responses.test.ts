@@ -273,6 +273,8 @@ function createFixture(
 function createToolFixture(
   options: {
     deleteThreadError?: Error;
+    deleteThread?: () => Promise<void>;
+    logger?: Logger;
     streamAbortAt?: number;
     streamWriteFailureAt?: number;
   } = {},
@@ -285,6 +287,7 @@ function createToolFixture(
   const events = new AsyncQueue<HostNotification>();
   const tools = new AsyncQueue<PendingServerToolCall>();
   const deleteThread = vi.fn(async () => {
+    if (options.deleteThread) await options.deleteThread();
     if (options.deleteThreadError) throw options.deleteThreadError;
   });
   const streamEvents: string[] = [];
@@ -328,6 +331,7 @@ function createToolFixture(
     draining: () => false,
     bifrostToken,
     metricsToken: "m".repeat(32),
+    ...(options.logger === undefined ? {} : { logger: options.logger }),
     host,
     responses: {
       runner,
@@ -1487,6 +1491,42 @@ describe("POST /v1/responses", () => {
       leaseOutcome: "released",
     });
     expect(logged).not.toContain("private response prompt");
+  });
+
+  it("awaits delayed cancellation cleanup before terminal telemetry", async () => {
+    let finishCleanup!: () => void;
+    const cleanup = new Promise<void>((resolve) => {
+      finishCleanup = resolve;
+    });
+    const write = vi.fn();
+    const fixture = createToolFixture({
+      deleteThread: () => cleanup,
+      logger: createLogger(write),
+    });
+    const response = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      input: "cancel after start",
+      stream: true,
+    });
+    await vi.waitFor(() =>
+      expect(fixture.host.turnStart).toHaveBeenCalledOnce(),
+    );
+
+    const cancelled = response.body?.cancel();
+    await vi.waitFor(() => expect(fixture.deleteThread).toHaveBeenCalledOnce());
+    expect(write).not.toHaveBeenCalled();
+    finishCleanup();
+    await cancelled;
+    await vi.waitFor(() => expect(write).toHaveBeenCalledOnce());
+
+    expect(JSON.parse(String(write.mock.calls[0]?.[0]))).toMatchObject({
+      route: "responses",
+      model: "gpt-5.4",
+      status: 200,
+      errorCode: "request_aborted",
+      streamOutcome: "cancelled",
+      leaseOutcome: "released",
+    });
   });
 
   it("streams function-call argument and output-item events before suspension", async () => {

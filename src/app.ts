@@ -136,8 +136,19 @@ export function createDataApp(deps: DataAppDependencies) {
             }
           },
           async cancel(reason) {
+            let failure: unknown;
+            try {
+              await reader.cancel(reason);
+            } catch (error) {
+              failure = error;
+            }
+            try {
+              await telemetry.streamCleanup;
+            } catch (error) {
+              failure ??= error;
+            }
             finalize("cancelled", "request_aborted");
-            await reader.cancel(reason);
+            if (failure !== undefined) throw failure;
           },
         });
         context.res = new Response(body, {
