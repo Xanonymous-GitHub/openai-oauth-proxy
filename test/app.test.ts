@@ -112,7 +112,8 @@ it("exposes minimal probes and rejects unknown v1 routes", async () => {
 });
 
 it("serves the admin app, not the data app, on the admin listener", async () => {
-  const adminPort = await availablePort();
+  let adminPort = await availablePort();
+  while (adminPort === 8081) adminPort = await availablePort();
   const supervisor = {
     health: () => true,
     ready: () => false,
@@ -145,6 +146,28 @@ it("serves the admin app, not the data app, on the admin listener", async () => 
     expect(page.status).toBe(200);
     expect(await page.text()).toContain("Codex authentication");
     expect(dataRoute.status).toBe(404);
+
+    const state = await fetch(`http://127.0.0.1:${adminPort}/api/state`);
+    const cookie = state.headers.get("set-cookie")?.split(";", 1)[0];
+    const { csrfToken } = (await state.json()) as { csrfToken: string };
+    expect(cookie).toBeDefined();
+    if (!cookie) return;
+    const refresh = (origin: string) =>
+      fetch(`http://127.0.0.1:${adminPort}/api/refresh`, {
+        method: "POST",
+        headers: {
+          cookie,
+          origin,
+          "content-type": "application/json",
+          "x-csrf-token": csrfToken,
+        },
+        body: "{}",
+      });
+
+    expect((await refresh("http://127.0.0.1:8081")).status).toBe(403);
+    expect((await refresh(`http://0.0.0.0:${adminPort}`)).status).toBe(403);
+    expect((await refresh(`http://127.0.0.1:${adminPort}`)).status).toBe(200);
+    expect((await refresh(`http://localhost:${adminPort}`)).status).toBe(200);
   } finally {
     await service.close();
   }

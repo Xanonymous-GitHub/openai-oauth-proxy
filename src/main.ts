@@ -135,7 +135,10 @@ export async function start(
   const adminApp = createAdminApp({
     account,
     sessions: new SessionStore(),
-    allowedOrigins: new Set(["http://127.0.0.1:8081", "http://localhost:8081"]),
+    allowedOrigins: new Set([
+      `http://127.0.0.1:${config.adminPort}`,
+      `http://localhost:${config.adminPort}`,
+    ]),
   });
   let dataServer: ServerType;
   try {
