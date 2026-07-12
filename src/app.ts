@@ -3,6 +3,10 @@ import { Hono } from "hono";
 import type { CodexHost } from "./codex/host.js";
 import { authenticateBearer } from "./http/auth.js";
 import { ProxyError, toOpenAIError } from "./http/errors.js";
+import {
+  type ChatHandlerDependencies,
+  createChatHandler,
+} from "./openai/chat.js";
 import { ModelCatalog } from "./openai/models.js";
 
 export interface DataAppDependencies {
@@ -12,6 +16,7 @@ export interface DataAppDependencies {
   bifrostToken: string;
   metricsToken: string;
   host: Pick<CodexHost, "generation" | "modelList">;
+  chat?: Omit<ChatHandlerDependencies, "models">;
 }
 
 export function createDataApp(deps: DataAppDependencies): Hono {
@@ -54,6 +59,12 @@ export function createDataApp(deps: DataAppDependencies): Hono {
       );
     }
   });
+  if (deps.chat) {
+    app.post(
+      "/v1/chat/completions",
+      createChatHandler({ models, ...deps.chat }),
+    );
+  }
   app.all("/v1/*", (context) =>
     context.json(
       {

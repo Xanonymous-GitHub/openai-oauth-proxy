@@ -371,9 +371,10 @@ describe("TurnRunner", () => {
 
   it("fails if generation changes while opening a thread", async () => {
     const { host } = createHost();
+    const cleanup = vi.fn();
     const opening = deferred<Awaited<ReturnType<CodexHost["threadStart"]>>>();
     vi.mocked(host.threadStart).mockReturnValue(opening.promise);
-    const result = createRunner(host).run(
+    const result = createRunner(host, { cleanup }).run(
       command({
         history: [
           {
@@ -395,6 +396,8 @@ describe("TurnRunner", () => {
     });
     expect(host.threadInjectItems).not.toHaveBeenCalled();
     expect(host.turnStart).not.toHaveBeenCalled();
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(cleanup).toHaveBeenCalledWith("thread-1", expect.any(AbortSignal));
   });
 
   it("fails if generation changes while injecting history", async () => {
@@ -589,7 +592,7 @@ describe("TurnRunner", () => {
     });
     expect(release).toHaveBeenCalledOnce();
     expect(cleanup).toHaveBeenCalledOnce();
-    expect(cleanup).toHaveBeenCalledWith("thread-1");
+    expect(cleanup).toHaveBeenCalledWith("thread-1", expect.any(AbortSignal));
   });
 
   it("interrupts once when abort races a pending turn start", async () => {
@@ -696,6 +699,32 @@ describe("TurnRunner", () => {
     ).rejects.toBe(releaseError);
     expect(release).toHaveBeenCalledOnce();
     expect(cleanup).toHaveBeenCalledOnce();
+  });
+
+  it("bounds lifecycle cleanup and aborts its signal", async () => {
+    const { events, host } = createHost();
+    let cleanupSignal: AbortSignal | undefined;
+    vi.mocked(host.turnStart).mockImplementation(async () => {
+      emitCompletedTurn(events, "thread-1", "turn-1", "final", false);
+      return { turn: fakeTurn() };
+    });
+    const cleanup = vi.fn(
+      async (_threadId: string, signal?: AbortSignal): Promise<void> => {
+        cleanupSignal = signal;
+        await new Promise<void>((resolve) =>
+          signal?.addEventListener("abort", () => resolve(), { once: true }),
+        );
+      },
+    );
+
+    await expect(
+      createRunner(host, { cleanup, lifecycleWaitMs: 5 }).run(command()),
+    ).rejects.toMatchObject({
+      status: 502,
+      code: "turn_lifecycle_timeout",
+    });
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(cleanupSignal?.aborted).toBe(true);
   });
 
   it("bounds the wait when interrupted completion is not emitted", async () => {

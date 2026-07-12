@@ -15,9 +15,18 @@ import {
 
 const DEFAULT_TIMEOUT_MS = 600_000;
 const DEFAULT_INTERRUPT_WAIT_MS = 5_000;
+const DEFAULT_LIFECYCLE_WAIT_MS = 5_000;
 
 type LifecycleCallback = () => void | Promise<void>;
-type CleanupCallback = (threadId: string) => void | Promise<void>;
+type CleanupCallback = (
+  threadId: string,
+  signal?: AbortSignal,
+) => void | Promise<void>;
+
+export interface TurnLifecycleCallbacks {
+  release?: LifecycleCallback;
+  cleanup?: CleanupCallback;
+}
 
 export interface TurnRunnerOptions {
   host: CodexHost;
@@ -25,6 +34,7 @@ export interface TurnRunnerOptions {
   neutralInstructions: string;
   timeoutMs?: number;
   interruptWaitMs?: number;
+  lifecycleWaitMs?: number;
   release?: LifecycleCallback;
   cleanup?: CleanupCallback;
 }
@@ -109,6 +119,7 @@ export class TurnRunner {
   readonly #neutralInstructions: string;
   readonly #timeoutMs: number;
   readonly #interruptWaitMs: number;
+  readonly #lifecycleWaitMs: number;
   readonly #release: LifecycleCallback | undefined;
   readonly #cleanup: CleanupCallback | undefined;
   readonly #dispatcher;
@@ -120,13 +131,19 @@ export class TurnRunner {
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.#interruptWaitMs =
       options.interruptWaitMs ?? DEFAULT_INTERRUPT_WAIT_MS;
+    this.#lifecycleWaitMs =
+      options.lifecycleWaitMs ?? DEFAULT_LIFECYCLE_WAIT_MS;
     this.#release = options.release;
     this.#cleanup = options.cleanup;
     this.#dispatcher = eventDispatcherFor(options.host);
   }
 
-  async run(command: TurnCommand, signal?: AbortSignal): Promise<TurnResult> {
-    for await (const event of this.stream(command, signal)) {
+  async run(
+    command: TurnCommand,
+    signal?: AbortSignal,
+    lifecycle?: TurnLifecycleCallbacks,
+  ): Promise<TurnResult> {
+    for await (const event of this.stream(command, signal, lifecycle)) {
       if (event.type === "completed") return event.result;
       if (event.type === "failed") throw event.error;
     }
@@ -140,6 +157,7 @@ export class TurnRunner {
   async *stream(
     command: TurnCommand,
     signal?: AbortSignal,
+    lifecycle?: TurnLifecycleCallbacks,
   ): AsyncIterable<ProxyStreamEvent> {
     const generation = this.#host.generation;
     let threadId: string | undefined;
@@ -151,6 +169,8 @@ export class TurnRunner {
     let interruptPromise: Promise<void> | undefined;
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let interruptWait: ReturnType<typeof setTimeout> | undefined;
+    const release = lifecycle?.release ?? this.#release;
+    const cleanup = lifecycle?.cleanup ?? this.#cleanup;
     const turnStartController = new AbortController();
     let resolveCancellation!: (cause: CancellationCause) => void;
     const cancelled = new Promise<CancellationCause>((resolve) => {
@@ -216,14 +236,30 @@ export class TurnRunner {
         }
         subscription?.close();
 
-        const [release, cleanup] = await Promise.allSettled([
-          Promise.resolve().then(() => this.#release?.()),
+        const cleanupController = new AbortController();
+        const callbacks = Promise.allSettled([
+          Promise.resolve().then(() => release?.()),
           Promise.resolve().then(() =>
-            threadId === undefined ? undefined : this.#cleanup?.(threadId),
+            threadId === undefined
+              ? undefined
+              : cleanup?.(threadId, cleanupController.signal),
           ),
         ]);
-        if (release.status === "rejected") return release.reason;
-        if (cleanup.status === "rejected") return cleanup.reason;
+        const settled = await Promise.race([
+          callbacks,
+          delay(this.#lifecycleWaitMs).then(() => undefined),
+        ]);
+        if (settled === undefined) {
+          cleanupController.abort();
+          return new ProxyError(
+            502,
+            "turn_lifecycle_timeout",
+            "Codex turn lifecycle cleanup timed out",
+          );
+        }
+        const [releaseResult, cleanupResult] = settled;
+        if (releaseResult.status === "rejected") return releaseResult.reason;
+        if (cleanupResult.status === "rejected") return cleanupResult.reason;
         if (generationFailure) return normalizeError(generationFailure);
         return undefined;
       })();
@@ -233,6 +269,7 @@ export class TurnRunner {
     try {
       signal?.throwIfAborted();
       threadId = await this.openThread(command, generation, signal);
+      this.assertGeneration(generation);
       signal?.throwIfAborted();
 
       const items: ResponseItem[] = [...command.history];
@@ -393,7 +430,6 @@ export class TurnRunner {
           },
           signal,
         );
-        this.assertGeneration(generation);
         return response.thread.id;
       }
       case "resume": {
@@ -401,7 +437,6 @@ export class TurnRunner {
           { threadId: command.action.threadId },
           signal,
         );
-        this.assertGeneration(generation);
         return response.thread.id;
       }
       case "fork": {
@@ -412,7 +447,6 @@ export class TurnRunner {
           },
           signal,
         );
-        this.assertGeneration(generation);
         return response.thread.id;
       }
     }
