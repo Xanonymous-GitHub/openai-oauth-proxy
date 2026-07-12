@@ -372,6 +372,8 @@ describe("ToolBridge", () => {
     const turn = context();
     const call = serverCall("rpc-1", "lookup");
     bridge.register(call, turn);
+    expect(bridge.pending).toBe(1);
+    expect(bridge.expired).toBe(0);
 
     setNow(1_000 + 15 * 60 * 1_000 - 1);
     bridge.expire(1_000 + 15 * 60 * 1_000 - 1);
@@ -382,5 +384,7 @@ describe("ToolBridge", () => {
 
     expect(turn.invalidate).toHaveBeenCalledOnce();
     expect(call.reject).toHaveBeenCalledOnce();
+    expect(bridge.pending).toBe(0);
+    expect(bridge.expired).toBe(1);
   });
 });

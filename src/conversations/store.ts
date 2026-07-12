@@ -148,6 +148,7 @@ interface Statements {
   touchResponse: StatementSync;
   deleteStaleLease: StatementSync;
   deleteStaleLeases: StatementSync;
+  countActiveLeases: StatementSync;
   insertLease: StatementSync;
   releaseLease: StatementSync;
   promoteLease: StatementSync;
@@ -268,6 +269,11 @@ export class ConversationStore {
       `),
       deleteStaleLeases: database.prepare(`
         DELETE FROM thread_leases WHERE expires_at <= ?
+      `),
+      countActiveLeases: database.prepare(`
+        SELECT COUNT(*) AS count
+        FROM thread_leases
+        WHERE expires_at > ?
       `),
       insertLease: database.prepare(`
         INSERT INTO thread_leases(
@@ -656,6 +662,13 @@ export class ConversationStore {
     return (
       this.#statements.releaseLease.run(threadId, ownerRequestId).changes === 1
     );
+  }
+
+  busyThreads(): number {
+    const row = this.#statements.countActiveLeases.get(
+      this.#clock.now(),
+    ) as unknown as { count: number };
+    return row.count;
   }
 
   reserveOperation(input: ReserveOperationInput): OperationDecision {

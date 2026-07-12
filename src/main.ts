@@ -1,7 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { type ServerType, serve } from "@hono/node-server";
-import type { Hono } from "hono";
+import { type Env, Hono } from "hono";
 import { createAdminApp } from "./admin/app.js";
 import { SessionStore } from "./admin/sessions.js";
 import { createDataApp } from "./app.js";
@@ -14,12 +15,16 @@ import {
   type RunningResponseSweeper,
   startResponseSweeper,
 } from "./openai/responses.js";
+import { TurnCapacity } from "./operations/capacity.js";
+import { type Logger, log } from "./operations/log.js";
+import { Metrics } from "./operations/metrics.js";
 import { TurnRunner } from "./turns/runner.js";
 
 const EMPTY_WORKING_DIRECTORY = "/tmp/work";
 const RESPONSE_OPERATION_DIRECTORY = "/tmp/response-operations";
 const NEUTRAL_INSTRUCTIONS =
   "Respond only through supplied text or client function tools. Internal tools and a local repository are unavailable. Follow the requested output format.";
+const DRAIN_TIMEOUT_MS = 30_000;
 
 export interface RunningService {
   readonly host: Promise<CodexHost>;
@@ -35,6 +40,31 @@ interface SupervisorLifecycle {
 
 interface StartDependencies {
   supervisor?: SupervisorLifecycle;
+  capacity?: TurnCapacity;
+  metrics?: Metrics;
+  logger?: Logger;
+  drainTimeoutMs?: number;
+}
+
+function settlesWithin(
+  promise: Promise<void>,
+  timeoutMs: number,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (completed: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(completed);
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    timer.unref?.();
+    void promise.then(
+      () => finish(true),
+      () => finish(true),
+    );
+  });
 }
 
 function closeServer(server: ServerType): Promise<void> {
@@ -49,8 +79,8 @@ function closeServer(server: ServerType): Promise<void> {
   });
 }
 
-function listen(
-  app: Hono,
+function listen<E extends Env>(
+  app: Hono<E>,
   hostname: string,
   port: number,
 ): Promise<ServerType> {
@@ -81,6 +111,11 @@ export async function start(
   dependencies: StartDependencies = {},
 ): Promise<RunningService> {
   const supervisor = dependencies.supervisor ?? createSupervisor({ config });
+  const capacity =
+    dependencies.capacity ??
+    new TurnCapacity(config.maxActiveTurns, config.queueCapacity);
+  const metrics = dependencies.metrics ?? new Metrics();
+  const logger = dependencies.logger ?? log;
   const clock = { now: () => Date.now() };
   const conversationStore = ConversationStore.open(
     join(config.dataDir, "proxy.sqlite"),
@@ -114,6 +149,13 @@ export async function start(
     draining: () => draining,
     bifrostToken: config.bifrostProxyToken,
     metricsToken: config.metricsToken,
+    capacity,
+    metrics,
+    logger,
+    busyThreads: () => conversationStore.busyThreads(),
+    pendingTools: () => turnRunner.tools.pending,
+    expiredTools: () => turnRunner.tools.expired,
+    processGeneration: () => activeHost?.generation,
     host: lazyHost,
     chat: {
       runner: turnRunner,
@@ -132,7 +174,7 @@ export async function start(
       },
     },
   });
-  const adminApp = createAdminApp({
+  const adminRoutes = createAdminApp({
     account,
     sessions: new SessionStore(),
     allowedOrigins: new Set([
@@ -140,6 +182,26 @@ export async function start(
       `http://localhost:${config.adminPort}`,
     ]),
   });
+  const adminApp = new Hono();
+  adminApp.use("*", async (context, next) => {
+    const supplied = context.req.header("x-request-id");
+    const requestId =
+      supplied !== undefined && /^[A-Za-z0-9_-]{1,128}$/.test(supplied)
+        ? supplied
+        : `req_${randomUUID()}`;
+    const startedAt = performance.now();
+    await next();
+    context.res.headers.set("x-request-id", requestId);
+    const durationMs = performance.now() - startedAt;
+    metrics.recordRequest("admin", context.res.status, durationMs / 1_000);
+    logger({
+      requestId,
+      route: "admin",
+      status: context.res.status,
+      durationMs,
+    });
+  });
+  adminApp.route("/", adminRoutes);
   let dataServer: ServerType;
   try {
     dataServer = await listen(dataApp, config.dataHost, config.dataPort);
@@ -161,25 +223,37 @@ export async function start(
   const close = (): Promise<void> => {
     if (!closePromise) {
       draining = true;
+      capacity.beginDrain();
       process.off("SIGINT", handleSignal);
       process.off("SIGTERM", handleSignal);
       closePromise = (async () => {
         let failure: unknown;
-        try {
-          await responseSweeper?.stop();
-        } catch (error) {
-          failure = error;
+        const capture = async (operation: () => void | Promise<void>) => {
+          try {
+            await operation();
+          } catch (error) {
+            failure ??= error;
+          }
+        };
+        const drained = await settlesWithin(
+          capacity.whenIdle(),
+          dependencies.drainTimeoutMs ?? DRAIN_TIMEOUT_MS,
+        );
+        if (!drained) {
+          await capture(() => turnRunner.interruptAll());
+          capacity.invalidateActive();
         }
+        await capture(() => responseSweeper?.stop());
+        await capture(() => conversationStore.close());
+        await capture(() => supervisor.stop());
         const settled = await Promise.allSettled([
-          supervisor.stop(),
           closeServer(dataServer),
           closeServer(adminServer),
         ]);
-        conversationStore.close();
-        if (failure !== undefined) throw failure;
         for (const result of settled) {
-          if (result.status === "rejected") throw result.reason;
+          if (result.status === "rejected") failure ??= result.reason;
         }
+        if (failure !== undefined) throw failure;
       })();
     }
     return closePromise;

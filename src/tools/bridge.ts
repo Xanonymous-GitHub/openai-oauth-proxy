@@ -135,11 +135,20 @@ export class ToolBridge {
   >();
   readonly #unclaimed = new Map<string, PendingServerToolCall[]>();
   #consuming = false;
+  #expired = 0;
 
   constructor(options: ToolBridgeOptions) {
     this.#host = options.host;
     this.#now = options.now ?? Date.now;
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  }
+
+  get pending(): number {
+    return this.#calls.size;
+  }
+
+  get expired(): number {
+    return this.#expired;
   }
 
   toDynamicTools(
@@ -368,6 +377,20 @@ export class ToolBridge {
     }
   }
 
+  invalidateAll(): void {
+    for (const turn of [...this.#turns.values()]) this.invalidate(turn);
+    for (const calls of this.#unclaimed.values()) {
+      for (const call of calls) {
+        try {
+          call.reject(-32000, "Tool continuation lost");
+        } catch {
+          // The host may already have invalidated the responder.
+        }
+      }
+    }
+    this.#unclaimed.clear();
+  }
+
   invalidateResponse(responseId: string): void {
     const turn = this.#responses.get(responseId);
     if (turn) this.invalidate(turn);
@@ -391,7 +414,10 @@ export class ToolBridge {
       if (expiresAt <= now) this.#lostResponses.delete(responseId);
     }
     for (const turn of [...this.#turns.values()]) {
-      if (turn.calls.size > 0 && turn.expiresAt <= now) this.invalidate(turn);
+      if (turn.calls.size > 0 && turn.expiresAt <= now) {
+        this.#expired += turn.calls.size;
+        this.invalidate(turn);
+      }
     }
   }
 

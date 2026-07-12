@@ -253,6 +253,8 @@ export class TurnRunner {
   readonly #release: LifecycleCallback | undefined;
   readonly #cleanup: CleanupCallback | undefined;
   readonly #dispatcher;
+  readonly #interrupts = new Set<() => void>();
+  readonly #idleWaiters = new Set<() => void>();
   readonly tools: ToolBridge;
 
   constructor(options: TurnRunnerOptions) {
@@ -268,6 +270,17 @@ export class TurnRunner {
     this.#cleanup = options.cleanup;
     this.#dispatcher = eventDispatcherFor(options.host);
     this.tools = toolBridgeFor(options.host, options.toolTimeoutMs);
+  }
+
+  get active(): number {
+    return this.#interrupts.size;
+  }
+
+  async interruptAll(): Promise<void> {
+    this.tools.invalidateAll();
+    for (const interrupt of [...this.#interrupts]) interrupt();
+    if (this.#interrupts.size === 0) return;
+    await new Promise<void>((resolve) => this.#idleWaiters.add(resolve));
   }
 
   async run(
@@ -309,7 +322,10 @@ export class TurnRunner {
     let interruptWait: ReturnType<typeof setTimeout> | undefined;
     let interruptDeadline: number | undefined;
     let toolContext: ToolBridgeContext | undefined;
-    let clientSignal = signal;
+    const drainController = new AbortController();
+    let clientSignal: AbortSignal | undefined = signal
+      ? AbortSignal.any([signal, drainController.signal])
+      : drainController.signal;
     let text = "";
     let usage: TokenUsage | undefined;
     const release = lifecycle?.release ?? this.#release;
@@ -362,10 +378,13 @@ export class TurnRunner {
     const requestCancellation = (cause: CancellationCause): void => {
       if (terminal || cancellationCause) return;
       cancellationCause = cause;
+      drainController.abort();
       turnStartController.abort();
       resolveCancellation(cause);
       issueInterrupt();
     };
+    const interrupt = (): void => requestCancellation("abort");
+    this.#interrupts.add(interrupt);
     const onAbort = (): void => requestCancellation("abort");
     const detachClient = (): void => {
       clientSignal?.removeEventListener("abort", onAbort);
@@ -661,6 +680,11 @@ export class TurnRunner {
       accumulator.fail(normalizeError(error));
     } finally {
       await finalize();
+      this.#interrupts.delete(interrupt);
+      if (this.#interrupts.size === 0) {
+        for (const resolve of this.#idleWaiters) resolve();
+        this.#idleWaiters.clear();
+      }
     }
   }
 

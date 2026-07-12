@@ -128,6 +128,34 @@ function createRunner(host: CodexHost, overrides = {}) {
   });
 }
 
+it("interrupts and settles every active turn during forced drain", async () => {
+  const { events, host } = createHost();
+  const release = vi.fn();
+  vi.mocked(host.turnInterrupt).mockImplementation(
+    async ({ threadId, turnId }) => {
+      events.push({
+        method: "turn/completed",
+        params: {
+          threadId,
+          turn: fakeTurn({ id: turnId, status: "interrupted" }),
+        },
+      });
+      return {};
+    },
+  );
+  const runner = createRunner(host, { interruptWaitMs: 10 });
+  const result = runner.run(command(), undefined, { release });
+  const outcome = result.catch((error: unknown) => error);
+  await vi.waitFor(() => expect(host.turnStart).toHaveBeenCalledOnce());
+
+  await runner.interruptAll();
+
+  await expect(outcome).resolves.toMatchObject({ code: "request_aborted" });
+  expect(host.turnInterrupt).toHaveBeenCalledOnce();
+  expect(release).toHaveBeenCalledOnce();
+  expect(runner.active).toBe(0);
+});
+
 async function collect(
   source: AsyncIterable<ProxyStreamEvent>,
 ): Promise<ProxyStreamEvent[]> {
@@ -310,7 +338,7 @@ describe("TurnRunner", () => {
         environments: [],
         selectedCapabilityRoots: [],
       }),
-      undefined,
+      expect.any(AbortSignal),
     );
     expect(host.threadInjectItems).toHaveBeenCalledWith(
       {
@@ -326,7 +354,7 @@ describe("TurnRunner", () => {
           },
         ],
       },
-      undefined,
+      expect.any(AbortSignal),
     );
     expect(host.threadInjectItems).toHaveBeenCalledBefore(
       vi.mocked(host.turnStart),
@@ -352,7 +380,7 @@ describe("TurnRunner", () => {
 
     expect(host.threadStart).toHaveBeenCalledWith(
       expect.objectContaining({ dynamicTools }),
-      undefined,
+      expect.any(AbortSignal),
     );
     expect(host.turnStart).not.toHaveBeenCalledWith(
       expect.objectContaining({ dynamicTools }),
@@ -563,11 +591,11 @@ describe("TurnRunner", () => {
 
     expect(host.threadResume).toHaveBeenCalledWith(
       { threadId: "thread-existing" },
-      undefined,
+      expect.any(AbortSignal),
     );
     expect(host.threadFork).toHaveBeenCalledWith(
       { threadId: "thread-existing", lastTurnId: "turn-parent" },
-      undefined,
+      expect.any(AbortSignal),
     );
   });
 
@@ -593,11 +621,11 @@ describe("TurnRunner", () => {
 
     expect(host.threadStart).toHaveBeenCalledWith(
       expect.objectContaining({ cwd: "/tmp/work/resp_start" }),
-      undefined,
+      expect.any(AbortSignal),
     );
     expect(host.threadFork).toHaveBeenCalledWith(
       expect.objectContaining({ cwd: "/tmp/work/resp_fork" }),
-      undefined,
+      expect.any(AbortSignal),
     );
   });
 

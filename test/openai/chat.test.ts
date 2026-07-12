@@ -11,6 +11,7 @@ import type {
   HostNotification,
   PendingServerToolCall,
 } from "../../src/codex/host.js";
+import { TurnCapacity } from "../../src/operations/capacity.js";
 import { TurnRunner } from "../../src/turns/runner.js";
 
 const bifrostToken = "b".repeat(32);
@@ -157,8 +158,10 @@ function createFixture(
     streamWriteFailureAt?: number;
     turnStart?: CodexHost["turnStart"];
     threadInjectItems?: CodexHost["threadInjectItems"];
+    capacity?: TurnCapacity;
   } = {},
 ) {
+  let draining = false;
   const events = new EventQueue();
   const tools = new ToolQueue();
   const release = vi.fn(async () => undefined);
@@ -222,6 +225,7 @@ function createFixture(
   const chat = {
     runner,
     release,
+    ...(options.capacity === undefined ? {} : { capacity: options.capacity }),
     deleteThread: async (threadId: string, signal?: AbortSignal) => {
       await host.threadDelete({ threadId }, signal);
     },
@@ -277,13 +281,25 @@ function createFixture(
     health: () => true,
     ready: () => true,
     accountReady: () => true,
-    draining: () => false,
+    draining: () => draining,
     bifrostToken,
     metricsToken: "m".repeat(32),
     host,
     chat,
   });
-  return { app, events, host, release, runner, streamPayloads, tools };
+  return {
+    app,
+    beginDrain: () => {
+      draining = true;
+      options.capacity?.beginDrain();
+    },
+    events,
+    host,
+    release,
+    runner,
+    streamPayloads,
+    tools,
+  };
 }
 
 function post(
@@ -456,7 +472,10 @@ describe("POST /v1/chat/completions", () => {
   });
 
   it("suspends and continues one client-executed function call on the same turn", async () => {
-    const { app, events, host, release, tools } = createFixture();
+    const capacity = new TurnCapacity(1, 32);
+    const { app, beginDrain, events, host, release, tools } = createFixture({
+      capacity,
+    });
     const respond = vi.fn(() => emitCompletion(events, "It is sunny", false));
     vi.mocked(host.turnStart).mockImplementationOnce(async () => {
       tools.push({
@@ -524,6 +543,9 @@ describe("POST /v1/chat/completions", () => {
     });
     expect(host.threadDelete).not.toHaveBeenCalled();
     expect(release).not.toHaveBeenCalled();
+    expect(capacity.active).toBe(1);
+
+    beginDrain();
 
     const completed = await post(app, {
       model: "gpt-5.4",
@@ -551,7 +573,8 @@ describe("POST /v1/chat/completions", () => {
       contentItems: [{ type: "inputText", text: "sunny" }],
     });
     expect(host.threadDelete).toHaveBeenCalledOnce();
-    expect(release).toHaveBeenCalledOnce();
+    expect(release).not.toHaveBeenCalled();
+    expect(capacity.active).toBe(0);
   });
 
   it("fans in parallel tool outputs without resolving a partial submission", async () => {

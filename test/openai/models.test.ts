@@ -72,7 +72,7 @@ it("reserves the metrics token for the metrics route", async () => {
   const app = createApp(createHost());
 
   expect((await get(app, "/metrics", bifrostToken)).status).toBe(401);
-  expect((await get(app, "/metrics", metricsToken)).status).toBe(404);
+  expect((await get(app, "/metrics", metricsToken)).status).toBe(200);
   expect((await app.request("/healthz")).status).toBe(200);
 });
 

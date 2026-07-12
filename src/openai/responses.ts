@@ -11,6 +11,8 @@ import type {
   OperationDecision,
 } from "../conversations/store.js";
 import { openAIErrorBody, ProxyError } from "../http/errors.js";
+import { readJsonBody } from "../http/limits.js";
+import type { Permit, TurnCapacity } from "../operations/capacity.js";
 import type { TokenUsage, TurnCommand, TurnResult } from "../turns/events.js";
 import type { TurnLifecycleCallbacks, TurnRunner } from "../turns/runner.js";
 import { decodeImages } from "./images.js";
@@ -50,6 +52,7 @@ export interface ResponsesHandlerDependencies {
   operationWorkingDirectory: string;
   deleteThread(threadId: string, signal?: AbortSignal): void | Promise<void>;
   streamSSE?: typeof streamSSE;
+  capacity?: Pick<TurnCapacity, "acquire">;
 }
 
 export interface ProxyResponse {
@@ -233,8 +236,9 @@ function opaqueId(prefix: "resp" | "msg"): string {
 
 async function requestBody(request: Request): Promise<unknown> {
   try {
-    return await request.json();
-  } catch {
+    return await readJsonBody(request);
+  } catch (error) {
+    if (error instanceof ProxyError) throw error;
     throw ProxyError.public(
       400,
       "invalid_json",
@@ -627,6 +631,13 @@ export function createResponsesHandler(
     const model = await validatedModel(deps, request, context.req.raw.signal);
     const history = translateHistory(split.history);
     const input = translateTurnInput(split.input);
+    let permit: Permit | undefined = await deps.capacity?.acquire(
+      context.req.raw.signal,
+    );
+    const releasePermit = (): void => {
+      permit?.release();
+      permit = undefined;
+    };
     const identity: ResponseIdentity = {
       responseId: opaqueId("resp"),
       messageId: opaqueId("msg"),
@@ -640,8 +651,16 @@ export function createResponsesHandler(
       deps.operationWorkingDirectory,
       identity.responseId,
     );
-    mkdirSync(deps.operationWorkingDirectory, { mode: 0o700, recursive: true });
-    mkdirSync(operationCwd, { mode: 0o700 });
+    try {
+      mkdirSync(deps.operationWorkingDirectory, {
+        mode: 0o700,
+        recursive: true,
+      });
+      mkdirSync(operationCwd, { mode: 0o700 });
+    } catch (error) {
+      releasePermit();
+      throw error;
+    }
     let decision: OperationDecision;
     try {
       decision = deps.store.reserveOperation({
@@ -656,6 +675,7 @@ export function createResponsesHandler(
       });
     } catch (error) {
       removeOperationDirectory(operationCwd);
+      releasePermit();
       throw error;
     }
     if (
@@ -664,6 +684,7 @@ export function createResponsesHandler(
       decision.type === "lost"
     ) {
       removeOperationDirectory(operationCwd);
+      releasePermit();
       throw decisionError(decision.type);
     }
     if (decision.type === "resume") removeOperationDirectory(operationCwd);
@@ -696,6 +717,7 @@ export function createResponsesHandler(
     };
     let openedThreadId: string | undefined;
     const lifecycle: TurnLifecycleCallbacks = {
+      ...(permit === undefined ? {} : { release: releasePermit }),
       opened: (threadId) => {
         openedThreadId = threadId;
         deps.store.attachOperation(identity.responseId, threadId);
@@ -977,6 +999,7 @@ export function createResponsesHandler(
           "Codex event stream ended before turn completion",
         );
       } catch (error) {
+        if (!upstreamAttempted) releasePermit();
         if (dynamicTools.length > 0) {
           deps.runner.tools.invalidateResponse(identity.responseId);
         }
@@ -987,6 +1010,7 @@ export function createResponsesHandler(
     try {
       return sendStream(context, executeStream);
     } catch (error) {
+      if (!upstreamAttempted) releasePermit();
       await abandon().catch(() => undefined);
       throw error;
     }

@@ -107,7 +107,9 @@ describe("ConversationStore", () => {
       responseId: latestId,
       threadId: "thr_a",
     });
+    expect(store.busyThreads()).toBe(1);
     expect(store.releaseLease("thr_a", "req-2")).toBe(true);
+    expect(store.busyThreads()).toBe(0);
 
     expect(store.decide(olderId, "req-3")).toEqual({
       type: "fork",
@@ -115,6 +117,7 @@ describe("ConversationStore", () => {
       threadId: "thr_a",
       lastTurnId: "turn_1",
     });
+    expect(store.busyThreads()).toBe(1);
     expect(store.decide(latestId, "req-4")).toEqual({ type: "busy" });
   });
 

@@ -2,6 +2,8 @@ import { randomBytes } from "node:crypto";
 import type { Handler } from "hono";
 import { streamSSE } from "hono/streaming";
 import { openAIErrorBody, ProxyError } from "../http/errors.js";
+import { readJsonBody } from "../http/limits.js";
+import type { TurnCapacity } from "../operations/capacity.js";
 import type { TokenUsage, TurnCommand, TurnResult } from "../turns/events.js";
 import type { TurnLifecycleCallbacks, TurnRunner } from "../turns/runner.js";
 import { decodeImages } from "./images.js";
@@ -16,6 +18,7 @@ export interface ChatHandlerDependencies {
   runner: TurnRunner;
   deleteThread(threadId: string, signal?: AbortSignal): void | Promise<void>;
   release?: () => void | Promise<void>;
+  capacity?: Pick<TurnCapacity, "acquire">;
   streamSSE?: typeof streamSSE;
 }
 
@@ -131,8 +134,9 @@ function resultMessage(result: TurnResult) {
 
 async function requestBody(request: Request): Promise<unknown> {
   try {
-    return await request.json();
-  } catch {
+    return await readJsonBody(request);
+  } catch (error) {
+    if (error instanceof ProxyError) throw error;
     throw ProxyError.public(
       400,
       "invalid_json",
@@ -258,8 +262,14 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
         : { outputSchema: request.response_format.json_schema.schema }),
       ...(dynamicTools.length === 0 ? {} : { dynamicTools }),
     };
+    const permit =
+      continuationResult === undefined
+        ? await deps.capacity?.acquire(context.req.raw.signal)
+        : undefined;
     const lifecycle: TurnLifecycleCallbacks = {
-      ...(deps.release === undefined ? {} : { release: deps.release }),
+      ...(permit === undefined && deps.release === undefined
+        ? {}
+        : { release: permit?.release ?? deps.release }),
       cleanup: deps.deleteThread,
       ...(dynamicTools.length === 0
         ? {}
@@ -293,7 +303,10 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
 
     context.header("X-Accel-Buffering", "no");
     const sendStream = deps.streamSSE ?? streamSSE;
-    return sendStream(context, async (stream) => {
+    let runnerStarted = false;
+    const executeStream = async (
+      stream: Parameters<Parameters<typeof sendStream>[1]>[0],
+    ) => {
       const streamedToolCallIds: string[] = [];
       let aborted = false;
       stream.onAbort(() => {
@@ -339,7 +352,10 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
               }
               yield { type: "completed" as const, result: continuationStage };
             })()
-          : deps.runner.stream(command, turnSignal, lifecycle);
+          : (() => {
+              runnerStarted = true;
+              return deps.runner.stream(command, turnSignal, lifecycle);
+            })();
         for await (const event of source) {
           if (event.type === "text.delta") {
             await writeSSE({
@@ -402,6 +418,7 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
           }
         }
       } catch (error) {
+        if (!runnerStarted) permit?.release();
         deps.runner.tools.invalidateCalls(streamedToolCallIds);
         if (
           aborted &&
@@ -412,6 +429,12 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
         }
         throw error;
       }
-    });
+    };
+    try {
+      return sendStream(context, executeStream);
+    } catch (error) {
+      if (!runnerStarted) permit?.release();
+      throw error;
+    }
   };
 }
