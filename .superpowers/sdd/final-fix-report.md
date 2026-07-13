@@ -62,3 +62,51 @@ Closed final-review items 1 through 7 only:
 - The tag release workflow was validated statically and by local multiarchitecture build, but no tag was pushed and GHCR publication was not executed.
 - Live ChatGPT account tests remain opt-in and were not run. Hermes Agent remains skipped locally because its external binary is unavailable; CI requires it.
 - Full-root Graphify detected 1,106 files, mostly generated protocol bindings, beyond its 200-file limit. The completed graph intentionally covers non-generated TypeScript source and tests; semantic extraction was unavailable because this harness has no subagent tool.
+
+## Re-review Important Findings
+
+Date: 2026-07-13
+
+### Scope
+
+Closed all three re-review Important findings:
+
+1. Replaced bounded aborted-response tombstones with the monotonic issued-ID range invariant.
+2. Made the resumed Responses stream handler the independent owner of durable operation, lease, cleanup, and continuation-admission settlement.
+3. Reordered release publication around authenticated fail-closed probing, digest-only build publication, pre-tag scanning, signing, final tagging, and post-tag verification.
+
+### RED Evidence
+
+- Transport regressions failed because a second late response protocol-failed unrelated pending work and the source still retained the 256-entry tombstone collection.
+- The 1,001-abort regression proved the old eviction boundary could not safely classify all previously issued IDs without retained history.
+- Four resumed Responses tests timed out service drain after `response.output_text.done`, `response.completed`, consumer-abort, and iterator-terminal failures because ToolBridge had already removed the response context before handler cleanup.
+- A stalled `ToolBridge.invalidateResponse()` regression timed out independently, proving durable settlement still depended on bridge cleanup returning.
+- Repeated-tool failure tests observed continuation admission completion twice before the original lifecycle finish callback became idempotent.
+- Release policy ordering failed because GHCR authentication followed the existence probe and final tags preceded SBOM generation and vulnerability scanning.
+
+### GREEN Evidence
+
+- Focused transport, Responses, and release policy run: 102 tests passed.
+- The transport now accepts only nonnegative safe-integer response IDs, discards any nonpending ID below the monotonic next-issued boundary, protocol-fails malformed and future IDs, resets its issued range on generation invalidation, and retains no response-history collection.
+- The 1,001-abort regression delivers every late response, completes unrelated pending work, then confirms a future ID still protocol-fails and the implementation contains no tombstone storage.
+- Resumed stream settlement preserves durable success after a `response.completed` write failure, loses pre-commit operations at `response.output_text.done`, consumer abort, or iterator termination, records failed deletion for reconciliation, releases the lease, and finishes admission once even when bridge invalidation never settles.
+- Release policy tests enforce authentication -> existence probe -> digest build -> SBOM/scan -> final tags -> verification, explicit manifest-unknown handling, digest-only candidate publication, immutable action pins, attestation checks, and keyless signature verification.
+- `bun run protocol:check`: passed with no generated protocol drift.
+- `bun run deps:check`: all dependencies match current stable package versions.
+- `bun run check`: 490 tests passed, 2 policy skips; Biome, TypeScript, tests, and build passed.
+- Offline integration, compatibility, chaos, security, and release subset: 87 tests passed, 1 Hermes binary skip.
+- Multiarchitecture OCI build passed for `linux/amd64` and `linux/arm64`; manifest list `sha256:4372f5c6c50829f570394006caf027a4f0921848e8de17e7eab342eace465003` includes both platform manifests and attestations.
+- `kubectl kustomize deploy/base | kubectl apply --dry-run=client -f -`: Service, PVC, StatefulSet, and NetworkPolicy accepted.
+- Graphify deterministic non-generated TypeScript corpus: 76 files, 887 nodes, 1,761 edges, 50 communities; average query reduction 5.7x.
+
+### Files
+
+- Runtime: `src/codex/transport.ts`, `src/openai/responses.ts`.
+- Release: `.github/workflows/release.yml`.
+- Regressions: `test/codex/transport.test.ts`, `test/openai/responses.test.ts`, `test/release/policy.test.ts`.
+
+### Residual Constraints
+
+- The release workflow is statically policy-tested and locally multiarchitecture-built, but GHCR tag probing, OIDC keyless signing, publication, and rerun behavior require a real tag-triggered GitHub Actions run for end-to-end confirmation.
+- The fail-closed GHCR probe intentionally allows only the registry's explicit `manifest unknown` diagnostic; any changed registry diagnostic blocks publication rather than risking overwrite.
+- Live ChatGPT account tests remain opt-in and were not run. Hermes Agent remains skipped locally because its external binary is unavailable; CI requires it.
