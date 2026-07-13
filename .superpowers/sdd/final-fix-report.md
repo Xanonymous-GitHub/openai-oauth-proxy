@@ -62,6 +62,32 @@ Closed final-review items 1 through 7 only:
 - The tag release workflow was validated statically and by local multiarchitecture build, but no tag was pushed and GHCR publication was not executed.
 - Live ChatGPT account tests remain opt-in and were not run. Hermes Agent remains skipped locally because its external binary is unavailable; CI requires it.
 
+## Release Queue Integrity
+
+Date: 2026-07-13
+
+### Scope
+
+- Added workflow-level `queue: max` to the static `release-images` concurrency group.
+- Retained `cancel-in-progress: false`, allowing GitHub Actions to queue up to 100 pending tag releases in FIFO order without cancelling an active release.
+- Extended release policy coverage to require both queueing and non-cancellation.
+
+### RED Evidence
+
+- Focused release policy failed because the global release concurrency block had no `queue: max` declaration.
+
+### GREEN Evidence
+
+- Focused release policy: 4 tests passed.
+- `bun run check`: 490 tests passed, 2 policy skips; Biome, TypeScript, tests, and build passed.
+- `bun run protocol:check`: passed with no generated protocol drift.
+- `bun run deps:check`: all dependencies match current stable package versions.
+
+### Files
+
+- Workflow: `.github/workflows/release.yml`.
+- Policy: `test/release/policy.test.ts`.
+
 ## Final Release Integrity Finding
 
 Date: 2026-07-13

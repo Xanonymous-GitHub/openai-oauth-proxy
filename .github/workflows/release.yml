@@ -12,6 +12,7 @@ permissions:
 
 concurrency:
   group: release-images
+  queue: max
   cancel-in-progress: false
 
 jobs:

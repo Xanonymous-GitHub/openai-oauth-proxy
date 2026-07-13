@@ -60,6 +60,7 @@ describe("release policy", () => {
       workflow.indexOf("jobs:"),
     );
     expect(concurrency).toContain("group: release-images");
+    expect(concurrency).toContain("queue: max");
     expect(concurrency).toContain("cancel-in-progress: false");
     expect(concurrency).not.toContain("github.ref");
     const authenticate = workflow.indexOf("name: Authenticate to GHCR");
