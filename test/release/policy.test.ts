@@ -55,31 +55,60 @@ describe("release policy", () => {
     expect(workflow).toMatch(/sbom/i);
     expect(workflow).toMatch(/vulnerab|scan/i);
     expect(workflow).toMatch(/already exists|refusing to overwrite/i);
+    const concurrency = workflow.slice(
+      workflow.indexOf("concurrency:"),
+      workflow.indexOf("jobs:"),
+    );
+    expect(concurrency).toContain("group: release-images");
+    expect(concurrency).toContain("cancel-in-progress: false");
+    expect(concurrency).not.toContain("github.ref");
     const authenticate = workflow.indexOf("name: Authenticate to GHCR");
-    const probe = workflow.indexOf(
-      "name: Refuse to overwrite an existing release tag",
+    const versionProbe = workflow.indexOf(
+      "name: Refuse to overwrite the version tag",
+    );
+    const sourceProbe = workflow.indexOf(
+      "name: Refuse to overwrite the source tag",
     );
     const build = workflow.indexOf("name: Build and push multiarch image");
     const scan = workflow.indexOf("name: Scan SBOM for vulnerabilities");
     const tag = workflow.indexOf("name: Create final release tags");
     const verify = workflow.indexOf("name: Verify published release");
     expect(authenticate).toBeGreaterThan(0);
-    expect(authenticate).toBeLessThan(probe);
-    expect(probe).toBeLessThan(build);
+    expect(authenticate).toBeLessThan(versionProbe);
+    expect(authenticate).toBeLessThan(sourceProbe);
+    expect(versionProbe).toBeLessThan(sourceProbe);
+    expect(sourceProbe).toBeLessThan(build);
     expect(build).toBeLessThan(scan);
     expect(scan).toBeLessThan(tag);
     expect(tag).toBeLessThan(verify);
-    expect(workflow).toContain("PROBE_STATUS");
-    expect(workflow).toContain('if [ "$PROBE_STATUS" -eq 0 ]');
-    expect(workflow).toMatch(/if ! grep[^\n]+manifest unknown/i);
-    expect(workflow).toMatch(/manifest unknown/i);
-    expect(workflow).toMatch(/unable to verify release tag absence/i);
-    expect(workflow).not.toMatch(/PROBE_STATUS[^\n]*\|\| true/);
+    const probeSections = [
+      workflow.slice(versionProbe, sourceProbe),
+      workflow.slice(sourceProbe, build),
+    ];
+    for (const probe of probeSections) {
+      expect(probe).toContain("docker buildx imagetools inspect");
+      expect(probe).toMatch(/PROBE_STATUS=\$\?/);
+      expect(probe).toMatch(/if \[ "\$[A-Z_]+PROBE_STATUS" -eq 0 \]/);
+      expect(probe).toMatch(/if ! grep[^\n]+manifest unknown/i);
+      expect(probe).toMatch(/unable to verify[^\n]+tag absence/i);
+      expect(probe).toMatch(/exit 1/);
+      expect(probe).not.toMatch(/PROBE_STATUS[^\n]*\|\| true/);
+    }
     expect(workflow).toContain("push-by-digest=true");
     expect(workflow.slice(build, scan)).not.toContain("tags:");
     expect(workflow).toContain("docker buildx imagetools create");
     expect(workflow).toMatch(/attestation-manifest/);
-    expect(workflow).toContain('"$IMAGE:$GITHUB_REF_NAME"');
+    const tagSection = workflow.slice(tag, verify);
+    expect(tagSection).toContain('--tag "$IMAGE:$GITHUB_REF_NAME"');
+    expect(tagSection).toContain('--tag "$IMAGE:sha-$GITHUB_SHA"');
+    expect(workflow).not.toContain("$IMAGE:latest");
+    const verifySection = workflow.slice(verify);
+    expect(verifySection).toContain('"$IMAGE:$GITHUB_REF_NAME"');
+    expect(verifySection).toContain('"$IMAGE:sha-$GITHUB_SHA"');
+    expect(verifySection).toMatch(/linux\/amd64/);
+    expect(verifySection).toMatch(/linux\/arm64/);
+    expect(verifySection).toMatch(/attestation-manifest/);
+    expect(verifySection).toContain("cosign verify");
     for (const action of workflow.matchAll(/uses:\s*[^@\s]+@([^\s]+)/g)) {
       expect(action[1]).toMatch(/^[a-f0-9]{40}$/);
     }
@@ -113,6 +142,7 @@ describe("release policy", () => {
       "namespace",
       "OPENAI_PROXY_TOKEN",
       "BIFROST_PROXY_TOKEN",
+      "only immutable version and source SHA tags",
     ]) {
       expect(documentation).toContain(phrase);
     }

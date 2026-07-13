@@ -11,7 +11,7 @@ permissions:
   packages: write
 
 concurrency:
-  group: release-${{ github.ref_name }}
+  group: release-images
   cancel-in-progress: false
 
 jobs:
@@ -38,19 +38,34 @@ jobs:
         run: echo "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Refuse to overwrite an existing release tag
+      - name: Refuse to overwrite the version tag
         run: |
           set +e
-          docker buildx imagetools inspect "$IMAGE:$GITHUB_REF_NAME" >/tmp/tag-probe.out 2>/tmp/tag-probe.err
-          PROBE_STATUS=$?
+          docker buildx imagetools inspect "$IMAGE:$GITHUB_REF_NAME" >/tmp/version-tag-probe.out 2>/tmp/version-tag-probe.err
+          VERSION_PROBE_STATUS=$?
           set -e
-          if [ "$PROBE_STATUS" -eq 0 ]; then
-            echo "Release image already exists; refusing to overwrite immutable tag" >&2
+          if [ "$VERSION_PROBE_STATUS" -eq 0 ]; then
+            echo "Version image already exists; refusing to overwrite immutable tag" >&2
             exit 1
           fi
-          if ! grep -Eiq 'manifest unknown' /tmp/tag-probe.err; then
-            cat /tmp/tag-probe.err >&2
-            echo "Unable to verify release tag absence; refusing to publish" >&2
+          if ! grep -Eiq 'manifest unknown' /tmp/version-tag-probe.err; then
+            cat /tmp/version-tag-probe.err >&2
+            echo "Unable to verify version tag absence; refusing to publish" >&2
+            exit 1
+          fi
+      - name: Refuse to overwrite the source tag
+        run: |
+          set +e
+          docker buildx imagetools inspect "$IMAGE:sha-$GITHUB_SHA" >/tmp/source-tag-probe.out 2>/tmp/source-tag-probe.err
+          SOURCE_PROBE_STATUS=$?
+          set -e
+          if [ "$SOURCE_PROBE_STATUS" -eq 0 ]; then
+            echo "Source image already exists; refusing to overwrite immutable tag" >&2
+            exit 1
+          fi
+          if ! grep -Eiq 'manifest unknown' /tmp/source-tag-probe.err; then
+            cat /tmp/source-tag-probe.err >&2
+            echo "Unable to verify source tag absence; refusing to publish" >&2
             exit 1
           fi
       - name: Build and push multiarch image
@@ -98,7 +113,6 @@ jobs:
           docker buildx imagetools create \
             --tag "$IMAGE:$GITHUB_REF_NAME" \
             --tag "$IMAGE:sha-$GITHUB_SHA" \
-            --tag "$IMAGE:latest" \
             "$IMAGE@$DIGEST"
       - name: Verify published release
         env:
@@ -106,7 +120,6 @@ jobs:
         run: |
           docker buildx imagetools inspect "$IMAGE:$GITHUB_REF_NAME" | grep -F "Digest: $DIGEST"
           docker buildx imagetools inspect "$IMAGE:sha-$GITHUB_SHA" | grep -F "Digest: $DIGEST"
-          docker buildx imagetools inspect "$IMAGE:latest" | grep -F "Digest: $DIGEST"
           docker buildx imagetools inspect "$IMAGE@$DIGEST" --raw >/tmp/manifest.json
           jq -r '.manifests[] | select(.platform.os != "unknown") | .platform | "\(.os)/\(.architecture)"' /tmp/manifest.json | sort -u >/tmp/platforms
           diff -u <(printf '%s\n' linux/amd64 linux/arm64) /tmp/platforms

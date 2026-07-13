@@ -61,6 +61,43 @@ Closed final-review items 1 through 7 only:
 - The Kubernetes base is intentionally non-runnable until an operator supplies a published `repository@sha256` image replacement through a Kustomize overlay.
 - The tag release workflow was validated statically and by local multiarchitecture build, but no tag was pushed and GHCR publication was not executed.
 - Live ChatGPT account tests remain opt-in and were not run. Hermes Agent remains skipped locally because its external binary is unavailable; CI requires it.
+
+## Final Release Integrity Finding
+
+Date: 2026-07-13
+
+### Scope
+
+Closed the final release-integrity finding only:
+
+- Removed the unapproved mutable `latest` alias.
+- Serialized every tag release through one repository-wide concurrency group with cancellation disabled.
+- Added authenticated, fail-closed pre-build probes for both immutable final tags: version and source SHA.
+- Preserved digest-only candidate publication, pre-tag SBOM scanning and signing, exact dual-tag creation, and post-tag digest/platform/attestation/signature verification.
+- Documented that releases publish only immutable version and source SHA tags.
+
+### RED Evidence
+
+- Focused release policy initially failed because concurrency was version-scoped, no source-SHA preflight probe existed, `latest` was created and verified, and operator documentation did not define the immutable two-tag contract.
+
+### GREEN Evidence
+
+- Focused release policy: 4 tests passed.
+- Policy coverage now asserts static cross-release concurrency with `cancel-in-progress: false`, authentication before both probes, both probes before candidate build, fail-closed manifest-unknown handling and existing-tag rejection for each final tag, scan before dual tagging, no `latest`, exact digest equality for both tags, amd64/arm64 platforms, attestations, and keyless signature verification.
+- `bun run check`: 490 tests passed, 2 policy skips; Biome, TypeScript, tests, and build passed.
+- `bun run protocol:check`: passed with no generated protocol drift.
+- `bun run deps:check`: all dependencies match current stable package versions.
+- Graphify deterministic non-generated TypeScript corpus: 76 files, 887 nodes, 1,761 edges, 50 communities; average query reduction 5.7x.
+
+### Files
+
+- Workflow: `.github/workflows/release.yml`.
+- Policy: `test/release/policy.test.ts`.
+- Operator contract: `deploy/README.md`.
+
+### Residual Constraint
+
+- GHCR's live missing-manifest diagnostic, OIDC signature, dual-tag publication, and rerun rejection remain unexercised until a real tag-triggered GitHub Actions release runs; any non-`manifest unknown` probe failure blocks publication by design.
 - Full-root Graphify detected 1,106 files, mostly generated protocol bindings, beyond its 200-file limit. The completed graph intentionally covers non-generated TypeScript source and tests; semantic extraction was unavailable because this harness has no subagent tool.
 
 ## Re-review Important Findings

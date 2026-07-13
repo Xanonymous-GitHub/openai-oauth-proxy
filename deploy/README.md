@@ -23,7 +23,7 @@ Render the overlay and verify that no `example.invalid` reference remains. Insta
 
 ## Image releases
 
-The applied overlay must always name an explicit published image repository and immutable OCI digest. The release workflow builds and publishes both target platforms and validates the published manifest-list digest. Update the production overlay after every image build before applying or releasing the manifests. Never deploy the non-pullable base example, a mutable tag, or an unverified local digest.
+The applied overlay must always name an explicit published image repository and immutable OCI digest. The release workflow serializes tag releases, refuses to overwrite either final tag, and publishes only immutable version and source SHA tags after scanning and signing the candidate digest; it does not publish a `latest` alias. It builds and publishes both target platforms and validates the published manifest-list digest. Update the production overlay after every image build before applying or releasing the manifests. Never deploy the non-pullable base example, a mutable tag, or an unverified local digest.
 
 ## Network egress
 
