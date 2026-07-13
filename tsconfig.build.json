@@ -5,5 +5,5 @@
     "rootDir": "src"
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["test/**/*.ts"]
+  "exclude": ["src/admin/ui/**/*", "test/**/*.ts"]
 }

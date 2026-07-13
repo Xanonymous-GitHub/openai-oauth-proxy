@@ -1,0 +1,21 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "types": ["node", "vite/client"],
+    "jsx": "react-jsx",
+    "paths": {
+      "@/*": ["./src/admin/ui/*"]
+    },
+    "noEmit": true
+  },
+  "include": [
+    "src/admin/contract.ts",
+    "src/admin/ui/**/*.ts",
+    "src/admin/ui/**/*.tsx",
+    "test/admin/ui/**/*.ts",
+    "test/admin/ui/**/*.tsx",
+    "vite.config.ts"
+  ],
+  "exclude": ["src/codex/generated"]
+}
