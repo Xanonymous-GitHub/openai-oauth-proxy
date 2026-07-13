@@ -44,15 +44,7 @@ async function responseJson(response: Response): Promise<unknown> {
 }
 
 export function canonicalVerificationUrl(value: string): string | null {
-  try {
-    const url = new URL(value);
-    return url.origin === "https://auth.openai.com" &&
-      url.pathname === "/codex/device"
-      ? url.href
-      : null;
-  } catch {
-    return null;
-  }
+  return value === "https://auth.openai.com/codex/device" ? value : null;
 }
 
 function statusLabel(state: AccountState | null): string {

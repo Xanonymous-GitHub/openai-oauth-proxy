@@ -145,6 +145,24 @@ describe("AdminApp", () => {
         verificationUrl: "https://auth.openai.com.evil.example/codex/device",
       }),
     );
+    const second = render(<AdminApp />);
+    expect(
+      await screen.findByText("Verification link unavailable"),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("link", { name: "Open verification page" }),
+    ).toBeNull();
+    second.unmount();
+  });
+
+  it.each([
+    [
+      "query string",
+      "https://auth.openai.com/codex/device?redirect=https://evil.example",
+    ],
+    ["fragment", "https://auth.openai.com/codex/device#fragment"],
+  ])("rejects the canonical device URL with a %s", async (_, verificationUrl) => {
+    fetchSequence(response({ ...pending, verificationUrl }));
     render(<AdminApp />);
     expect(
       await screen.findByText("Verification link unavailable"),
