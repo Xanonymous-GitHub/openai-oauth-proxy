@@ -16,7 +16,7 @@
   },
   "dependencies": {
     "@hono/node-server": "2.0.8",
-    "@openai/codex": "0.144.2",
+    "@openai/codex": "0.144.3",
     "hono": "4.12.30",
     "zod": "4.4.3"
   },
