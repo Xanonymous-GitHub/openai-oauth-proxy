@@ -1,6 +1,9 @@
+import { readFile } from "node:fs/promises";
+import { extname, isAbsolute, relative, resolve } from "node:path";
 import { type Context, Hono } from "hono";
 import type { AccountController, AccountState } from "../codex/account.js";
-import { ADMIN_PAGE, ADMIN_SCRIPT } from "./page.js";
+import type { AdminResponse } from "./contract.js";
+import { ADMIN_PAGE } from "./page.js";
 import {
   type AdminSession,
   type SessionStore,
@@ -14,17 +17,14 @@ interface AdminAppDependencies {
   account: AccountController;
   sessions: SessionStore;
   allowedOrigins: ReadonlySet<string>;
-}
-
-interface AdminResponse {
-  state: AccountState;
-  csrfToken: string;
+  assetRoot: string;
 }
 
 export function createAdminApp({
   account,
   sessions,
   allowedOrigins,
+  assetRoot,
 }: AdminAppDependencies): Hono {
   const app = new Hono();
 
@@ -37,9 +37,13 @@ export function createAdminApp({
 
   app.get("/", (context) => context.html(ADMIN_PAGE));
   app.get("/app.js", (context) =>
-    context.body(ADMIN_SCRIPT, 200, {
-      "content-type": "text/javascript; charset=UTF-8",
-    }),
+    adminAsset(context, assetRoot, "app.js"),
+  );
+  app.get("/app.css", (context) =>
+    adminAsset(context, assetRoot, "app.css"),
+  );
+  app.get("/assets/*", (context) =>
+    adminAsset(context, assetRoot, context.req.path.slice(1)),
   );
   app.get("/api/state", (context) => {
     const opened = sessions.open(context.req.header("cookie"));
@@ -93,6 +97,50 @@ export function createAdminApp({
   });
 
   return app;
+}
+
+const ASSET_CONTENT_TYPES: Readonly<Record<string, string>> = {
+  ".css": "text/css; charset=UTF-8",
+  ".js": "text/javascript; charset=UTF-8",
+  ".woff2": "font/woff2",
+};
+
+async function adminAsset(
+  context: Context,
+  root: string,
+  requestedPath: string,
+): Promise<Response> {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(requestedPath);
+  } catch {
+    return context.notFound();
+  }
+  const file = resolve(root, decoded);
+  const fromRoot = relative(root, file);
+  const contentType = ASSET_CONTENT_TYPES[extname(file)];
+  if (
+    !fromRoot ||
+    fromRoot.startsWith("..") ||
+    isAbsolute(fromRoot) ||
+    !contentType
+  ) {
+    return context.notFound();
+  }
+  try {
+    return context.body(new Uint8Array(await readFile(file)), 200, {
+      "content-type": contentType,
+    });
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      return context.notFound();
+    }
+    throw error;
+  }
 }
 
 function authorize(

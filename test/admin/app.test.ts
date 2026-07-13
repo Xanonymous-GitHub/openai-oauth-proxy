@@ -1,3 +1,6 @@
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { createAdminApp } from "../../src/admin/app.js";
 import { SessionStore } from "../../src/admin/sessions.js";
@@ -8,11 +11,10 @@ const allowedOrigins = new Set([
   "http://localhost:8081",
 ]);
 
-function flush(): Promise<void> {
-  return new Promise((resolve) => setImmediate(resolve));
-}
-
-function fixture(state: AccountState = { type: "signed_out" }) {
+function fixture(
+  state: AccountState = { type: "signed_out" },
+  assetRoot = "/missing-admin-assets",
+) {
   let now = 0;
   let sequence = 0;
   const account = {
@@ -35,7 +37,7 @@ function fixture(state: AccountState = { type: "signed_out" }) {
     now: () => now,
     randomBytes,
   });
-  const app = createAdminApp({ account, sessions, allowedOrigins });
+  const app = createAdminApp({ account, sessions, allowedOrigins, assetRoot });
   return {
     account,
     app,
@@ -252,143 +254,67 @@ it("serializes checking without adding credential fields", async () => {
   expect(await response.json()).toMatchObject({ state: { type: "checking" } });
 });
 
-it("serves a framework-free page and external script under a restrictive CSP", async () => {
+it("serves the React mount shell under the restrictive CSP", async () => {
   const { app } = fixture();
-
   const page = await app.request("/");
   const html = await page.text();
-  const script = await app.request("/app.js");
-  const javascript = await script.text();
 
   expect(page.status).toBe(200);
   expect(page.headers.get("content-security-policy")).toBe(
     "default-src 'self'; connect-src 'self'; img-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
   );
-  expect(html).toContain('<script src="/app.js" defer></script>');
-  expect(html).toMatch(/<form|<button/);
-  expect(html).toContain('role="status"');
-  expect(javascript).not.toMatch(
-    /React|Vue|innerHTML|outerHTML|insertAdjacentHTML/,
-  );
-  expect(javascript).toContain("textContent");
-  expect(javascript).toContain(
-    "response.status === 401 || response.status === 403",
-  );
+  expect(page.headers.get("cache-control")).toBe("no-store");
+  expect(html).toContain('<div id="root"></div>');
+  expect(html).toContain('<link rel="stylesheet" href="/app.css">');
+  expect(html).toContain('<script type="module" src="/app.js"></script>');
+  expect(html).not.toContain("Start device login");
 });
 
-it("bootstraps a fresh session after a forbidden mutation without rendering missing state", async () => {
-  const { app } = fixture();
-  const script = await app.request("/app.js");
-  const javascript = await script.text();
-  const listeners = new Map<string, Map<string, (event?: Event) => void>>();
-  const elements = new Map(
-    [
-      "status",
-      "email",
-      "plan",
-      "verification-url",
-      "user-code",
-      "login-form",
-      "refresh",
-      "cancel",
-      "logout",
-    ].map((id) => [
-      id,
-      {
-        textContent: "",
-        addEventListener(type: string, listener: (event?: Event) => void) {
-          const byType = listeners.get(id) ?? new Map();
-          byType.set(type, listener);
-          listeners.set(id, byType);
-        },
-      },
-    ]),
-  );
-  const document = {
-    getElementById(id: string) {
-      return elements.get(id);
-    },
-  };
-  const fetchMock = vi
-    .fn<typeof fetch>()
-    .mockResolvedValueOnce(
-      Response.json({
-        state: { type: "signed_out" },
-        csrfToken: "initial-csrf",
-      }),
-    )
-    .mockResolvedValueOnce(
-      Response.json({ error: "forbidden" }, { status: 403 }),
-    )
-    .mockResolvedValueOnce(
-      Response.json({
-        state: { type: "signed_out" },
-        csrfToken: "replacement-csrf",
-      }),
-    );
-
-  new Function("document", "fetch", javascript)(document, fetchMock);
-  await flush();
-  listeners.get("refresh")?.get("click")?.();
-  await flush();
-  await flush();
-
-  expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
-    "/api/state",
-    "/api/refresh",
-    "/api/state",
+it("serves only local admin assets with explicit content types", async () => {
+  const assetRoot = await mkdtemp(join(tmpdir(), "admin-assets-"));
+  await mkdir(join(assetRoot, "assets"));
+  await Promise.all([
+    writeFile(join(assetRoot, "app.js"), "export {}"),
+    writeFile(join(assetRoot, "app.css"), "body{}"),
+    writeFile(join(assetRoot, "assets", "geist.woff2"), "font"),
   ]);
-  expect(elements.get("status")?.textContent).toBe("signed_out");
+  const { app } = fixture({ type: "signed_out" }, assetRoot);
+
+  try {
+    const script = await app.request("/app.js");
+    const style = await app.request("/app.css");
+    const font = await app.request("/assets/geist.woff2");
+    expect(script.headers.get("content-type")).toBe(
+      "text/javascript; charset=UTF-8",
+    );
+    expect(style.headers.get("content-type")).toBe("text/css; charset=UTF-8");
+    expect(font.headers.get("content-type")).toBe("font/woff2");
+    expect(await script.text()).toBe("export {}");
+  } finally {
+    await rm(assetRoot, { recursive: true, force: true });
+  }
 });
 
-it("renders a reload message when an admin mutation is rejected by the network", async () => {
-  const { app } = fixture();
-  const javascript = await (await app.request("/app.js")).text();
-  const listeners = new Map<string, Map<string, (event?: Event) => void>>();
-  const elements = new Map(
-    [
-      "status",
-      "email",
-      "plan",
-      "verification-url",
-      "user-code",
-      "login-form",
-      "refresh",
-      "cancel",
-      "logout",
-    ].map((id) => [
-      id,
-      {
-        textContent: "",
-        addEventListener(type: string, listener: (event?: Event) => void) {
-          const byType = listeners.get(id) ?? new Map();
-          byType.set(type, listener);
-          listeners.set(id, byType);
-        },
-      },
-    ]),
-  );
-  const fetchMock = vi
-    .fn<typeof fetch>()
-    .mockResolvedValueOnce(
-      Response.json({
-        state: { type: "signed_out" },
-        csrfToken: "initial-csrf",
-      }),
-    )
-    .mockRejectedValueOnce(new TypeError("network failed"));
+it("rejects encoded asset traversal", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "admin-traversal-"));
+  const assetRoot = join(parent, "ui");
+  await mkdir(join(assetRoot, "assets"), { recursive: true });
+  await writeFile(join(parent, "secret.js"), "not public");
+  const { app } = fixture({ type: "signed_out" }, assetRoot);
 
-  new Function("document", "fetch", javascript)(
-    { getElementById: (id: string) => elements.get(id) },
-    fetchMock,
-  );
-  await flush();
-  listeners.get("refresh")?.get("click")?.();
-  await flush();
+  try {
+    const response = await app.request(
+      "/assets/%2e%2e%2f%2e%2e%2fsecret.js",
+    );
+    expect(response.status).toBe(404);
+    expect(await response.text()).not.toContain("not public");
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
 
-  expect(elements.get("status")?.textContent).toBe(
-    "Session unavailable. Reload this page.",
-  );
+it("returns 404 for a missing asset", async () => {
+  expect((await fixture().app.request("/assets/missing.js")).status).toBe(404);
 });
 
 it("sanitizes account-operation failures", async () => {

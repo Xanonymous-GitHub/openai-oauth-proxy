@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { chmodSync } from "node:fs";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { type ServerType, serve } from "@hono/node-server";
 import { type Env, Hono } from "hono";
 import { createAdminApp } from "./admin/app.js";
@@ -206,6 +206,7 @@ export async function start(
       `http://127.0.0.1:${config.adminPort}`,
       `http://localhost:${config.adminPort}`,
     ]),
+    assetRoot: fileURLToPath(new URL("./admin-ui/", import.meta.url)),
   });
   const adminApp = new Hono();
   adminApp.use("*", async (context, next) => {

@@ -435,6 +435,7 @@ it("serializes only safe fields from real account transitions", async () => {
     account: manager,
     sessions: new SessionStore(),
     allowedOrigins: new Set(["http://127.0.0.1:8081"]),
+    assetRoot: "/missing-admin-assets",
   });
   const serializedState = async () => {
     const response = await app.request("/api/state");

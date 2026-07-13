@@ -153,7 +153,7 @@ it("serves the admin app, not the data app, on the admin listener", async () => 
     const dataRoute = await fetch(`http://127.0.0.1:${adminPort}/healthz`);
     expect(page.status).toBe(200);
     expect(page.headers.get("x-request-id")).toMatch(/^req_/);
-    expect(await page.text()).toContain("Codex authentication");
+    expect(await page.text()).toContain("Codex Gateway");
     expect(dataRoute.status).toBe(404);
 
     const state = await fetch(`http://127.0.0.1:${adminPort}/api/state`);
