@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { extname, isAbsolute, relative, resolve } from "node:path";
 import { type Context, Hono } from "hono";
 import type { AccountController, AccountState } from "../codex/account.js";
@@ -105,6 +105,18 @@ const ASSET_CONTENT_TYPES: Readonly<Record<string, string>> = {
   ".woff2": "font/woff2",
 };
 
+const EXPECTED_ASSET_ERROR_CODES: ReadonlySet<string> = new Set([
+  "EACCES",
+  "EINVAL",
+  "EISDIR",
+  "ELOOP",
+  "ENAMETOOLONG",
+  "ENOENT",
+  "ENOTDIR",
+  "EPERM",
+  "ERR_INVALID_ARG_VALUE",
+]);
+
 async function adminAsset(
   context: Context,
   root: string,
@@ -116,31 +128,37 @@ async function adminAsset(
   } catch {
     return context.notFound();
   }
-  const file = resolve(root, decoded);
-  const fromRoot = relative(root, file);
-  const contentType = ASSET_CONTENT_TYPES[extname(file)];
-  if (
-    !fromRoot ||
-    fromRoot.startsWith("..") ||
-    isAbsolute(fromRoot) ||
-    !contentType
-  ) {
-    return context.notFound();
-  }
   try {
+    const canonicalRoot = await realpath(root);
+    const file = await realpath(resolve(canonicalRoot, decoded));
+    const fromRoot = relative(canonicalRoot, file);
+    const contentType = ASSET_CONTENT_TYPES[extname(file)];
+    if (
+      !fromRoot ||
+      fromRoot.startsWith("..") ||
+      isAbsolute(fromRoot) ||
+      !contentType
+    ) {
+      return context.notFound();
+    }
     return context.body(new Uint8Array(await readFile(file)), 200, {
       "content-type": contentType,
     });
   } catch (error) {
-    if (
-      error instanceof Error &&
-      "code" in error &&
-      error.code === "ENOENT"
-    ) {
+    if (isExpectedAssetError(error)) {
       return context.notFound();
     }
     throw error;
   }
+}
+
+function isExpectedAssetError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    typeof error.code === "string" &&
+    EXPECTED_ASSET_ERROR_CODES.has(error.code)
+  );
 }
 
 function authorize(

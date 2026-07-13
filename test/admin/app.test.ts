@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
@@ -277,6 +277,7 @@ it("serves only local admin assets with explicit content types", async () => {
     writeFile(join(assetRoot, "app.js"), "export {}"),
     writeFile(join(assetRoot, "app.css"), "body{}"),
     writeFile(join(assetRoot, "assets", "geist.woff2"), "font"),
+    writeFile(join(assetRoot, "assets", "private.txt"), "not an asset"),
   ]);
   const { app } = fixture({ type: "signed_out" }, assetRoot);
 
@@ -284,12 +285,20 @@ it("serves only local admin assets with explicit content types", async () => {
     const script = await app.request("/app.js");
     const style = await app.request("/app.css");
     const font = await app.request("/assets/geist.woff2");
+    const disallowed = await app.request("/assets/private.txt");
     expect(script.headers.get("content-type")).toBe(
       "text/javascript; charset=UTF-8",
     );
     expect(style.headers.get("content-type")).toBe("text/css; charset=UTF-8");
     expect(font.headers.get("content-type")).toBe("font/woff2");
     expect(await script.text()).toBe("export {}");
+    expect(disallowed.status).toBe(404);
+    expect(script.headers.get("content-security-policy")).toBe(
+      "default-src 'self'; connect-src 'self'; img-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+    );
+    expect(script.headers.get("cache-control")).toBe("no-store");
+    expect(script.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(script.headers.get("access-control-allow-origin")).toBeNull();
   } finally {
     await rm(assetRoot, { recursive: true, force: true });
   }
@@ -310,6 +319,42 @@ it("rejects encoded asset traversal", async () => {
     expect(await response.text()).not.toContain("not public");
   } finally {
     await rm(parent, { recursive: true, force: true });
+  }
+});
+
+it("rejects asset symlinks that resolve outside the asset root", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "admin-symlink-"));
+  const assetRoot = join(parent, "ui");
+  const external = join(parent, "external.js");
+  await mkdir(join(assetRoot, "assets"), { recursive: true });
+  await writeFile(external, "external secret");
+  await symlink(external, join(assetRoot, "assets", "linked.js"));
+  const { app } = fixture({ type: "signed_out" }, assetRoot);
+
+  try {
+    const response = await app.request("/assets/linked.js");
+    expect(response.status).toBe(404);
+    expect(await response.text()).not.toContain("external secret");
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+it.each([
+  ["a malformed NUL path", "/assets/bad%00.js"],
+  ["a non-directory path segment", "/assets/not-a-directory/file.js"],
+])("returns a sanitized 404 for %s", async (_case, path) => {
+  const assetRoot = await mkdtemp(join(tmpdir(), "admin-invalid-asset-"));
+  await mkdir(join(assetRoot, "assets"));
+  await writeFile(join(assetRoot, "assets", "not-a-directory"), "private path");
+  const { app } = fixture({ type: "signed_out" }, assetRoot);
+
+  try {
+    const response = await app.request(path);
+    expect(response.status).toBe(404);
+    expect(await response.text()).toBe("404 Not Found");
+  } finally {
+    await rm(assetRoot, { recursive: true, force: true });
   }
 });
 
