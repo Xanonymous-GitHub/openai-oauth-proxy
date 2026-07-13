@@ -28,6 +28,7 @@ const ALLOWED_CLIENT_METHODS = new Set([
   "turn/start",
   "turn/interrupt",
 ]);
+const MAX_ABORTED_RESPONSE_IDS = 256;
 
 export function assertAllowedClientMethod(method: string): void {
   if (!ALLOWED_CLIENT_METHODS.has(method)) {
@@ -119,6 +120,7 @@ class JsonlTransport implements CodexTransport {
   readonly #output: Writable;
   readonly #generation: number;
   readonly #pending = new Map<RequestId, PendingRequest>();
+  readonly #abortedResponseIds = new Set<RequestId>();
   readonly #events = new AsyncQueue<HostNotification>();
   readonly #toolCalls = new AsyncQueue<PendingServerToolCall>();
   readonly #pendingTools = new Set<ToolCallState>();
@@ -209,6 +211,7 @@ class JsonlTransport implements CodexTransport {
   invalidateGeneration(): void {
     if (this.#invalidated) return;
     this.#invalidated = true;
+    this.#abortedResponseIds.clear();
     const error = new CodexGenerationChangedError();
     this.rejectPending(error);
     for (const tool of this.#pendingTools) tool.active = false;
@@ -235,6 +238,7 @@ class JsonlTransport implements CodexTransport {
             const pending = this.#pending.get(id);
             if (!pending) return;
             this.#pending.delete(id);
+            this.rememberAbortedResponse(id);
             reject(new DOMException("The operation was aborted", "AbortError"));
           }
         : undefined;
@@ -302,6 +306,7 @@ class JsonlTransport implements CodexTransport {
   ): void {
     const pending = this.#pending.get(id);
     if (!pending) {
+      if (this.#abortedResponseIds.delete(id)) return;
       this.protocolFailure();
       return;
     }
@@ -351,6 +356,7 @@ class JsonlTransport implements CodexTransport {
   private protocolFailure(): void {
     if (this.#failed || this.#invalidated) return;
     this.#failed = true;
+    this.#abortedResponseIds.clear();
     this.#resolveFailure?.();
     this.#resolveFailure = undefined;
     const error = new CodexProtocolError();
@@ -369,6 +375,13 @@ class JsonlTransport implements CodexTransport {
       }
       pending.reject(error);
     }
+  }
+
+  private rememberAbortedResponse(id: RequestId): void {
+    this.#abortedResponseIds.add(id);
+    if (this.#abortedResponseIds.size <= MAX_ABORTED_RESPONSE_IDS) return;
+    const oldest = this.#abortedResponseIds.values().next().value;
+    if (oldest !== undefined) this.#abortedResponseIds.delete(oldest);
   }
 }
 

@@ -1131,18 +1131,98 @@ describe("POST /v1/chat/completions", () => {
       await expect(continuation.result).rejects.toMatchObject({
         code: "request_aborted",
       });
-      await expect(response.text()).resolves.toBe("");
+      await expect(response.text()).resolves.toContain('"role":"assistant"');
       expect(firstRespond).toHaveBeenCalledOnce();
       expect(fixture.host.turnInterrupt).toHaveBeenCalledOnce();
       expect(fixture.host.threadDelete).toHaveBeenCalledOnce();
       expect(fixture.release).toHaveBeenCalledOnce();
-      expect(fixture.streamPayloads).toEqual([]);
+      expect(fixture.streamPayloads).toHaveLength(1);
       expect(fixture.streamPayloads).not.toContain("[DONE]");
       await vi.advanceTimersByTimeAsync(10);
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("forwards a resumed text delta before the continuation result resolves", async () => {
+    const fixture = createFixture();
+    const respond = vi.fn(() => {
+      fixture.events.push({
+        method: "item/agentMessage/delta",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "message-live",
+          delta: "live continuation",
+        },
+      });
+    });
+    vi.mocked(fixture.host.turnStart).mockImplementationOnce(async () => {
+      fixture.tools.push({
+        generation: 1,
+        id: "rpc-live",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          callId: "internal-live",
+          namespace: null,
+          tool: "lookup",
+          arguments: {},
+        },
+        respond,
+        reject: vi.fn(),
+      });
+      return { turn: fakeTurn() };
+    });
+    const definitions = [
+      {
+        type: "function" as const,
+        function: { name: "lookup", parameters: {} },
+      },
+    ];
+    const suspended = await post(fixture.app, {
+      ...ordinaryRequest,
+      tools: definitions,
+    });
+    const suspendedBody = (await suspended.json()) as {
+      choices: Array<{ message: { tool_calls: Array<{ id: string }> } }>;
+    };
+    const callId = suspendedBody.choices[0]?.message.tool_calls[0]?.id;
+    if (!callId) throw new Error("Missing tool call");
+    const continueSpy = vi.spyOn(fixture.runner.tools, "continue");
+    const response = await post(fixture.app, {
+      model: "gpt-5.4",
+      tools: definitions,
+      stream: true,
+      messages: [
+        ...ordinaryRequest.messages,
+        suspendedBody.choices[0]?.message,
+        { role: "tool", tool_call_id: callId, content: "found" },
+      ],
+    });
+    const continuation = await continueSpy.mock.results[0]?.value;
+    if (continuation?.type !== "continued") throw new Error("Not continued");
+    let finalResolved = false;
+    void continuation.result.finally(() => {
+      finalResolved = true;
+    });
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error("Missing response body");
+    const decoder = new TextDecoder();
+    let payload = "";
+    while (!payload.includes("live continuation")) {
+      const next = await reader.read();
+      if (next.done) throw new Error("Stream ended before live delta");
+      payload += decoder.decode(next.value, { stream: true });
+    }
+
+    expect(finalResolved).toBe(false);
+    emitCompletion(fixture.events, "complete", false);
+    while (!(await reader.read()).done) {
+      // Drain the terminal chunks after proving the timing boundary.
+    }
+    expect(finalResolved).toBe(true);
   });
 
   it("emits a sanitized SSE error when a stream fails before text", async () => {

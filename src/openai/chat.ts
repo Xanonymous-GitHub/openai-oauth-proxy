@@ -7,7 +7,12 @@ import { writeSSEWithSignal } from "../http/sse.js";
 import type { TurnCapacity } from "../operations/capacity.js";
 import type { AdmittedTurn, TurnDrainRegistry } from "../operations/drain.js";
 import type { ObserveRequest } from "../operations/telemetry.js";
-import type { TokenUsage, TurnCommand, TurnResult } from "../turns/events.js";
+import type {
+  ProxyStreamEvent,
+  TokenUsage,
+  TurnCommand,
+  TurnResult,
+} from "../turns/events.js";
 import type { TurnLifecycleCallbacks, TurnRunner } from "../turns/runner.js";
 import { decodeImages } from "./images.js";
 import type { ModelCapabilities, ModelCatalog } from "./models.js";
@@ -159,9 +164,10 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
       request.tools ?? [],
     );
     const dynamicTools = request.tool_choice === "none" ? [] : validatedTools;
-    const toolFingerprint = deps.runner.tools.fingerprintDefinitions(
+    const toolFingerprint = deps.runner.tools.configuration(
       request.tools ?? [],
-    );
+      request.tool_choice ?? "auto",
+    ).fingerprint;
     const outputs = toolOutputs(request.messages);
 
     const images = imageParts(request.messages);
@@ -215,7 +221,12 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
     let turnSignal = streamController
       ? AbortSignal.any([context.req.raw.signal, streamController.signal])
       : context.req.raw.signal;
-    let continuationResult: Promise<TurnResult> | undefined;
+    let continuationStage:
+      | {
+          result: Promise<TurnResult>;
+          events: AsyncIterable<ProxyStreamEvent>;
+        }
+      | undefined;
     if (outputs.length > 0) {
       const continuation = await deps.runner.tools.continue({
         kind: "chat",
@@ -242,11 +253,11 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
       if (continuation.signal) {
         turnSignal = AbortSignal.any([turnSignal, continuation.signal]);
       }
-      continuationResult = continuation.result;
+      continuationStage = continuation;
     }
 
     const lastMessage = request.messages.at(-1);
-    if (continuationResult === undefined && lastMessage?.role !== "user") {
+    if (continuationStage === undefined && lastMessage?.role !== "user") {
       assertInitialMessages(request.messages);
       throw ProxyError.public(
         400,
@@ -255,7 +266,7 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
         `messages.${request.messages.length - 1}.role`,
       );
     }
-    if (continuationResult === undefined)
+    if (continuationStage === undefined)
       assertInitialMessages(request.messages);
     const command: TurnCommand = {
       action: { type: "start" },
@@ -274,7 +285,7 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
       ...(dynamicTools.length === 0 ? {} : { dynamicTools }),
     };
     const permit =
-      continuationResult === undefined
+      continuationStage === undefined
         ? await deps.capacity?.acquire(context.req.raw.signal)
         : undefined;
     let admission: AdmittedTurn | undefined;
@@ -308,7 +319,7 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
 
     if (!request.stream) {
       try {
-        const result = await (continuationResult ??
+        const result = await (continuationStage?.result ??
           deps.runner.run(command, turnSignal, lifecycle));
         if (result.finishReason === "stop") admission?.done();
         return context.json({
@@ -357,12 +368,6 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
       try {
         const includeUsage = request.stream_options?.include_usage === true;
         const emptyUsage = includeUsage ? null : undefined;
-        const continuationStage = continuationResult
-          ? await continuationResult
-          : undefined;
-        for (const call of continuationStage?.toolCalls ?? []) {
-          streamedToolCallIds.push(call.id);
-        }
         await writeSSE({
           data: JSON.stringify(
             chunk(
@@ -381,18 +386,7 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
         let usage: TokenUsage | undefined;
         let toolIndex = 0;
         const source = continuationStage
-          ? (async function* () {
-              if (continuationStage.text !== "") {
-                yield {
-                  type: "text.delta" as const,
-                  delta: continuationStage.text,
-                };
-              }
-              for (const call of continuationStage.toolCalls ?? []) {
-                yield { type: "tool.call" as const, call };
-              }
-              yield { type: "completed" as const, result: continuationStage };
-            })()
+          ? continuationStage.events
           : (() => {
               runnerStarted = true;
               return deps.runner.stream(command, turnSignal, lifecycle);

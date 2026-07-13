@@ -104,10 +104,11 @@ describe("Kubernetes deployment", () => {
     });
   });
 
-  it("pins the Task 13 image digest and injects tokens only from Secrets", () => {
+  it("uses an explicitly non-pullable immutable example and injects tokens only from Secrets", () => {
     expect(container.image).toBe(
-      "ghcr.io/xanonymous/openai-oauth-proxy@sha256:8fe334910f67b204e35aebbc173dea29a4678f5038bb1d7f7e2fc2b8336a306e",
+      "example.invalid/openai-oauth-proxy@sha256:0000000000000000000000000000000000000000000000000000000000000000",
     );
+    expect(container.image).not.toContain("ghcr.io");
     expect(container.image).not.toMatch(/:(latest|main|stable)(?:@|$)/);
     expect(container.env).toEqual(
       expect.arrayContaining([
@@ -292,5 +293,24 @@ describe("deployment examples", () => {
     expect(readme).toContain("encryption at rest");
     expect(readme).toContain("immutable OCI digest");
     expect(readme).toContain("after every image build");
+    expect(readme).toContain("repository@sha256");
+    expect(readme).toContain("kustomization.yaml");
+    expect(readme).toMatch(/must replace|replacement is required/i);
+  });
+
+  it("keeps Bifrost's base URL at the origin and prevents a doubled v1 path", () => {
+    const documentation = [
+      "README.md",
+      "deploy/README.md",
+      "docs/superpowers/specs/2026-07-11-codex-oauth-proxy-design.md",
+      "docs/superpowers/plans/2026-07-11-codex-oauth-proxy.md",
+    ]
+      .map((path) => readFileSync(path, "utf8"))
+      .join("\n");
+    expect(documentation).not.toContain(
+      "openai-oauth-proxy.namespace.svc.cluster.local:8080/v1",
+    );
+    expect(documentation).not.toContain("/v1/v1");
+    expect(documentation).toContain("Bifrost appends");
   });
 });

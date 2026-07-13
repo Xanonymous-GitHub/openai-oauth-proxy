@@ -30,8 +30,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: proxy
-          # Release builds replace this immutable digest only after the image is built and published.
-          image: ghcr.io/xanonymous/openai-oauth-proxy@sha256:8fe334910f67b204e35aebbc173dea29a4678f5038bb1d7f7e2fc2b8336a306e
+          # Non-pullable by design. An overlay must replace it with a published repository@sha256 digest.
+          image: example.invalid/openai-oauth-proxy@sha256:0000000000000000000000000000000000000000000000000000000000000000
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsNonRoot: true

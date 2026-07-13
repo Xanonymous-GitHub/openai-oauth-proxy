@@ -16,6 +16,13 @@ export type LeaseKind = "turn" | "tool";
 export type ResponseState = "pending" | "complete" | "lost" | "expired";
 export type OperationAction = "start" | "resume" | "fork";
 export type OperationState = "active" | "abandoned";
+const EMPTY_TOOL_CONFIGURATION = '{"toolChoice":"auto","tools":[]}';
+const EMPTY_TOOL_FINGERPRINT = "Bw6q601glJFflAEU5_GtPkcF1DtwNAMczF5EKX0U--Y";
+
+export interface PersistedToolConfiguration {
+  canonical: string;
+  fingerprint: string;
+}
 
 export type ContinuationDecision =
   | { type: "start" }
@@ -37,6 +44,7 @@ export interface CreatePendingResponse {
   forkedAtTurnId?: string;
   stored: boolean;
   processGeneration: number;
+  toolConfiguration?: PersistedToolConfiguration;
 }
 
 export interface ReserveOperationInput {
@@ -46,6 +54,7 @@ export interface ReserveOperationInput {
   stored: boolean;
   processGeneration: number;
   operationCwd: string;
+  toolConfiguration?: PersistedToolConfiguration;
 }
 
 export type OperationDecision =
@@ -58,7 +67,8 @@ export type OperationDecision =
     }
   | { type: "busy" }
   | { type: "not_found" }
-  | { type: "lost" };
+  | { type: "lost" }
+  | { type: "tools_changed" };
 
 export interface ResponseOperation {
   responseId: string;
@@ -76,6 +86,8 @@ export interface ResponseOperation {
   processGeneration: number;
   createdAt: number;
   expiresAt: number;
+  toolConfiguration: string;
+  toolFingerprint: string;
 }
 
 export interface ResponseMapping {
@@ -90,6 +102,8 @@ export interface ResponseMapping {
   createdAt: number;
   lastAccessAt: number;
   expiresAt: number;
+  toolConfiguration: string;
+  toolFingerprint: string;
 }
 
 interface ResponseRow {
@@ -104,6 +118,8 @@ interface ResponseRow {
   created_at: number;
   last_access_at: number;
   expires_at: number;
+  tool_configuration: string;
+  tool_fingerprint: string;
 }
 
 interface LineageRow {
@@ -135,6 +151,8 @@ interface OperationRow {
   expires_at: number;
   operation_cwd: string | null;
   recovery_pending: number;
+  tool_configuration: string;
+  tool_fingerprint: string;
 }
 
 interface Statements {
@@ -213,7 +231,8 @@ export class ConversationStore {
         INSERT INTO responses(
           response_id, thread_id, turn_id, parent_response_id,
           root_response_id, state, stored, process_generation,
-          created_at, last_access_at, expires_at
+          created_at, last_access_at, expires_at,
+          tool_configuration, tool_fingerprint
         )
         VALUES (
           ?, ?, NULL, ?,
@@ -221,7 +240,7 @@ export class ConversationStore {
             (SELECT root_response_id FROM responses WHERE response_id = ?),
             ?
           ),
-          'pending', ?, ?, ?, ?, ?
+          'pending', ?, ?, ?, ?, ?, ?, ?
         )
       `),
       completeResponse: database.prepare(`
@@ -254,7 +273,8 @@ export class ConversationStore {
       readResponse: database.prepare(`
         SELECT response_id, thread_id, turn_id, parent_response_id,
                root_response_id, state, stored, process_generation,
-               created_at, last_access_at, expires_at
+               created_at, last_access_at, expires_at,
+               tool_configuration, tool_fingerprint
         FROM responses
         WHERE response_id = ?
       `),
@@ -401,14 +421,15 @@ export class ConversationStore {
           response_id, owner_request_id, action, state, stored,
           parent_response_id, source_thread_id, source_turn_id,
           thread_id, turn_id, process_generation, created_at, expires_at,
-          operation_cwd, recovery_pending
-        ) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 0)
+          operation_cwd, recovery_pending, tool_configuration, tool_fingerprint
+        ) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 0, ?, ?)
       `),
       readOperation: database.prepare(`
         SELECT response_id, owner_request_id, action, state, stored,
                parent_response_id, source_thread_id, source_turn_id,
                thread_id, turn_id, process_generation, created_at, expires_at,
-               operation_cwd, recovery_pending
+               operation_cwd, recovery_pending,
+               tool_configuration, tool_fingerprint
         FROM response_operations
         WHERE response_id = ?
       `),
@@ -433,14 +454,15 @@ export class ConversationStore {
         INSERT INTO responses(
           response_id, thread_id, turn_id, parent_response_id,
           root_response_id, state, stored, process_generation,
-          created_at, last_access_at, expires_at
+          created_at, last_access_at, expires_at,
+          tool_configuration, tool_fingerprint
         ) VALUES (
           ?, ?, ?, ?,
           COALESCE(
             (SELECT root_response_id FROM responses WHERE response_id = ?),
             ?
           ),
-          'complete', 1, ?, ?, ?, ?
+          'complete', 1, ?, ?, ?, ?, ?, ?
         )
       `),
       abandonOperation: database.prepare(`
@@ -476,7 +498,8 @@ export class ConversationStore {
         SELECT response_id, owner_request_id, action, state, stored,
                parent_response_id, source_thread_id, source_turn_id,
                thread_id, turn_id, process_generation, created_at, expires_at,
-               operation_cwd, recovery_pending
+               operation_cwd, recovery_pending,
+               tool_configuration, tool_fingerprint
         FROM response_operations
         WHERE recovery_pending = 1
         ORDER BY created_at, response_id
@@ -492,7 +515,8 @@ export class ConversationStore {
         SELECT response_id, owner_request_id, action, state, stored,
                parent_response_id, source_thread_id, source_turn_id,
                thread_id, turn_id, process_generation, created_at, expires_at,
-               operation_cwd, recovery_pending
+               operation_cwd, recovery_pending,
+               tool_configuration, tool_fingerprint
         FROM response_operations
         WHERE state = 'abandoned' AND thread_id IS NOT NULL
           AND action IN ('start', 'fork')
@@ -591,6 +615,8 @@ export class ConversationStore {
         now,
         now,
         now + this.#responseTtlMs,
+        input.toolConfiguration?.canonical ?? EMPTY_TOOL_CONFIGURATION,
+        input.toolConfiguration?.fingerprint ?? EMPTY_TOOL_FINGERPRINT,
       );
       return true;
     });
@@ -671,6 +697,26 @@ export class ConversationStore {
     return row.count;
   }
 
+  continuationToolConfiguration(
+    responseId: string,
+    requested: PersistedToolConfiguration,
+  ): "match" | "mismatch" | "busy" | "not_found" | "lost" {
+    return this.#transaction(() => {
+      const now = this.#clock.now();
+      this.#statements.expireResponse.run(responseId, now);
+      const response = this.#responseRow(responseId);
+      if (!response || response.state === "expired" || response.stored === 0) {
+        return "not_found";
+      }
+      if (response.state === "lost") return "lost";
+      if (response.state !== "complete") return "busy";
+      return response.tool_configuration === requested.canonical &&
+        response.tool_fingerprint === requested.fingerprint
+        ? "match"
+        : "mismatch";
+    });
+  }
+
   reserveOperation(input: ReserveOperationInput): OperationDecision {
     return this.#transaction(() => {
       const now = this.#clock.now();
@@ -687,6 +733,16 @@ export class ConversationStore {
       if (response.state === "lost") return { type: "lost" };
       if (response.state !== "complete" || response.turn_id === null) {
         return { type: "busy" };
+      }
+      const toolConfiguration = input.toolConfiguration ?? {
+        canonical: EMPTY_TOOL_CONFIGURATION,
+        fingerprint: EMPTY_TOOL_FINGERPRINT,
+      };
+      if (
+        response.tool_configuration !== toolConfiguration.canonical ||
+        response.tool_fingerprint !== toolConfiguration.fingerprint
+      ) {
+        return { type: "tools_changed" };
       }
       const active = this.#statements.hasActiveSourceOperation.get(
         response.thread_id,
@@ -800,6 +856,8 @@ export class ConversationStore {
           operation.created_at,
           now,
           now + this.#responseTtlMs,
+          operation.tool_configuration,
+          operation.tool_fingerprint,
         );
       }
       const leaseThreadId = operation.source_thread_id ?? operation.thread_id;
@@ -867,6 +925,8 @@ export class ConversationStore {
             operation.created_at,
             now,
             now + this.#responseTtlMs,
+            operation.tool_configuration,
+            operation.tool_fingerprint,
           );
         }
       }
@@ -1104,6 +1164,8 @@ export class ConversationStore {
       now,
       now + this.#responseTtlMs,
       action === "resume" ? null : input.operationCwd,
+      input.toolConfiguration?.canonical ?? EMPTY_TOOL_CONFIGURATION,
+      input.toolConfiguration?.fingerprint ?? EMPTY_TOOL_FINGERPRINT,
     );
   }
 
@@ -1156,6 +1218,8 @@ function mapResponse(row: ResponseRow): ResponseMapping {
     createdAt: row.created_at,
     lastAccessAt: row.last_access_at,
     expiresAt: row.expires_at,
+    toolConfiguration: row.tool_configuration,
+    toolFingerprint: row.tool_fingerprint,
   };
 }
 
@@ -1182,5 +1246,7 @@ function mapOperation(row: OperationRow): ResponseOperation {
     processGeneration: row.process_generation,
     createdAt: row.created_at,
     expiresAt: row.expires_at,
+    toolConfiguration: row.tool_configuration,
+    toolFingerprint: row.tool_fingerprint,
   };
 }

@@ -80,6 +80,15 @@ const MIGRATIONS: Migration[] = [
         ON response_operations(recovery_pending, state);
     `,
   },
+  {
+    version: 5,
+    sql: `
+      ALTER TABLE responses ADD COLUMN tool_configuration TEXT NOT NULL DEFAULT '{"toolChoice":"auto","tools":[]}';
+      ALTER TABLE responses ADD COLUMN tool_fingerprint TEXT NOT NULL DEFAULT 'Bw6q601glJFflAEU5_GtPkcF1DtwNAMczF5EKX0U--Y';
+      ALTER TABLE response_operations ADD COLUMN tool_configuration TEXT NOT NULL DEFAULT '{"toolChoice":"auto","tools":[]}';
+      ALTER TABLE response_operations ADD COLUMN tool_fingerprint TEXT NOT NULL DEFAULT 'Bw6q601glJFflAEU5_GtPkcF1DtwNAMczF5EKX0U--Y';
+    `,
+  },
 ];
 
 interface VersionRow {
@@ -147,6 +156,13 @@ const REQUIRED_COLUMNS = [
     version: 4,
     tables: {
       response_operations: ["operation_cwd", "recovery_pending"],
+    },
+  },
+  {
+    version: 5,
+    tables: {
+      responses: ["tool_configuration", "tool_fingerprint"],
+      response_operations: ["tool_configuration", "tool_fingerprint"],
     },
   },
 ] as const;

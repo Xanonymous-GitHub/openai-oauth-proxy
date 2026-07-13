@@ -214,12 +214,15 @@ class TurnAccumulator {
     this.#stage.complete(result);
   }
 
-  resume(): Promise<TurnResult> {
+  resume(): {
+    result: Promise<TurnResult>;
+    events: AsyncIterable<ProxyStreamEvent>;
+  } {
     if (!this.#stage.settled) {
       throw new Error("Cannot continue a turn before it is suspended");
     }
     this.#stage = new TurnStage();
-    return this.#stage.result;
+    return { result: this.#stage.result, events: this.#stage.events };
   }
 
   fail(error: unknown, streamError = normalizeError(error)): void {
@@ -607,6 +610,7 @@ export class TurnRunner {
           leaseOwner: toolLifecycle.leaseOwner,
           generation,
           toolFingerprint: toolLifecycle.toolFingerprint,
+          toolDefinitions: command.dynamicTools,
           ...(toolLifecycle.signal === undefined
             ? {}
             : { signal: toolLifecycle.signal }),
@@ -614,7 +618,7 @@ export class TurnRunner {
             ? {}
             : { finish: toolLifecycle.finish }),
           resume: (nextSignal) => {
-            const result = accumulator.resume();
+            const stage = accumulator.resume();
             const resumedSignal = toolLifecycle.signal
               ? nextSignal
                 ? AbortSignal.any([toolLifecycle.signal, nextSignal])
@@ -622,7 +626,7 @@ export class TurnRunner {
               : nextSignal;
             attachClient(resumedSignal);
             startTimeout();
-            return result;
+            return stage;
           },
           invalidate: async () => {
             requestCancellation("timeout");

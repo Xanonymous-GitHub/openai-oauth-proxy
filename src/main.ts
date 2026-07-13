@@ -311,8 +311,8 @@ export async function start(
       void account.start();
       responseSweeper = startResponseSweeper({
         store: conversationStore,
-        deleteThread: async (threadId) => {
-          await value.threadDelete({ threadId });
+        deleteThread: async (threadId, signal) => {
+          await value.threadDelete({ threadId }, signal);
         },
         host: value,
       });

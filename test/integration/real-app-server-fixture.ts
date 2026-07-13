@@ -20,6 +20,7 @@ interface ContractResult {
   text: string;
   cancelled: boolean;
   dynamicToolResult: string;
+  inheritedDynamicToolResult: string;
   toolOutputForwarded: boolean;
   frameCounts: { requests: number; responses: number; notifications: number };
   schemaErrors: string[];
@@ -370,6 +371,30 @@ export async function runRealAppServerContract(): Promise<ContractResult> {
     });
     const dynamicToolResult = await nextAgentText(events);
     await nextEvent(events, "turn/completed");
+    const resumedToolThread = await step("tool thread/resume", () =>
+      host.threadResume({ threadId: toolThread.thread.id }),
+    );
+    const inheritedPendingTool = host
+      .toolCalls()
+      [Symbol.asyncIterator]()
+      .next();
+    await step("inherited tool turn/start", () =>
+      host.turnStart({
+        threadId: resumedToolThread.thread.id,
+        input: [
+          { type: "text", text: "inherited tool fixture", text_elements: [] },
+        ],
+      }),
+    );
+    const inheritedToolCall = await inheritedPendingTool;
+    if (inheritedToolCall.done)
+      throw new Error("Inherited dynamic tool stream ended");
+    inheritedToolCall.value.respond({
+      success: true,
+      contentItems: [{ type: "inputText", text: "inherited fixture result" }],
+    });
+    const inheritedDynamicToolResult = await nextAgentText(events);
+    await nextEvent(events, "turn/completed");
 
     const schemaErrors = validateCapturedFrames(frames);
     const frameCounts = {
@@ -389,6 +414,7 @@ export async function runRealAppServerContract(): Promise<ContractResult> {
       text,
       cancelled,
       dynamicToolResult,
+      inheritedDynamicToolResult,
       toolOutputForwarded: JSON.stringify(fake.requests.at(-1)).includes(
         "fixture tool result",
       ),

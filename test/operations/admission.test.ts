@@ -40,6 +40,10 @@ function fakeRunner(
     tools: {
       toDynamicTools: vi.fn(() => []),
       fingerprintDefinitions: vi.fn(() => "fingerprint"),
+      configuration: vi.fn(() => ({
+        canonical: "tools",
+        fingerprint: "fingerprint",
+      })),
       continue: vi.fn(),
     },
     run: vi.fn(

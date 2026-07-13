@@ -22,14 +22,15 @@ The Bifrost environment variable `OPENAI_PROXY_TOKEN` must equal the proxy Secre
 1. Choose the target namespace and replace the example `namespace` in Bifrost configuration and any namespace selectors or overlays.
 2. Ensure the default StorageClass is an encrypted StorageClass, or set an encryption-backed `storageClassName` in an overlay.
 3. Create Secret `openai-oauth-proxy` with independent random `BIFROST_PROXY_TOKEN` and `METRICS_TOKEN` values of at least 32 characters. Set Bifrost `OPENAI_PROXY_TOKEN` to the same value as `BIFROST_PROXY_TOKEN`.
-4. Apply with `kubectl apply -k deploy/base` and wait for `pod/openai-oauth-proxy-0` readiness.
+4. Create a Kustomize overlay that replaces the base's intentionally non-pullable example image with a published `repository@sha256` manifest digest, apply the overlay, and wait for `pod/openai-oauth-proxy-0` readiness.
 5. Open the loopback-only admin service with `kubectl port-forward pod/openai-oauth-proxy-0 8081:8081`, visit `http://127.0.0.1:8081`, and complete device login.
 
 The example Secret is intentionally invalid and excluded from Kustomize. Never commit rendered Secrets.
 
 ## Operations
 
-- Upgrade: publish and inspect an amd64/arm64 image, replace the immutable StatefulSet digest, validate `kubectl kustomize deploy/base`, then apply the overlay.
+- Upgrade: publish and inspect an amd64/arm64 image, replace the immutable overlay digest, validate the rendered Kustomize overlay, then apply it.
+- Codex 0.144.1 continuation limitation: `dynamicTools` are set only by `thread/start`; `thread/resume` and `thread/fork` cannot replace them. A stored Responses continuation must therefore send the exact inherited effective function definitions and `tool_choice`. Adding, removing, changing, or switching to/from `none` is rejected before App Server work. New response lineages may define a new configuration.
 - Rollback: restore the previous immutable image digest and apply it. Database migrations must remain compatible with the restored release.
 - Logout: use the loopback admin page. Device login, refresh, and logout are delegated to App Server; the proxy does not parse credential files.
 - Probes: `/healthz` reports terminal supervisor health; `/readyz` additionally requires App Server and account readiness and is removed during drain/recovery.

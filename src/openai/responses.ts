@@ -29,10 +29,11 @@ import { translateHistory, translateTurnInput } from "./translate.js";
 
 type ModelLookup = Pick<ModelCatalog, "lookup">;
 const SWEEP_INTERVAL_MS = 60 * 60 * 1_000;
+const SWEEP_RPC_TIMEOUT_MS = 30_000;
 
 export interface ResponseSweepDependencies {
   store: ConversationStore;
-  deleteThread(threadId: string): void | Promise<void>;
+  deleteThread(threadId: string, signal?: AbortSignal): void | Promise<void>;
   host?: Pick<CodexHost, "threadList" | "threadDelete">;
 }
 
@@ -115,17 +116,24 @@ async function loseResponseOperation(
 async function threadsForOperation(
   host: Pick<CodexHost, "threadList">,
   cwd: string,
+  signal: AbortSignal,
 ): Promise<Thread[]> {
   const matches = new Map<string, Thread>();
   const cursors = new Set<string>();
   let cursor: string | undefined;
   do {
-    const response = await host.threadList({
-      cwd,
-      sourceKinds: ["appServer"],
-      limit: 100,
-      ...(cursor === undefined ? {} : { cursor }),
-    });
+    const response = await abortable(
+      host.threadList(
+        {
+          cwd,
+          sourceKinds: ["appServer"],
+          limit: 100,
+          ...(cursor === undefined ? {} : { cursor }),
+        },
+        signal,
+      ),
+      signal,
+    );
     for (const thread of response.data) {
       if (thread.cwd === cwd) matches.set(thread.id, thread);
     }
@@ -139,6 +147,7 @@ async function threadsForOperation(
 
 export async function recoverResponseOperations(
   deps: ResponseRecoveryDependencies,
+  signal = AbortSignal.timeout(SWEEP_RPC_TIMEOUT_MS),
 ): Promise<void> {
   for (const operation of deps.store.recoveryOperations()) {
     if (operation.action === "resume") {
@@ -150,6 +159,7 @@ export async function recoverResponseOperations(
       const matches = await threadsForOperation(
         deps.host,
         operation.operationCwd,
+        signal,
       );
       if (matches.length !== 1) continue;
       const thread = matches[0];
@@ -161,7 +171,10 @@ export async function recoverResponseOperations(
 
   for (const operation of deps.store.abandonedOperations()) {
     if (operation.threadId === undefined) continue;
-    await deps.host.threadDelete({ threadId: operation.threadId });
+    await abortable(
+      deps.host.threadDelete({ threadId: operation.threadId }, signal),
+      signal,
+    );
     deps.store.finishAbandonedOperation(operation.responseId);
     removeOperationDirectory(operation.operationCwd);
   }
@@ -176,13 +189,20 @@ interface ResponseIdentity {
 
 export async function sweepExpiredResponses(
   deps: ResponseSweepDependencies,
+  signal = AbortSignal.timeout(SWEEP_RPC_TIMEOUT_MS),
 ): Promise<void> {
   if (deps.host !== undefined) {
-    await recoverResponseOperations({ store: deps.store, host: deps.host });
+    await recoverResponseOperations(
+      { store: deps.store, host: deps.host },
+      signal,
+    );
   }
   for (const threadId of deps.store.abandonedThreads()) {
     try {
-      await deps.deleteThread(threadId);
+      await abortable(
+        Promise.resolve(deps.deleteThread(threadId, signal)),
+        signal,
+      );
     } catch {
       return;
     }
@@ -191,7 +211,10 @@ export async function sweepExpiredResponses(
   deps.store.expire();
   for (const threadId of deps.store.deletableLeafThreads()) {
     try {
-      await deps.deleteThread(threadId);
+      await abortable(
+        Promise.resolve(deps.deleteThread(threadId, signal)),
+        signal,
+      );
     } catch {
       // An ancestor delete is recursive, so stop until this leaf succeeds.
       return;
@@ -211,11 +234,20 @@ export function startResponseSweeper(
   };
   let stopped = false;
   let inFlight = Promise.resolve();
+  const controller = new AbortController();
   const enqueue = (): Promise<void> => {
     if (stopped) return inFlight;
     inFlight = inFlight
       .catch(() => undefined)
-      .then(() => sweepExpiredResponses(deps));
+      .then(() =>
+        sweepExpiredResponses(
+          deps,
+          AbortSignal.any([
+            controller.signal,
+            AbortSignal.timeout(SWEEP_RPC_TIMEOUT_MS),
+          ]),
+        ),
+      );
     return inFlight;
   };
   const startup = enqueue();
@@ -230,10 +262,29 @@ export function startResponseSweeper(
       if (!stopped) {
         stopped = true;
         timers.clearInterval(timer);
+        controller.abort();
       }
-      await inFlight;
+      await inFlight.catch(() => undefined);
     },
   };
+}
+
+function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    void operation.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
 }
 
 function opaqueId(prefix: "resp" | "msg"): string {
@@ -446,9 +497,11 @@ export function createResponsesHandler(
       request.tools ?? [],
     );
     const dynamicTools = request.tool_choice === "none" ? [] : validatedTools;
-    const toolFingerprint = deps.runner.tools.fingerprintDefinitions(
+    const toolConfiguration = deps.runner.tools.configuration(
       request.tools ?? [],
+      request.tool_choice ?? "auto",
     );
+    const toolFingerprint = toolConfiguration.fingerprint;
     const outputs = functionOutputs(request);
     if (outputs.length > 0) {
       if (
@@ -497,29 +550,16 @@ export function createResponsesHandler(
         ? AbortSignal.any([context.req.raw.signal, continuation.signal])
         : context.req.raw.signal;
       const finishContinuation = (): void => continuation.finish?.();
-      let result: TurnResult;
-      try {
-        result = await continuation.result;
-      } catch (error) {
-        try {
-          await loseResponseOperation(
-            deps,
-            request.previous_response_id,
-            cleanupSignal,
-          );
-          deps.observe?.(context.req.raw, { leaseOutcome: "released" });
-        } finally {
-          finishContinuation();
-        }
-        throw error;
-      }
       const identity: ResponseIdentity = {
         responseId: request.previous_response_id,
         messageId: opaqueId("msg"),
         createdAt: Math.floor(deps.clock.now() / 1_000),
         model: model.id,
       };
-      if (result.finishReason === "stop") {
+      const completeContinuation = async (
+        result: TurnResult,
+      ): Promise<void> => {
+        if (result.finishReason !== "stop") return;
         try {
           const operationCwd = deps.store.completeOperation(
             identity.responseId,
@@ -539,8 +579,25 @@ export function createResponsesHandler(
           }
           throw error;
         }
-      }
+      };
       if (!request.stream) {
+        let result: TurnResult;
+        try {
+          result = await continuation.result;
+        } catch (error) {
+          try {
+            await loseResponseOperation(
+              deps,
+              request.previous_response_id,
+              cleanupSignal,
+            );
+            deps.observe?.(context.req.raw, { leaseOutcome: "released" });
+          } finally {
+            finishContinuation();
+          }
+          throw error;
+        }
+        await completeContinuation(result);
         try {
           return context.json(responseBody(identity, result));
         } finally {
@@ -571,10 +628,9 @@ export function createResponsesHandler(
             errorCode: "request_aborted",
           });
           controller.abort();
-          invalidation =
-            result.finishReason === "tool_calls"
-              ? deps.runner.tools.invalidateResponse(identity.responseId)
-              : Promise.resolve();
+          invalidation = deps.runner.tools.invalidateResponse(
+            identity.responseId,
+          );
           return invalidation;
         };
         stream.onAbort(invalidate);
@@ -584,6 +640,7 @@ export function createResponsesHandler(
           await writeSSEWithSignal(stream, event, signal);
         };
         let sequenceNumber = 0;
+        let toolOutputIndex = 0;
         try {
           await writeSSE({
             event: "response.created",
@@ -601,80 +658,130 @@ export function createResponsesHandler(
             }),
           });
           sequenceNumber += 1;
-          if (result.finishReason === "stop") {
-            await writeSSE({
-              event: "response.output_text.done",
-              data: JSON.stringify({
-                type: "response.output_text.done",
-                sequence_number: sequenceNumber,
-                item_id: identity.messageId,
-                output_index: 0,
-                content_index: 0,
-                text: result.text,
-                logprobs: [],
-              }),
-            });
-            sequenceNumber += 1;
+          for await (const event of continuation.events) {
+            if (event.type === "text.delta") {
+              await writeSSE({
+                event: "response.output_text.delta",
+                data: JSON.stringify({
+                  type: "response.output_text.delta",
+                  sequence_number: sequenceNumber,
+                  item_id: identity.messageId,
+                  output_index: 0,
+                  content_index: 0,
+                  delta: event.delta,
+                  logprobs: [],
+                }),
+              });
+              sequenceNumber += 1;
+            } else if (event.type === "tool.call") {
+              const item = responseBody(identity, {
+                threadId: continuation.threadId,
+                turnId: continuation.turnId,
+                text: "",
+                finishReason: "tool_calls",
+                toolCalls: [event.call],
+              }).output[0];
+              await writeSSE({
+                event: "response.output_item.added",
+                data: JSON.stringify({
+                  type: "response.output_item.added",
+                  sequence_number: sequenceNumber,
+                  output_index: toolOutputIndex,
+                  item,
+                }),
+              });
+              sequenceNumber += 1;
+              await writeSSE({
+                event: "response.function_call_arguments.delta",
+                data: JSON.stringify({
+                  type: "response.function_call_arguments.delta",
+                  sequence_number: sequenceNumber,
+                  item_id: item?.id,
+                  output_index: toolOutputIndex,
+                  delta: JSON.stringify(event.call.arguments),
+                }),
+              });
+              sequenceNumber += 1;
+              await writeSSE({
+                event: "response.function_call_arguments.done",
+                data: JSON.stringify({
+                  type: "response.function_call_arguments.done",
+                  sequence_number: sequenceNumber,
+                  item_id: item?.id,
+                  output_index: toolOutputIndex,
+                  arguments: JSON.stringify(event.call.arguments),
+                }),
+              });
+              sequenceNumber += 1;
+              await writeSSE({
+                event: "response.output_item.done",
+                data: JSON.stringify({
+                  type: "response.output_item.done",
+                  sequence_number: sequenceNumber,
+                  output_index: toolOutputIndex,
+                  item,
+                }),
+              });
+              sequenceNumber += 1;
+              toolOutputIndex += 1;
+            } else if (event.type === "completed") {
+              if (event.result.finishReason === "stop") {
+                await writeSSE({
+                  event: "response.output_text.done",
+                  data: JSON.stringify({
+                    type: "response.output_text.done",
+                    sequence_number: sequenceNumber,
+                    item_id: identity.messageId,
+                    output_index: 0,
+                    content_index: 0,
+                    text: event.result.text,
+                    logprobs: [],
+                  }),
+                });
+                sequenceNumber += 1;
+                await completeContinuation(event.result);
+              }
+              await writeSSE({
+                event: "response.completed",
+                data: JSON.stringify({
+                  type: "response.completed",
+                  sequence_number: sequenceNumber,
+                  response: responseBody(identity, event.result),
+                }),
+              });
+              deps.observe?.(context.req.raw, { streamOutcome: "completed" });
+              if (event.result.finishReason === "stop") finishContinuation();
+              return;
+            } else if (event.type === "failed") {
+              await loseResponseOperation(
+                deps,
+                identity.responseId,
+                cleanupSignal,
+              );
+              finishContinuation();
+              const projected = openAIErrorBody(event.error).error;
+              await writeSSE({
+                event: "error",
+                data: JSON.stringify({
+                  type: "error",
+                  sequence_number: sequenceNumber,
+                  code: projected.code,
+                  message: projected.message,
+                  param: projected.param,
+                }),
+              });
+              deps.observe?.(context.req.raw, {
+                streamOutcome: "failed",
+                errorCode: projected.code,
+              });
+              return;
+            }
           }
-          for (const [outputIndex, call] of (
-            result.toolCalls ?? []
-          ).entries()) {
-            const item = responseBody(identity, {
-              ...result,
-              toolCalls: [call],
-            }).output[0];
-            await writeSSE({
-              event: "response.output_item.added",
-              data: JSON.stringify({
-                type: "response.output_item.added",
-                sequence_number: sequenceNumber,
-                output_index: outputIndex,
-                item,
-              }),
-            });
-            sequenceNumber += 1;
-            await writeSSE({
-              event: "response.function_call_arguments.delta",
-              data: JSON.stringify({
-                type: "response.function_call_arguments.delta",
-                sequence_number: sequenceNumber,
-                item_id: item?.id,
-                output_index: outputIndex,
-                delta: JSON.stringify(call.arguments),
-              }),
-            });
-            sequenceNumber += 1;
-            await writeSSE({
-              event: "response.function_call_arguments.done",
-              data: JSON.stringify({
-                type: "response.function_call_arguments.done",
-                sequence_number: sequenceNumber,
-                item_id: item?.id,
-                output_index: outputIndex,
-                arguments: JSON.stringify(call.arguments),
-              }),
-            });
-            sequenceNumber += 1;
-            await writeSSE({
-              event: "response.output_item.done",
-              data: JSON.stringify({
-                type: "response.output_item.done",
-                sequence_number: sequenceNumber,
-                output_index: outputIndex,
-                item,
-              }),
-            });
-            sequenceNumber += 1;
-          }
-          await writeSSE({
-            event: "response.completed",
-            data: JSON.stringify({
-              type: "response.completed",
-              sequence_number: sequenceNumber,
-              response: responseBody(identity, result),
-            }),
-          });
-          deps.observe?.(context.req.raw, { streamOutcome: "completed" });
+          throw new ProxyError(
+            502,
+            "codex_protocol_error",
+            "Codex event stream ended before turn completion",
+          );
         } catch (error) {
           await invalidate();
           if (
@@ -691,18 +798,31 @@ export function createResponsesHandler(
           throw error;
         } finally {
           streamCleanup.resolve();
-          if (result.finishReason === "stop") finishContinuation();
         }
       };
       try {
         return sendStream(context, executeStream);
       } catch (error) {
         streamCleanup.resolve();
-        if (result.finishReason === "stop") finishContinuation();
         throw error;
       }
     }
     assertOrdinaryRequest(request);
+    if (request.previous_response_id !== undefined) {
+      const configuration = deps.store.continuationToolConfiguration(
+        request.previous_response_id,
+        toolConfiguration,
+      );
+      if (configuration === "mismatch") {
+        throw ProxyError.public(
+          400,
+          "tool_definitions_changed",
+          "Tools and tool_choice must exactly match the previous response",
+          "tools",
+        );
+      }
+      if (configuration !== "match") throw decisionError(configuration);
+    }
     const split = splitInput(request);
     const model = await validatedModel(deps, request, context.req.raw.signal);
     deps.observe?.(context.req.raw, { model: model.id });
@@ -766,6 +886,7 @@ export function createResponsesHandler(
         stored,
         processGeneration: deps.processGeneration(),
         operationCwd,
+        toolConfiguration,
       });
     } catch (error) {
       removeOperationDirectory(operationCwd);
@@ -776,7 +897,8 @@ export function createResponsesHandler(
     if (
       decision.type === "busy" ||
       decision.type === "not_found" ||
-      decision.type === "lost"
+      decision.type === "lost" ||
+      decision.type === "tools_changed"
     ) {
       removeOperationDirectory(operationCwd);
       if (decision.type === "busy") {
@@ -784,6 +906,14 @@ export function createResponsesHandler(
       }
       finishAdmission();
       releasePermit();
+      if (decision.type === "tools_changed") {
+        throw ProxyError.public(
+          400,
+          "tool_definitions_changed",
+          "Tools and tool_choice must exactly match the previous response",
+          "tools",
+        );
+      }
       throw decisionError(decision.type);
     }
     deps.observe?.(context.req.raw, { leaseOutcome: "acquired" });

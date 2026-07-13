@@ -402,9 +402,7 @@ describe("TurnRunner", () => {
       },
     ];
     const fingerprint = runner.tools.fingerprint(dynamicTools);
-    const respond = vi.fn(() => {
-      emitCompletedTurn(events, "thread-1", "turn-1", "sunny", false);
-    });
+    const respond = vi.fn();
     vi.mocked(host.turnStart).mockImplementation(async () => {
       tools.push({
         generation: 1,
@@ -456,6 +454,21 @@ describe("TurnRunner", () => {
     });
     expect(continuation.type).toBe("continued");
     if (continuation.type !== "continued") throw new Error("not continued");
+    const nextEvent = continuation.events[Symbol.asyncIterator]().next();
+    events.push({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "message-continued",
+        delta: "live ",
+      },
+    });
+    await expect(nextEvent).resolves.toEqual({
+      done: false,
+      value: { type: "text.delta", delta: "live " },
+    });
+    emitCompletedTurn(events, "thread-1", "turn-1", "sunny", false);
     await expect(continuation.result).resolves.toMatchObject({
       text: "sunny",
       finishReason: "stop",

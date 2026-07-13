@@ -783,7 +783,21 @@ describe("conversation migrations", () => {
       previousApplication
         .prepare("SELECT version FROM schema_migrations ORDER BY version")
         .all(),
-    ).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }]);
+    ).toEqual([
+      { version: 1 },
+      { version: 2 },
+      { version: 3 },
+      { version: 4 },
+      { version: 5 },
+    ]);
+    expect(
+      previousApplication.prepare("PRAGMA table_info(responses)").all(),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "tool_configuration" }),
+        expect.objectContaining({ name: "tool_fingerprint" }),
+      ]),
+    );
     expect(
       previousApplication
         .prepare(
@@ -811,7 +825,7 @@ describe("conversation migrations", () => {
         id INTEGER PRIMARY KEY,
         value TEXT NOT NULL
       );
-       INSERT INTO schema_migrations(version, applied_at) VALUES (5, ${now});
+       INSERT INTO schema_migrations(version, applied_at) VALUES (6, ${now});
       COMMIT;
     `);
     futureApplication.close();
@@ -837,7 +851,13 @@ describe("conversation migrations", () => {
       previousApplication
         .prepare("SELECT version FROM schema_migrations ORDER BY version")
         .all(),
-    ).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }]);
+    ).toEqual([
+      { version: 1 },
+      { version: 2 },
+      { version: 3 },
+      { version: 4 },
+      { version: 5 },
+    ]);
     expect(
       previousApplication
         .prepare(
@@ -860,7 +880,8 @@ describe("conversation migrations", () => {
          (1, ${now}),
          (2, ${now}),
          (3, ${now}),
-         (4, ${now});
+         (4, ${now}),
+         (5, ${now});
     `);
     database.close();
 

@@ -26,6 +26,9 @@ describe("pinned real Codex App Server offline contract", () => {
     expect(result.text).toBe("fixture response");
     expect(result.cancelled).toBe(true);
     expect(result.dynamicToolResult).toBe("fixture tool result");
+    expect(result.inheritedDynamicToolResult).toBe(
+      "inherited fixture tool result",
+    );
     expect(result.toolOutputForwarded).toBe(true);
     expect(result.frameCounts).toMatchObject({
       requests: expect.any(Number),

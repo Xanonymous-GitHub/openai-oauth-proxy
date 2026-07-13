@@ -450,7 +450,7 @@ describe("JSONL transport", () => {
     await expect(pending).rejects.toBeInstanceOf(CodexProtocolError);
   });
 
-  it("removes an aborted request from correlation state", async () => {
+  it("discards one late response for an aborted request without failing unrelated work", async () => {
     const harness = createHarness();
     const controller = new AbortController();
     const aborted = harness.transport.host.accountRead(
@@ -462,8 +462,40 @@ describe("JSONL transport", () => {
     await expect(aborted).rejects.toMatchObject({ name: "AbortError" });
 
     const active = harness.transport.host.modelList({});
+    const activeRequest = await harness.nextOutgoing();
+    harness.send({ id: abortedRequest.id, result: {} });
+    harness.send({
+      id: activeRequest.id,
+      result: { data: [], nextCursor: null },
+    });
+
+    await expect(active).resolves.toEqual({ data: [], nextCursor: null });
+
+    const later = harness.transport.host.accountRead(false);
     await harness.nextOutgoing();
     harness.send({ id: abortedRequest.id, result: {} });
+    await expect(later).rejects.toBeInstanceOf(CodexProtocolError);
+  });
+
+  it("bounds aborted-response tombstones", async () => {
+    const harness = createHarness();
+    let oldestId: string | number | undefined;
+
+    for (let index = 0; index < 257; index += 1) {
+      const controller = new AbortController();
+      const pending = harness.transport.host.accountRead(
+        false,
+        controller.signal,
+      );
+      const request = await harness.nextOutgoing();
+      oldestId ??= request.id as string | number;
+      controller.abort();
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    }
+
+    const active = harness.transport.host.modelList({});
+    await harness.nextOutgoing();
+    harness.send({ id: oldestId, result: {} });
     await expect(active).rejects.toBeInstanceOf(CodexProtocolError);
   });
 

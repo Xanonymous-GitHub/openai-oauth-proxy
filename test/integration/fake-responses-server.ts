@@ -235,7 +235,7 @@ export async function startFakeResponsesServer(): Promise<FakeResponsesServer> {
       request.once("close", () => response.end());
       return;
     }
-    if (requests.length === 3) {
+    if (requests.length === 3 || requests.length === 5) {
       response.writeHead(200, {
         "content-type": "text/event-stream",
         connection: "keep-alive",
@@ -252,7 +252,11 @@ export async function startFakeResponsesServer(): Promise<FakeResponsesServer> {
     response.end(
       responseEvents(
         `resp_fixture_${requests.length}`,
-        requests.length === 4 ? "fixture tool result" : "fixture response",
+        requests.length === 4
+          ? "fixture tool result"
+          : requests.length === 6
+            ? "inherited fixture tool result"
+            : "fixture response",
       ),
     );
   });

@@ -253,6 +253,89 @@ it("starts two listeners and removes shutdown handlers when closed", async () =>
   closeStore.mockRestore();
 });
 
+it("aborts an in-flight response sweep so service close reaches every owner", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "app-sweep-close-"));
+  const events = new EventQueue();
+  let sweepSignal: AbortSignal | undefined;
+  const threadList = vi.fn(async (_params: unknown, signal?: AbortSignal) => {
+    sweepSignal = signal;
+    return new Promise<never>(() => undefined);
+  });
+  const host = {
+    generation: 1,
+    accountRead: vi.fn(async () => ({
+      account: { type: "chatgpt", email: null, planType: "plus" },
+      requiresOpenaiAuth: true,
+    })),
+    events: vi.fn(() => events),
+    threadList,
+    threadDelete: vi.fn(async () => ({})),
+    toolCalls: vi.fn(() => new EventQueue() as never),
+  } as unknown as CodexHost;
+  const stop = vi.fn(async () => undefined);
+  const recovery = vi
+    .spyOn(ConversationStore.prototype, "recoveryOperations")
+    .mockReturnValue([
+      {
+        responseId: "resp_stuck_sweep",
+        ownerRequestId: "req-stuck-sweep",
+        action: "start",
+        state: "active",
+        stored: true,
+        operationCwd: join(dataDir, "operation"),
+        recoveryPending: true,
+        processGeneration: 1,
+        createdAt: 1,
+        expiresAt: 2,
+        toolConfiguration: '{"toolChoice":"auto","tools":[]}',
+        toolFingerprint: "fingerprint",
+      },
+    ]);
+  const service = await start(
+    {
+      dataHost: "0.0.0.0",
+      dataPort: 0,
+      adminHost: "127.0.0.1",
+      adminPort: 0,
+      dataDir,
+      codexHome: join(dataDir, "codex"),
+      codexBin: "codex",
+      bifrostProxyToken: "b".repeat(32),
+      metricsToken: "m".repeat(32),
+      maxActiveTurns: 4,
+      queueCapacity: 32,
+      turnTimeoutMs: 600_000,
+      toolTimeoutMs: 900_000,
+      responseTtlMs: 604_800_000,
+    },
+    {
+      supervisor: {
+        health: () => true,
+        ready: () => true,
+        start: async () => host,
+        stop,
+      },
+      drainTimeoutMs: 20,
+    },
+  );
+
+  try {
+    await vi.waitFor(() => expect(threadList).toHaveBeenCalledOnce());
+    await expect(
+      Promise.race([
+        service.close().then(() => "closed"),
+        new Promise((resolve) => setTimeout(() => resolve("timed out"), 500)),
+      ]),
+    ).resolves.toBe("closed");
+    expect(sweepSignal?.aborted).toBe(true);
+    expect(stop).toHaveBeenCalledOnce();
+  } finally {
+    recovery.mockRestore();
+    await service.close().catch(() => undefined);
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 it("closes the conversation store when listener startup and supervisor cleanup fail", async () => {
   const blocker = createServer();
   await new Promise<void>((resolve) => blocker.listen(0, "0.0.0.0", resolve));

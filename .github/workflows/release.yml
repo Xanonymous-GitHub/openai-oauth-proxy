@@ -1,0 +1,82 @@
+name: Release image
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/openai-oauth-proxy
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: "26.5.0"
+          cache: ""
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: "1.3.14"
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+      - run: bun install --frozen-lockfile
+      - run: bun run protocol:check
+      - run: bun run deps:check
+      - run: bun run check
+      - name: Refuse to overwrite an existing release tag
+        run: |
+          if docker buildx imagetools inspect "$IMAGE:$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release image already exists; refusing to overwrite immutable tag" >&2
+            exit 1
+          fi
+      - name: Authenticate to GHCR
+        run: echo "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push multiarch image
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.ref_name }}
+            ${{ env.IMAGE }}:sha-${{ github.sha }}
+          provenance: true
+          sbom: true
+      - name: Validate manifest digest and platforms
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker buildx imagetools inspect "$IMAGE@$DIGEST" --raw >/tmp/manifest.json
+          jq -r '.manifests[].platform | "\(.os)/\(.architecture)"' /tmp/manifest.json | sort -u >/tmp/platforms
+          diff -u <(printf '%s\n' linux/amd64 linux/arm64) /tmp/platforms
+      - name: Generate published image SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: /tmp/openai-oauth-proxy.spdx.json
+      - name: Scan SBOM for vulnerabilities
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2
+        with:
+          sbom: /tmp/openai-oauth-proxy.spdx.json
+          fail-build: true
+          severity-cutoff: high
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: openai-oauth-proxy-${{ github.ref_name }}-sbom
+          path: /tmp/openai-oauth-proxy.spdx.json
+          if-no-files-found: error

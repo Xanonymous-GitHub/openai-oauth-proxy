@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Keep Bifrost's provider name `openai`; configure the proxy URL under `network_config.base_url` and set `allow_private_network: true`.
+- Keep Bifrost's provider name `openai`; configure the proxy origin without `/v1` under `network_config.base_url` because Bifrost appends `/v1`, and set `allow_private_network: true`.
 - Expose only `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/responses`, `GET /healthz`, `GET /readyz`, and authenticated `GET /metrics` on `0.0.0.0:8080`.
 - Bind the admin plane only to `127.0.0.1:8081`; do not create a Service or Ingress for it.
 - Accept only text and inline PNG, JPEG, or WebP data URLs; enforce 32 MiB encoded body, 10 MiB decoded per image, 24 MiB decoded aggregate, and eight images.
@@ -1429,7 +1429,7 @@ Create this exact provider shape:
         "weight": 1
       }],
       "network_config": {
-        "base_url": "http://openai-oauth-proxy.namespace.svc.cluster.local:8080/v1",
+        "base_url": "http://openai-oauth-proxy.namespace.svc.cluster.local:8080",
         "allow_private_network": true
       }
     }

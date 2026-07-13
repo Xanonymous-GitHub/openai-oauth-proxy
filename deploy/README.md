@@ -10,11 +10,20 @@ Create the `openai-oauth-proxy` Secret separately with independent random values
 
 Replace the example `namespace` in `deploy/bifrost/config.example.json` with the workload namespace (or manage it with an overlay). Bifrost `OPENAI_PROXY_TOKEN` must use the same value as the proxy's `BIFROST_PROXY_TOKEN`; `METRICS_TOKEN` remains independent. The Bifrost base URL intentionally names the proxy origin without `/v1` because Bifrost appends the incoming `/v1/*` path.
 
-Install with `kubectl apply -k deploy/base`. Upgrade by replacing the immutable image digest after a verified multiarch build and reapplying. Rollback by restoring the previous digest and reapplying. Use `kubectl port-forward pod/openai-oauth-proxy-0 8081:8081` for device login and logout; never expose port 8081 through a Service.
+The base image reference uses the reserved `example.invalid` domain and is intentionally non-pullable. Before installation, image replacement is required: create an overlay `kustomization.yaml` whose `images` entry replaces `example.invalid/openai-oauth-proxy` with a published `repository@sha256` reference, for example:
+
+```yaml
+images:
+  - name: example.invalid/openai-oauth-proxy
+    newName: ghcr.io/OWNER/openai-oauth-proxy
+    digest: sha256:PUBLISHED_64_HEX_MANIFEST_DIGEST
+```
+
+Render the overlay and verify that no `example.invalid` reference remains. Install with `kubectl apply -k deploy/overlays/production`. Upgrade by replacing the immutable image digest after a verified multiarch build and reapplying. Rollback by restoring the previous digest and reapplying. Use `kubectl port-forward pod/openai-oauth-proxy-0 8081:8081` for device login and logout; never expose port 8081 through a Service.
 
 ## Image releases
 
-The applied base always names an explicit image repository and immutable OCI digest. The current pin is the Task 13 multi-platform OCI digest. The release workflow must build and publish both target platforms, inspect the published manifest-list digest, and update `base/statefulset.yaml` after every image build before applying or releasing the manifests. Never replace the digest with a mutable tag or an unverified local digest.
+The applied overlay must always name an explicit published image repository and immutable OCI digest. The release workflow builds and publishes both target platforms and validates the published manifest-list digest. Update the production overlay after every image build before applying or releasing the manifests. Never deploy the non-pullable base example, a mutable tag, or an unverified local digest.
 
 ## Network egress
 

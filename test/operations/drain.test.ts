@@ -96,6 +96,10 @@ it("aborts a backpressured admitted stream before post-close runner work", async
     tools: {
       toDynamicTools: vi.fn(() => []),
       fingerprintDefinitions: vi.fn(() => "fingerprint"),
+      configuration: vi.fn(() => ({
+        canonical: "tools",
+        fingerprint: "fingerprint",
+      })),
       invalidateResponse: vi.fn(),
     },
     stream: vi.fn(() => {
@@ -180,6 +184,10 @@ it("settles a permanently blocked initial write within forced drain", async () =
     tools: {
       toDynamicTools: vi.fn(() => []),
       fingerprintDefinitions: vi.fn(() => "fingerprint"),
+      configuration: vi.fn(() => ({
+        canonical: "tools",
+        fingerprint: "fingerprint",
+      })),
       invalidateResponse: vi.fn(),
     },
     stream: vi.fn(() => {
@@ -272,6 +280,10 @@ it("keeps Responses admission until delayed durable cleanup completes", async ()
     tools: {
       toDynamicTools: vi.fn(() => []),
       fingerprintDefinitions: vi.fn(() => "fingerprint"),
+      configuration: vi.fn(() => ({
+        canonical: "tools",
+        fingerprint: "fingerprint",
+      })),
     },
     run: vi.fn(
       async (

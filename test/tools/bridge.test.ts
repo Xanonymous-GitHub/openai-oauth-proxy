@@ -4,6 +4,21 @@ import type { CodexHost, PendingServerToolCall } from "../../src/codex/host.js";
 import { ToolBridge, type ToolBridgeContext } from "../../src/tools/bridge.js";
 import type { TurnResult } from "../../src/turns/events.js";
 
+const allowedTools = [
+  "weather",
+  "clock",
+  "first",
+  "second",
+  "third",
+  "danger",
+  "lookup",
+].map((name) => ({
+  type: "function" as const,
+  name,
+  description: "",
+  inputSchema: {},
+}));
+
 function result(overrides: Partial<TurnResult> = {}): TurnResult {
   return {
     threadId: "thread-1",
@@ -41,7 +56,13 @@ function context(
     leaseOwner: "request-1",
     generation: 7,
     toolFingerprint: "tools-v1",
-    resume: vi.fn(async () => result()),
+    toolDefinitions: allowedTools,
+    resume: vi.fn(() => ({
+      result: Promise.resolve(result()),
+      events: (async function* () {
+        yield { type: "text.delta" as const, delta: "done" };
+      })(),
+    })),
     invalidate: vi.fn(async () => undefined),
     ...overrides,
   };
@@ -249,6 +270,9 @@ describe("ToolBridge", () => {
       threadId: "thread-1",
       turnId: "turn-1",
       result: expect.any(Promise),
+      events: expect.objectContaining({
+        [Symbol.asyncIterator]: expect.any(Function),
+      }),
     });
     expect(first.respond).toHaveBeenCalledWith({
       success: true,
@@ -260,6 +284,27 @@ describe("ToolBridge", () => {
     });
     expect(first.respond).toHaveBeenCalledAfter(vi.mocked(turn.resume));
     expect(second.respond).toHaveBeenCalledAfter(vi.mocked(turn.resume));
+  });
+
+  it.each([
+    ["undeclared tool", { tool: "filesystem", namespace: null }],
+    ["namespaced tool", { tool: "weather", namespace: "internal" }],
+  ] as const)("rejects an %s before allocating an external ID", (_name, override) => {
+    const { bridge } = createBridge();
+    const call = serverCall("rpc-secret", override.tool);
+    call.params.namespace = override.namespace;
+
+    expect(() => bridge.register(call, context())).toThrowError(
+      expect.objectContaining({ code: "codex_protocol_error", status: 502 }),
+    );
+    expect(call.reject).toHaveBeenCalledWith(
+      -32602,
+      "Tool call did not match the active turn",
+    );
+    expect(bridge.pending).toBe(0);
+    expect(JSON.stringify(vi.mocked(call.reject).mock.calls)).not.toContain(
+      "filesystem",
+    );
   });
 
   it("does not resolve a partial set and rejects unknown or duplicate IDs", async () => {

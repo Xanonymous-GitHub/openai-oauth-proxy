@@ -496,6 +496,82 @@ describe("POST /v1/responses", () => {
     expect(invocations).toHaveLength(1);
   });
 
+  it("inherits identical completed-response tools and rejects every configuration mismatch before reservation", async () => {
+    const definitions = [
+      {
+        type: "function" as const,
+        name: "lookup",
+        description: "Lookup",
+        parameters: { type: "object", properties: { id: { type: "string" } } },
+      },
+    ];
+    const changed = [
+      {
+        ...definitions[0],
+        parameters: { type: "object", properties: { id: { type: "number" } } },
+      },
+    ];
+
+    const matching = createFixture();
+    const source = await postJson(matching.app, {
+      model: "gpt-5.4",
+      input: "source",
+      tools: definitions,
+    });
+    const continued = await postResponse(matching.app, {
+      model: "gpt-5.4",
+      input: "continue",
+      previous_response_id: source.id,
+      tools: definitions,
+    });
+    expect(continued.status).toBe(200);
+    expect(matching.invocations[1]?.command).toMatchObject({
+      action: { type: "resume", threadId: "thread-1" },
+      dynamicTools: [{ name: "lookup" }],
+    });
+
+    for (const requested of [
+      { tools: [] },
+      { tools: changed },
+      { tools: definitions, tool_choice: "none" },
+    ]) {
+      const fixture = createFixture();
+      const parent = await postJson(fixture.app, {
+        model: "gpt-5.4",
+        input: "source",
+        tools: definitions,
+      });
+      const reserve = vi.spyOn(fixture.store, "reserveOperation");
+      const mismatch = await postResponse(fixture.app, {
+        model: "gpt-5.4",
+        input: "mismatch",
+        previous_response_id: parent.id,
+        ...requested,
+      });
+      expect(mismatch.status).toBe(400);
+      expect(await mismatch.json()).toMatchObject({
+        error: { code: "tool_definitions_changed", param: "tools" },
+      });
+      expect(reserve).not.toHaveBeenCalled();
+      expect(fixture.invocations).toHaveLength(1);
+    }
+
+    const added = createFixture();
+    const noToolsParent = await postJson(added.app, {
+      model: "gpt-5.4",
+      input: "source",
+    });
+    const reserve = vi.spyOn(added.store, "reserveOperation");
+    const mismatch = await postResponse(added.app, {
+      model: "gpt-5.4",
+      input: "mismatch",
+      previous_response_id: noToolsParent.id,
+      tools: definitions,
+    });
+    expect(mismatch.status).toBe(400);
+    expect(reserve).not.toHaveBeenCalled();
+  });
+
   it("returns response_not_found after a stored response expires", async () => {
     const { app, invocations } = createFixture();
     const first = await postJson(app, { model: "gpt-5.4", input: "first" });
@@ -778,6 +854,88 @@ describe("POST /v1/responses", () => {
     });
     expect(fixture.host.turnStart).toHaveBeenCalledOnce();
     expect(fixture.host.toolCalls).toHaveBeenCalledOnce();
+  });
+
+  it("forwards a resumed Responses delta before the continuation result resolves", async () => {
+    const fixture = createToolFixture();
+    const respond = vi.fn(() => {
+      fixture.events.push({
+        generation: 1,
+        method: "item/agentMessage/delta",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "message-live",
+          delta: "live continuation",
+        },
+      });
+    });
+    vi.mocked(fixture.host.turnStart).mockImplementationOnce(async () => {
+      fixture.tools.push({
+        generation: 1,
+        id: "rpc-live",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          callId: "internal-live",
+          namespace: null,
+          tool: "lookup",
+          arguments: {},
+        },
+        respond,
+        reject: vi.fn(),
+      });
+      return { turn: fakeTurn() };
+    });
+    const definitions = [
+      { type: "function" as const, name: "lookup", parameters: {} },
+    ];
+    const suspended = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      input: "lookup",
+      tools: definitions,
+    });
+    const suspendedBody = (await suspended.json()) as {
+      id: string;
+      output: Array<{ call_id: string }>;
+    };
+    const continueSpy = vi.spyOn(fixture.runner.tools, "continue");
+    const response = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      previous_response_id: suspendedBody.id,
+      tools: definitions,
+      stream: true,
+      input: [
+        {
+          type: "function_call_output",
+          call_id: suspendedBody.output[0]?.call_id,
+          output: "found",
+        },
+      ],
+    });
+    const continuation = await continueSpy.mock.results[0]?.value;
+    if (continuation?.type !== "continued") throw new Error("Not continued");
+    let finalResolved = false;
+    void continuation.result.finally(() => {
+      finalResolved = true;
+    });
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error("Missing response body");
+    const decoder = new TextDecoder();
+    let payload = "";
+    while (!payload.includes("live continuation")) {
+      const next = await reader.read();
+      if (next.done) throw new Error("Stream ended before live delta");
+      payload += decoder.decode(next.value, { stream: true });
+    }
+
+    expect(finalResolved).toBe(false);
+    fixture.complete("complete");
+    while (!(await reader.read()).done) {
+      // Drain the terminal events after proving the timing boundary.
+    }
+    expect(finalResolved).toBe(true);
+    expect(payload).toContain("response.output_text.delta");
   });
 
   it("returns stable lost semantics for an old-generation pending response", async () => {
@@ -1825,7 +1983,10 @@ describe("Responses expiry cleanup", () => {
 
     expect(store.lookup(rootId)).toBeUndefined();
     expect(deleteThread).toHaveBeenCalledTimes(1);
-    expect(deleteThread).toHaveBeenLastCalledWith("thread-child");
+    expect(deleteThread).toHaveBeenLastCalledWith(
+      "thread-child",
+      expect.any(AbortSignal),
+    );
     expect(store.deletableLeafThreads()).toEqual([
       "thread-child",
       "thread-root",
@@ -1856,7 +2017,10 @@ describe("Responses expiry cleanup", () => {
 
     await sweepExpiredResponses({ store, deleteThread });
 
-    expect(deleteThread).toHaveBeenCalledWith("thread-crashed-start");
+    expect(deleteThread).toHaveBeenCalledWith(
+      "thread-crashed-start",
+      expect.any(AbortSignal),
+    );
     expect(store.lookupOperation("resp_crashed_start")).toBeUndefined();
   });
 
@@ -1893,7 +2057,39 @@ describe("Responses expiry cleanup", () => {
     finishDelete();
     await stopping;
 
-    expect(store.deletableLeafThreads()).toEqual([]);
+    expect(store.deletableLeafThreads()).toEqual(["thread-timed"]);
+  });
+
+  it("aborts a never-settling sweep RPC and preserves it for retry on stop", async () => {
+    const store = openStore();
+    complete(store, "thread-stuck", "turn-stuck");
+    now += 7 * DAY_MS;
+    let sweepSignal: AbortSignal | undefined;
+    const deleteThread = vi.fn(
+      async (_threadId: string, signal?: AbortSignal) => {
+        sweepSignal = signal;
+        return new Promise<void>(() => undefined);
+      },
+    );
+    const sweeper = startResponseSweeper({
+      store,
+      deleteThread,
+      timers: {
+        setInterval: () => 1,
+        clearInterval: vi.fn(),
+      },
+    });
+    await vi.waitFor(() => expect(deleteThread).toHaveBeenCalledOnce());
+
+    await expect(
+      Promise.race([
+        sweeper.stop().then(() => "stopped"),
+        new Promise((resolve) => setTimeout(() => resolve("timed out"), 100)),
+      ]),
+    ).resolves.toBe("stopped");
+
+    expect(sweepSignal?.aborted).toBe(true);
+    expect(store.deletableLeafThreads()).toEqual(["thread-stuck"]);
   });
 
   it("retries on the next timer tick after a sweep rejects", async () => {
@@ -1973,12 +2169,14 @@ describe("Responses expiry cleanup", () => {
         cwd: startCwd,
         sourceKinds: ["appServer"],
       }),
+      expect.any(AbortSignal),
     );
     expect(threadList).toHaveBeenCalledWith(
       expect.objectContaining({
         cwd: forkCwd,
         sourceKinds: ["appServer"],
       }),
+      expect.any(AbortSignal),
     );
     expect(
       threadDelete.mock.calls.map(([{ threadId }]) => threadId).sort(),

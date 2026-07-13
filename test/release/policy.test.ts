@@ -40,6 +40,26 @@ describe("release policy", () => {
     expect(dependabot).not.toMatch(/package-ecosystem:\s*["']?(npm|bun)/);
   });
 
+  it("publishes immutable multiarch GHCR releases with digest validation and supply-chain evidence", () => {
+    const workflow = read(".github/workflows/release.yml");
+    expect(workflow).toMatch(/tags:\s*\n\s*- ["']v\*/);
+    expect(workflow).toContain("packages: write");
+    expect(workflow).toContain("linux/amd64,linux/arm64");
+    expect(workflow).toContain("push: true");
+    expect(workflow).toContain("ghcr.io");
+    expect(workflow).toMatch(/sha256:\[0-9a-f\]\{64\}/);
+    expect(workflow).toContain("docker buildx imagetools inspect");
+    expect(workflow).toMatch(/linux\/amd64/);
+    expect(workflow).toMatch(/linux\/arm64/);
+    expect(workflow).toMatch(/provenance: true/);
+    expect(workflow).toMatch(/sbom/i);
+    expect(workflow).toMatch(/vulnerab|scan/i);
+    expect(workflow).toMatch(/already exists|refusing to overwrite/i);
+    for (const action of workflow.matchAll(/uses:\s*[^@\s]+@([^\s]+)/g)) {
+      expect(action[1]).toMatch(/^[a-f0-9]{40}$/);
+    }
+  });
+
   it("documents operator, support, security, and non-goal contracts", () => {
     const documentation = `${read("README.md")}\n${read("deploy/README.md")}`;
     for (const phrase of [

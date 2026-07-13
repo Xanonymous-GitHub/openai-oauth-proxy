@@ -60,6 +60,11 @@ class FixtureTools {
     return JSON.stringify(tools);
   }
 
+  configuration(tools: unknown, toolChoice: "auto" | "none") {
+    const canonical = JSON.stringify({ toolChoice, tools });
+    return { canonical, fingerprint: canonical };
+  }
+
   async continue(request: {
     toolFingerprint: string;
     results: Array<{ callId: string; output: string }>;
@@ -88,19 +93,26 @@ class FixtureTools {
     this.completedRoundWidths.push(pending.calls.length);
     this.pending = undefined;
     const next = this.nextRound(request.toolFingerprint);
+    const result = next ?? {
+      threadId: "thread-tools",
+      turnId: "turn-tools",
+      text: "tool loop complete",
+      finishReason: "stop" as const,
+      usage: { inputTokens: 2, outputTokens: 2, totalTokens: 4 },
+    };
     return {
       type: "continued" as const,
       threadId: "thread-tools",
       turnId: "turn-tools",
-      result: Promise.resolve(
-        next ?? {
-          threadId: "thread-tools",
-          turnId: "turn-tools",
-          text: "tool loop complete",
-          finishReason: "stop" as const,
-          usage: { inputTokens: 2, outputTokens: 2, totalTokens: 4 },
-        },
-      ),
+      result: Promise.resolve(result),
+      events: (async function* () {
+        if (result.text !== "")
+          yield { type: "text.delta" as const, delta: result.text };
+        for (const call of result.toolCalls ?? []) {
+          yield { type: "tool.call" as const, call };
+        }
+        yield { type: "completed" as const, result };
+      })(),
     };
   }
 

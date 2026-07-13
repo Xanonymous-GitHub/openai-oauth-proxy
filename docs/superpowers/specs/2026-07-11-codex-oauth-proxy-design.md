@@ -70,7 +70,7 @@ ChatGPT subscription billing and OpenAI Platform API billing are separate. Codex
 
 ```text
 Bifrost built-in OpenAI provider                  Administrator browser
-base_url = proxy /v1                             through kubectl port-forward
+base_url = proxy origin                          through kubectl port-forward
              |                                               |
              v                                               v
 +--------------------------- Hono HTTP module ---------------------------+
@@ -318,6 +318,8 @@ Background mode, Conversations resources, remote files, Platform built-in tools,
 When `store` is omitted or `true`, mappings and Codex history use a seven-day sliding expiry. When `store=false`, the thread is deleted after a final result and its response ID cannot be resumed. Requests that combine `store=false` with function tools are rejected because a tool result requires resumable suspended-turn state.
 
 Tool calls use the same suspended-turn bridge as Chat Completions.
+
+Codex 0.144.1 accepts `dynamicTools` only on `thread/start`; `thread/resume` and `thread/fork` inherit but cannot replace that configuration. Each completed stored response therefore persists the effective canonical function definitions, `tool_choice`, and fingerprint. A continuation must match all three exactly before a lease or App Server call; add, remove, change, and `none` mismatches fail with `tool_definitions_changed`. New lineages may define tools normally.
 
 A Responses result containing pending function calls may be used only to submit results for those calls. It cannot be used as a branch point until the suspended turn completes. The pending-tool lease remains exclusive across the two HTTP requests; matching tool results take over that lease, while unrelated continuation attempts receive `thread_busy`. Timeout interrupts the turn and releases the lease.
 
@@ -701,7 +703,7 @@ A live ChatGPT-account suite is opt-in because it consumes subscription capacity
         }
       ],
       "network_config": {
-        "base_url": "http://openai-oauth-proxy.namespace.svc.cluster.local:8080/v1",
+        "base_url": "http://openai-oauth-proxy.namespace.svc.cluster.local:8080",
         "allow_private_network": true
       }
     }
@@ -710,6 +712,8 @@ A live ChatGPT-account suite is opt-in because it consumes subscription capacity
 ```
 
 `OPENAI_PROXY_TOKEN` authenticates Bifrost to this proxy. It is not an OpenAI credential.
+
+The URL is the proxy origin without `/v1` because Bifrost appends the incoming `/v1/*` path. Including `/v1` here would address a doubled API path.
 
 ## Acceptance Criteria
 

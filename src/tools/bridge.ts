@@ -4,7 +4,7 @@ import type { DynamicToolSpec } from "../codex/generated/v2/DynamicToolSpec.js";
 import type { CodexHost, PendingServerToolCall } from "../codex/host.js";
 import { ProxyError } from "../http/errors.js";
 import type { JsonObject } from "../openai/types.js";
-import type { TurnResult } from "../turns/events.js";
+import type { ProxyStreamEvent, TurnResult } from "../turns/events.js";
 
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1_000;
 const TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
@@ -41,10 +41,16 @@ export interface ToolBridgeContext {
   leaseOwner: string;
   generation: number;
   toolFingerprint: string;
+  toolDefinitions: readonly DynamicToolSpec[];
   signal?: AbortSignal;
   finish?(): void;
-  resume(signal?: AbortSignal): Promise<TurnResult>;
+  resume(signal?: AbortSignal): ResumedToolStage;
   invalidate(): void | Promise<void>;
+}
+
+export interface ResumedToolStage {
+  result: Promise<TurnResult>;
+  events: AsyncIterable<ProxyStreamEvent>;
 }
 
 export interface ToolResultInput {
@@ -67,6 +73,7 @@ export type ToolContinuation =
       threadId: string;
       turnId: string;
       result: Promise<TurnResult>;
+      events: AsyncIterable<ProxyStreamEvent>;
       signal?: AbortSignal;
       finish?(): void;
     }
@@ -211,6 +218,18 @@ export class ToolBridge {
     return createHash("sha256").update(stableJson(tools)).digest("base64url");
   }
 
+  configuration(
+    tools: readonly (ChatFunctionTool | ResponsesFunctionTool)[],
+    toolChoice: "auto" | "none",
+  ): { canonical: string; fingerprint: string } {
+    const effectiveTools = toolChoice === "none" ? [] : tools;
+    const canonical = stableJson({ toolChoice, tools: effectiveTools });
+    return {
+      canonical,
+      fingerprint: createHash("sha256").update(canonical).digest("base64url"),
+    };
+  }
+
   register(
     call: PendingServerToolCall,
     context: ToolBridgeContext,
@@ -219,7 +238,10 @@ export class ToolBridge {
       call.generation !== context.generation ||
       call.params.threadId !== context.threadId ||
       call.params.turnId !== context.turnId ||
-      call.params.namespace !== null
+      call.params.namespace !== null ||
+      !context.toolDefinitions.some(
+        (definition) => definition.name === call.params.tool,
+      )
     ) {
       call.reject(-32602, "Tool call did not match the active turn");
       throw new ProxyError(
@@ -346,7 +368,7 @@ export class ToolBridge {
       );
     }
 
-    const nextResult = turn.context.resume(request.signal);
+    const nextStage = turn.context.resume(request.signal);
     if (turn.timer) clearTimeout(turn.timer);
     turn.timer = undefined;
     try {
@@ -373,7 +395,8 @@ export class ToolBridge {
       type: "continued",
       threadId: turn.context.threadId,
       turnId: turn.context.turnId,
-      result: nextResult,
+      result: nextStage.result,
+      events: nextStage.events,
       ...(turn.context.signal === undefined
         ? {}
         : { signal: turn.context.signal }),
