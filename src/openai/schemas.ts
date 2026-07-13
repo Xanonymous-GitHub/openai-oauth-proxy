@@ -95,6 +95,7 @@ const toolMessageSchema = z.strictObject({
   role: z.literal("tool"),
   tool_call_id: nonEmptyString,
   content: z.string(),
+  name: nonEmptyString.optional(),
 });
 
 export const chatMessageSchema = z.discriminatedUnion("role", [

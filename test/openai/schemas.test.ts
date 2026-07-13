@@ -62,7 +62,12 @@ describe("parseChatRequest", () => {
             },
           ],
         },
-        { role: "tool", tool_call_id: "call_external_1", content: "found" },
+        {
+          role: "tool",
+          tool_call_id: "call_external_1",
+          content: "found",
+          name: "terminal",
+        },
         { role: "user", content: "continue" },
       ],
       stream: true,
