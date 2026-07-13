@@ -126,3 +126,34 @@ The real Bifrost contract passed against `maximhq/bifrost:v1.6.3@sha256:95caedb1
 Graphify's final code-only pass analyzed 44 test files and about 41,200 words, producing 278 nodes, 313 edges, 34 communities, no import cycles, and an estimated 86.0x query-token reduction. The leading cross-community bridges are `runRealAppServerContract()`, `runRecoveryContract()`, `runAgentSmoke()`, and `startFakeResponsesServer()`.
 
 Residual constraints are unchanged: Hermes is unavailable locally but mandatory in Linux CI; the live ChatGPT suite was not opted in; SBOM and vulnerability scanning remain immutable CI-only gates. No credential, image, cluster resource, graph artifact, branch, or commit was pushed.
+
+## Final Matrix And Cleanup Wave
+
+Task 15 implementation lineage:
+
+- `b2cc961` (`test: add proxy release gate`) added the initial release contracts.
+- `3b08735` (`test: harden proxy release gate`) closed the first final-review gaps for multi-round clients, runtime protocol schemas, process recovery, Bifrost errors, manifest platforms, process-log sentinels, Docker topology, and live timeout.
+- `14483f1` (`test: close Task 15 release gaps`) added the exhaustive official-SDK matrix, upstream-failure log sentinels, shutdown-inclusive log capture, and failure-safe chaos child cleanup.
+
+The official OpenAI listener gate is now data-driven across every documented supported Chat and Responses concept. Each supported concept has an independent typed SDK request. Twenty-six distinct rejected branches use a cast only at the invalid SDK call boundary and assert exact HTTP `400` status, stable `unsupported_field` or `invalid_request` code, and parameter path. Focused SDK verification passed `57` tests.
+
+The production process-log fixture now rejects `turn/start` with unique credential, filesystem-path, header, and upstream-body sentinels. The failure traverses App Server JSON-RPC, proxy error handling, and production request logging. The fixture terminates and awaits the proxy child before taking its combined stdout/stderr snapshot, so shutdown output is included; all request, event, child-stderr, and upstream-failure sentinel matches remain zero.
+
+Both sequential chaos proxy children are held by the outer `finally`. Startup failures terminate their child before escaping, and outer cleanup attempts both child closures even if one fails. An induced intermediate failure captures the first child PID and verifies `ESRCH` after `runRecoveryContract()` rejects.
+
+Final verification:
+
+```bash
+bun run protocol:check
+bun run deps:check
+bun run check
+bunx vitest run test/integration test/compat test/chaos test/security
+```
+
+All commands exited `0`. Biome checked 83 files, TypeScript and the production build passed, the complete suite passed `459` tests in 34 files with two intentional skips, and the explicit offline release subset passed `72` tests in 7 files with one Hermes skip.
+
+The final standalone multiarch OCI build passed for amd64 and arm64 with manifest list `sha256:0370d88c7f8261cb0bcf64e1a9f9c9758499f6d98ef978870dea7164145bd9ea`. Kubernetes client dry-run again passed the Service, PVC, StatefulSet, and NetworkPolicy.
+
+Graphify's refreshed code-only pass analyzed 44 test files and about 43,057 words, producing 286 nodes, 324 edges, 34 communities, no import cycles, and an estimated 90.1x query-token reduction. `ListeningProxyFixture`, `runRealAppServerContract()`, `runRecoveryContract()`, `runAgentSmoke()`, and `startFakeResponsesServer()` remain the principal release-contract bridges.
+
+Residual constraints remain explicit: Hermes is unavailable locally but mandatory in Linux CI; the live ChatGPT suite was not opted in; SBOM and vulnerability scanning remain immutable CI-only gates. No push was performed.
