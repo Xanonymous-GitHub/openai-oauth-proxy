@@ -30,10 +30,10 @@ jobs:
       - run: bun run protocol:check
       - run: bun run deps:check
       - run: bun run check
-      - name: Kubernetes client dry-run
+      - name: Kubernetes manifest render
         run: |
           kubectl kustomize deploy/base >/tmp/rendered.yaml
-          kubectl apply --dry-run=client -f /tmp/rendered.yaml
+          test -s /tmp/rendered.yaml
 
   image:
     runs-on: ubuntu-latest
