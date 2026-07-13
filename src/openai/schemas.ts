@@ -55,6 +55,7 @@ const chatUserContentSchema = z.union([
 ]);
 
 const assistantToolCallSchema = z.strictObject({
+  index: z.number().int().nonnegative().optional(),
   id: nonEmptyString,
   type: z.literal("function"),
   function: z.strictObject({
@@ -140,6 +141,9 @@ const chatRequestSchema = z.strictObject({
   tools: z.array(chatFunctionToolSchema).optional(),
   tool_choice: z.enum(["auto", "none"]).optional(),
   parallel_tool_calls: z.literal(true).optional(),
+  max_completion_tokens: z.number().int().positive().max(32_000).optional(),
+  stream_options: z.strictObject({ include_usage: z.literal(true) }).optional(),
+  verbosity: z.enum(["low", "medium", "high"]).optional(),
   reasoning_effort: reasoningEffortSchema.optional(),
   response_format: chatResponseFormatSchema.optional(),
 });

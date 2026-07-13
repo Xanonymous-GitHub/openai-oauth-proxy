@@ -1,0 +1,50 @@
+name: Dependency update
+
+on:
+  schedule:
+    - cron: "17 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    env:
+      REQUIRE_EXTERNAL_AGENTS: "1"
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: "26.5.0"
+          cache: ""
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: "1.3.14"
+      - name: Install pinned external agent clients
+        run: |
+          npm install --global opencode-ai@1.17.18
+          python3 -m pip install hermes-agent==0.15.2
+      - run: bun install --frozen-lockfile
+      - name: Update stable JavaScript dependencies
+        run: |
+          bunx npm-check-updates -u
+          bun install
+      - run: bun run protocol:generate
+      - run: bun run deps:check
+      - run: bun run check
+      - run: bunx vitest run test/integration test/compat test/chaos test/security
+      - name: Kubernetes client dry-run
+        run: |
+          kubectl kustomize deploy/base >/tmp/rendered.yaml
+          kubectl apply --dry-run=client -f /tmp/rendered.yaml
+      - name: Open dependency pull request
+        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676
+        with:
+          branch: automation/dependency-update
+          delete-branch: true
+          commit-message: "chore: update dependencies"
+          title: "chore: update dependencies"
+          body: "Scheduled stable dependency update. Generated protocol, offline tests, and Kubernetes client validation ran before this PR was opened."

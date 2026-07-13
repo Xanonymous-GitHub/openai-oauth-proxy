@@ -279,7 +279,7 @@ describe("deployment examples", () => {
           ],
           network_config: {
             base_url:
-              "http://openai-oauth-proxy.namespace.svc.cluster.local:8080/v1",
+              "http://openai-oauth-proxy.namespace.svc.cluster.local:8080",
             allow_private_network: true,
           },
         },

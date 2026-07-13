@@ -244,6 +244,14 @@ it("returns only sanitized account state fields", async () => {
   expect(body).not.toMatch(/auth\.json|accessToken|refreshToken|idToken/);
 });
 
+it("serializes checking without adding credential fields", async () => {
+  const { app } = fixture({ type: "checking" });
+
+  const response = await app.request("/api/state");
+
+  expect(await response.json()).toMatchObject({ state: { type: "checking" } });
+});
+
 it("serves a framework-free page and external script under a restrictive CSP", async () => {
   const { app } = fixture();
 
@@ -331,6 +339,56 @@ it("bootstraps a fresh session after a forbidden mutation without rendering miss
     "/api/state",
   ]);
   expect(elements.get("status")?.textContent).toBe("signed_out");
+});
+
+it("renders a reload message when an admin mutation is rejected by the network", async () => {
+  const { app } = fixture();
+  const javascript = await (await app.request("/app.js")).text();
+  const listeners = new Map<string, Map<string, (event?: Event) => void>>();
+  const elements = new Map(
+    [
+      "status",
+      "email",
+      "plan",
+      "verification-url",
+      "user-code",
+      "login-form",
+      "refresh",
+      "cancel",
+      "logout",
+    ].map((id) => [
+      id,
+      {
+        textContent: "",
+        addEventListener(type: string, listener: (event?: Event) => void) {
+          const byType = listeners.get(id) ?? new Map();
+          byType.set(type, listener);
+          listeners.set(id, byType);
+        },
+      },
+    ]),
+  );
+  const fetchMock = vi
+    .fn<typeof fetch>()
+    .mockResolvedValueOnce(
+      Response.json({
+        state: { type: "signed_out" },
+        csrfToken: "initial-csrf",
+      }),
+    )
+    .mockRejectedValueOnce(new TypeError("network failed"));
+
+  new Function("document", "fetch", javascript)(
+    { getElementById: (id: string) => elements.get(id) },
+    fetchMock,
+  );
+  await flush();
+  listeners.get("refresh")?.get("click")?.();
+  await flush();
+
+  expect(elements.get("status")?.textContent).toBe(
+    "Session unavailable. Reload this page.",
+  );
 });
 
 it("sanitizes account-operation failures", async () => {

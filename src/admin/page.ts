@@ -72,24 +72,28 @@ async function bootstrap() {
 }
 
 async function request(path, body) {
-  const options = body === undefined ? {} : {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-csrf-token": csrfToken },
-    body: JSON.stringify(body),
-  };
-  const response = await fetch(path, options);
-  if (response.status === 401 || response.status === 403) {
-    csrfToken = "";
-    await bootstrap();
-    return;
-  }
-  const result = await responseJson(response);
-  if (!result || !result.state) {
+  try {
+    const options = body === undefined ? {} : {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-csrf-token": csrfToken },
+      body: JSON.stringify(body),
+    };
+    const response = await fetch(path, options);
+    if (response.status === 401 || response.status === 403) {
+      csrfToken = "";
+      await bootstrap();
+      return;
+    }
+    const result = await responseJson(response);
+    if (!result || !result.state) {
+      showReload();
+      return;
+    }
+    if (result.csrfToken) csrfToken = result.csrfToken;
+    render(result.state);
+  } catch {
     showReload();
-    return;
   }
-  if (result.csrfToken) csrfToken = result.csrfToken;
-  render(result.state);
 }
 
 document.getElementById("login-form").addEventListener("submit", (event) => {

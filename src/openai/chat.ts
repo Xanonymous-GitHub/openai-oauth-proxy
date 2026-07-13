@@ -263,6 +263,21 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
         lastMessage?.role === "user"
           ? translateTurnInput(lastMessage.content)
           : [],
+      ...(request.max_completion_tokens === undefined &&
+      request.verbosity === undefined
+        ? {}
+        : {
+            instructions: [
+              request.max_completion_tokens === undefined
+                ? undefined
+                : `Limit the final answer to at most ${request.max_completion_tokens} tokens.`,
+              request.verbosity === undefined
+                ? undefined
+                : `Use ${request.verbosity} verbosity.`,
+            ]
+              .filter((instruction) => instruction !== undefined)
+              .join("\n"),
+          }),
       ...(request.reasoning_effort === undefined
         ? {}
         : { effort: request.reasoning_effort }),
