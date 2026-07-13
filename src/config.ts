@@ -3,7 +3,7 @@ import { z } from "zod";
 export interface Config {
   dataHost: "0.0.0.0";
   dataPort: number;
-  adminHost: "127.0.0.1";
+  adminHost: "127.0.0.1" | "0.0.0.0";
   adminPort: number;
   dataDir: string;
   codexHome: string;
@@ -22,6 +22,7 @@ const boundedInteger = (fallback: number, minimum: number, maximum: number) =>
 
 const envSchema = z.strictObject({
   DATA_PORT: boundedInteger(8080, 1, 65_535),
+  ADMIN_HOST: z.enum(["127.0.0.1", "0.0.0.0"]).default("127.0.0.1"),
   ADMIN_PORT: boundedInteger(8081, 1, 65_535),
   DATA_DIR: z.string().min(1),
   CODEX_HOME: z.string().min(1).optional(),
@@ -38,6 +39,7 @@ const envSchema = z.strictObject({
 export function loadConfig(env: NodeJS.ProcessEnv): Config {
   const parsed = envSchema.parse({
     DATA_PORT: env.DATA_PORT,
+    ADMIN_HOST: env.ADMIN_HOST,
     ADMIN_PORT: env.ADMIN_PORT,
     DATA_DIR: env.DATA_DIR,
     CODEX_HOME: env.CODEX_HOME,
@@ -54,7 +56,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
   return {
     dataHost: "0.0.0.0",
     dataPort: parsed.DATA_PORT,
-    adminHost: "127.0.0.1",
+    adminHost: parsed.ADMIN_HOST,
     adminPort: parsed.ADMIN_PORT,
     dataDir: parsed.DATA_DIR,
     codexHome: parsed.CODEX_HOME ?? `${parsed.DATA_DIR}/codex`,

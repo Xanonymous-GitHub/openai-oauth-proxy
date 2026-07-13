@@ -21,6 +21,12 @@ describe("loadConfig", () => {
     });
   });
 
+  it("allows exposing the admin listener for a host-loopback Docker port", () => {
+    expect(loadConfig({ ...valid, ADMIN_HOST: "0.0.0.0" }).adminHost).toBe(
+      "0.0.0.0",
+    );
+  });
+
   it.each([
     [{ ...valid, BIFROST_PROXY_TOKEN: "short" }, "BIFROST_PROXY_TOKEN"],
     [{ ...valid, MAX_ACTIVE_TURNS: "17" }, "MAX_ACTIVE_TURNS"],
