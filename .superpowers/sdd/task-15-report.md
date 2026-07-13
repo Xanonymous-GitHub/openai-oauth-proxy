@@ -157,3 +157,20 @@ The final standalone multiarch OCI build passed for amd64 and arm64 with manifes
 Graphify's refreshed code-only pass analyzed 44 test files and about 43,057 words, producing 286 nodes, 324 edges, 34 communities, no import cycles, and an estimated 90.1x query-token reduction. `ListeningProxyFixture`, `runRealAppServerContract()`, `runRecoveryContract()`, `runAgentSmoke()`, and `startFakeResponsesServer()` remain the principal release-contract bridges.
 
 Residual constraints remain explicit: Hermes is unavailable locally but mandatory in Linux CI; the live ChatGPT suite was not opted in; SBOM and vulnerability scanning remain immutable CI-only gates. No push was performed.
+
+## Official SDK Matrix Follow-Up
+
+Implementation commit: `7a638db46389f6b96b963499a1831fb3e75c2fa8` (`fix: complete official SDK matrix`).
+
+The prior verified full-suite session ran `bun run check` successfully: Biome, TypeScript, the production build, and all `470` tests in 34 files passed, with the same two intentional skips documented above.
+
+Fresh finisher verification:
+
+```bash
+bunx vitest run test/compat/openai-client.test.ts test/openai/schemas.test.ts
+bun run typecheck
+bunx biome check README.md docs/superpowers/specs/2026-07-11-codex-oauth-proxy-design.md src/openai/chat.ts src/openai/schemas.ts test/compat/openai-client.test.ts test/openai/schemas.test.ts
+git diff --check HEAD -- README.md docs/superpowers/specs/2026-07-11-codex-oauth-proxy-design.md src/openai/chat.ts src/openai/schemas.ts test/compat/openai-client.test.ts test/openai/schemas.test.ts
+```
+
+All commands exited `0`. The focused run passed `117` tests in two files: `68` official OpenAI JavaScript client compatibility tests and `49` schema tests. Biome checked the four supported source/test files with no findings; the two Markdown paths were ignored by the configured formatter. The reviewed matrix covers Responses `store=false`, rejection of `store=false` with tools before thread work, Chat `stream_options.include_usage=false`, exact rejection of unknown stream-option members, and seven unsupported official-SDK endpoint families returning `404`, `unsupported_endpoint`, and `param: null`.
