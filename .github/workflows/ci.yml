@@ -48,20 +48,48 @@ jobs:
           platforms: linux/amd64,linux/arm64
           outputs: type=oci,dest=/tmp/openai-oauth-proxy.oci
           provenance: true
-      - name: Generate image SBOM
+      - name: Select platform OCI images
+        run: |
+          set -euo pipefail
+          for architecture in amd64 arm64; do
+            layout="/tmp/openai-oauth-proxy-${architecture}.oci"
+            mkdir "$layout"
+            tar -xf /tmp/openai-oauth-proxy.oci -C "$layout"
+            root_index_digest="$(jq -r '.manifests[0].digest' "$layout/index.json" | cut -d: -f2)"
+            jq -e --arg architecture "$architecture" \
+              '(.manifests |= map(select(.platform.os == "linux" and .platform.architecture == $architecture))) | if (.manifests | length) == 1 then . else error("expected one platform manifest") end' \
+              "$layout/blobs/sha256/$root_index_digest" > "$layout/index.json"
+          done
+      - name: Generate linux/amd64 image SBOM
         uses: anchore/sbom-action@v0
         with:
-          image: oci-archive:/tmp/openai-oauth-proxy.oci
+          image: oci-dir:/tmp/openai-oauth-proxy-amd64.oci
           format: spdx-json
-          output-file: /tmp/openai-oauth-proxy.spdx.json
-      - name: Scan SBOM for vulnerabilities
+          output-file: /tmp/openai-oauth-proxy-amd64.spdx.json
+          upload-artifact: false
+      - name: Scan linux/amd64 SBOM for vulnerabilities
         uses: anchore/scan-action@v7
         with:
-          sbom: /tmp/openai-oauth-proxy.spdx.json
+          sbom: /tmp/openai-oauth-proxy-amd64.spdx.json
+          fail-build: true
+          severity-cutoff: high
+      - name: Generate linux/arm64 image SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: oci-dir:/tmp/openai-oauth-proxy-arm64.oci
+          format: spdx-json
+          output-file: /tmp/openai-oauth-proxy-arm64.spdx.json
+          upload-artifact: false
+      - name: Scan linux/arm64 SBOM for vulnerabilities
+        uses: anchore/scan-action@v7
+        with:
+          sbom: /tmp/openai-oauth-proxy-arm64.spdx.json
           fail-build: true
           severity-cutoff: high
       - uses: actions/upload-artifact@v7
         with:
           name: openai-oauth-proxy-sbom
-          path: /tmp/openai-oauth-proxy.spdx.json
+          path: |
+            /tmp/openai-oauth-proxy-amd64.spdx.json
+            /tmp/openai-oauth-proxy-arm64.spdx.json
           if-no-files-found: error
