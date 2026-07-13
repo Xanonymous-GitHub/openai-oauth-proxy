@@ -52,7 +52,7 @@ jobs:
             echo "Version image already exists; refusing to overwrite immutable tag" >&2
             exit 1
           fi
-          if ! grep -Eiq 'manifest unknown' /tmp/version-tag-probe.err; then
+          if ! grep -Eiq 'manifest unknown|not found' /tmp/version-tag-probe.err; then
             cat /tmp/version-tag-probe.err >&2
             echo "Unable to verify version tag absence; refusing to publish" >&2
             exit 1
@@ -67,7 +67,7 @@ jobs:
             echo "Source image already exists; refusing to overwrite immutable tag" >&2
             exit 1
           fi
-          if ! grep -Eiq 'manifest unknown' /tmp/source-tag-probe.err; then
+          if ! grep -Eiq 'manifest unknown|not found' /tmp/source-tag-probe.err; then
             cat /tmp/source-tag-probe.err >&2
             echo "Unable to verify source tag absence; refusing to publish" >&2
             exit 1

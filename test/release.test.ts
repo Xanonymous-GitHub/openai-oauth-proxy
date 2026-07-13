@@ -17,4 +17,10 @@ describe("release workflow", () => {
     );
     expect(workflow).not.toContain("github.repository_owner");
   });
+
+  it("accepts GHCR's absent-tag response when protecting immutable tags", () => {
+    expect(
+      workflow.match(/grep -Eiq 'manifest unknown\|not found'/g) ?? [],
+    ).toHaveLength(2);
+  });
 });
