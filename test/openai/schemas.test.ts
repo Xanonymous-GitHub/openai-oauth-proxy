@@ -176,15 +176,6 @@ describe("parseChatRequest", () => {
       "stream_options",
     ],
     [
-      "disabled stream usage",
-      {
-        ...chatRequest,
-        stream: true,
-        stream_options: { include_usage: false },
-      },
-      "stream_options.include_usage",
-    ],
-    [
       "unknown stream options",
       {
         ...chatRequest,
@@ -225,14 +216,17 @@ describe("parseChatRequest", () => {
     );
   });
 
-  it("accepts the supported streaming usage option", () => {
+  it.each([
+    true,
+    false,
+  ])("accepts streaming include_usage=%s", (include_usage) => {
     expect(
       parseChatRequest({
         ...chatRequest,
         stream: true,
-        stream_options: { include_usage: true },
+        stream_options: { include_usage },
       }).stream_options,
-    ).toEqual({ include_usage: true });
+    ).toEqual({ include_usage });
   });
 
   it.each([

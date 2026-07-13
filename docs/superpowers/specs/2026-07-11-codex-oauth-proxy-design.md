@@ -254,7 +254,7 @@ Supported request concepts:
 - text content;
 - user image parts containing inline `data:` URLs;
 - `stream`;
-- `stream_options` only as `{ "include_usage": true }` for streaming requests, producing a separate usage chunk before `[DONE]`;
+- `stream_options.include_usage` as a boolean for streaming requests: `true` produces a separate usage chunk before `[DONE]`, while `false` suppresses streaming usage;
 - function-only `tools`;
 - `tool_choice` values `auto` and `none`;
 - omitted or `true` `parallel_tool_calls`;

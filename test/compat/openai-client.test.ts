@@ -174,6 +174,18 @@ const rejectionCases: RejectionCase[] = [
     param: "stream_options",
   },
   {
+    concept: "Chat unknown stream option",
+    endpoint: "chat",
+    body: () => ({
+      model: "gpt-5.4",
+      messages: [{ role: "user", content: "reject" }],
+      stream: true,
+      stream_options: { include_usage: true, unknown_fixture_member: true },
+    }),
+    code: "unsupported_field",
+    param: "stream_options.unknown_fixture_member",
+  },
+  {
     concept: "Chat unknown field",
     endpoint: "chat",
     body: () => ({
@@ -663,6 +675,7 @@ describe("official OpenAI JavaScript client compatibility", () => {
     code,
     param,
   }) => {
+    const commandCount = fixture.commands.length;
     const request =
       endpoint === "chat"
         ? client.chat.completions.create(
@@ -674,6 +687,101 @@ describe("official OpenAI JavaScript client compatibility", () => {
             body(fixture) as OpenAI.Responses.ResponseCreateParamsNonStreaming,
           );
     await expect(request).rejects.toMatchObject({ status: 400, code, param });
+    expect(fixture.commands).toHaveLength(commandCount);
+  });
+
+  it("supports non-resumable Responses with store false", async () => {
+    const transient = await client.responses.create({
+      model: "gpt-5.4",
+      input: "transient response",
+      store: false,
+    });
+    expect(transient.output_text).toBe("fixture answer");
+
+    const commandCount = fixture.commands.length;
+    await expect(
+      client.responses.create({
+        model: "gpt-5.4",
+        input: "must not resume",
+        previous_response_id: transient.id,
+        store: true,
+      }),
+    ).rejects.toMatchObject({
+      status: 404,
+      code: "response_not_found",
+      param: "previous_response_id",
+    });
+    expect(fixture.commands).toHaveLength(commandCount);
+  });
+
+  it("rejects store false with function tools before thread work", async () => {
+    const commandCount = fixture.commands.length;
+    await expect(
+      client.responses.create({
+        model: "gpt-5.4",
+        input: "invalid transient tools",
+        store: false,
+        tools: [responseTool],
+      }),
+    ).rejects.toMatchObject({
+      status: 400,
+      code: "store_required_for_tools",
+      param: "store",
+    });
+    expect(fixture.commands).toHaveLength(commandCount);
+  });
+
+  it("honors Chat stream_options include_usage false", async () => {
+    const stream = await client.chat.completions.create({
+      model: "gpt-5.4",
+      messages: [{ role: "user", content: "no streaming usage" }],
+      stream: true,
+      stream_options: { include_usage: false },
+    });
+    const chunks = [];
+    for await (const chunk of stream) chunks.push(chunk);
+
+    expect(chunks.some((chunk) => chunk.choices.length === 0)).toBe(false);
+    expect(chunks.every((chunk) => chunk.usage === undefined)).toBe(true);
+  });
+
+  it.each([
+    {
+      family: "embeddings",
+      request: () =>
+        client.embeddings.create({ model: "gpt-5.4", input: "fixture" }),
+    },
+    {
+      family: "images",
+      request: () =>
+        client.images.generate({ model: "gpt-image-1", prompt: "fixture" }),
+    },
+    {
+      family: "audio",
+      request: () =>
+        client.audio.speech.create({
+          model: "tts-1",
+          voice: "alloy",
+          input: "fixture",
+        }),
+    },
+    { family: "files", request: () => client.files.list() },
+    { family: "batches", request: () => client.batches.list() },
+    {
+      family: "fine-tuning",
+      request: () => client.fineTuning.jobs.list(),
+    },
+    { family: "vector stores", request: () => client.vectorStores.list() },
+  ])("rejects unsupported SDK endpoint family: $family", async ({
+    request,
+  }) => {
+    const commandCount = fixture.commands.length;
+    await expect(request()).rejects.toMatchObject({
+      status: 404,
+      code: "unsupported_endpoint",
+      param: null,
+    });
+    expect(fixture.commands).toHaveLength(commandCount);
   });
 
   it("parses models, Chat Completions, role history, images, and JSON Schema", async () => {

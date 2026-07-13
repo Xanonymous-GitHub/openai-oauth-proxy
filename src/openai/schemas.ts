@@ -139,9 +139,7 @@ const chatRequestSchema = z
     model: nonEmptyString,
     messages: z.array(chatMessageSchema).min(1),
     stream: z.boolean().optional(),
-    stream_options: z
-      .strictObject({ include_usage: z.literal(true) })
-      .optional(),
+    stream_options: z.strictObject({ include_usage: z.boolean() }).optional(),
     tools: z.array(chatFunctionToolSchema).optional(),
     tool_choice: z.enum(["auto", "none"]).optional(),
     parallel_tool_calls: z.literal(true).optional(),

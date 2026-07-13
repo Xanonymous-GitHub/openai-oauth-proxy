@@ -9,7 +9,7 @@ Single-user, single-replica OpenAI-compatible proxy backed by a ChatGPT-authenti
 - `POST /v1/responses`: streaming and non-streaming Responses, stored resume/branch behavior, inline images, JSON Schema output, cancellation, and single/parallel/repeated client function tools.
 - `/healthz`, `/readyz`, and bearer-protected `/metrics` operational endpoints.
 
-Unknown fields and unsupported endpoints fail explicitly. Embeddings, audio, file APIs, remote image URLs, hosted tools, internal Codex tools, multi-user isolation, and a downstream Codex CLI are non-goals. Exact `max_completion_tokens` and `verbosity` semantics are unsupported and rejected rather than ignored. Streaming Chat supports only `stream_options: {"include_usage":true}` and emits the required separate usage chunk; authoritative usage remains App Server-provided.
+Unknown fields and unsupported endpoints fail explicitly. Embeddings, audio, file APIs, remote image URLs, hosted tools, internal Codex tools, multi-user isolation, and a downstream Codex CLI are non-goals. Exact `max_completion_tokens` and `verbosity` semantics are unsupported and rejected rather than ignored. Streaming Chat honors `stream_options.include_usage`: `true` emits the required separate usage chunk and `false` suppresses usage; authoritative usage remains App Server-provided.
 
 ## Bifrost
 

@@ -355,8 +355,8 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
       };
 
       try {
-        const emptyUsage =
-          request.stream_options === undefined ? undefined : null;
+        const includeUsage = request.stream_options?.include_usage === true;
+        const emptyUsage = includeUsage ? null : undefined;
         const continuationStage = continuationResult
           ? await continuationResult
           : undefined;
@@ -456,15 +456,14 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
                   },
                   request.stream_options === undefined
                     ? (event.result.usage ?? usage)
-                    : null,
+                    : includeUsage
+                      ? null
+                      : undefined,
                 ),
               ),
             });
             const finalUsage = event.result.usage ?? usage;
-            if (
-              request.stream_options !== undefined &&
-              finalUsage !== undefined
-            ) {
+            if (includeUsage && finalUsage !== undefined) {
               await writeSSE({
                 data: JSON.stringify({
                   ...identity,
