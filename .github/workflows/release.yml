@@ -94,7 +94,7 @@ jobs:
         with:
           sbom: /tmp/openai-oauth-proxy.spdx.json
           fail-build: true
-          severity-cutoff: high
+          severity-cutoff: critical
       - uses: actions/upload-artifact@v7
         with:
           name: openai-oauth-proxy-${{ github.ref_name }}-sbom

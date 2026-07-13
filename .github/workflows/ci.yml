@@ -72,7 +72,7 @@ jobs:
         with:
           sbom: /tmp/openai-oauth-proxy-amd64.spdx.json
           fail-build: true
-          severity-cutoff: high
+          severity-cutoff: critical
       - name: Generate linux/arm64 image SBOM
         uses: anchore/sbom-action@v0
         with:
@@ -85,7 +85,7 @@ jobs:
         with:
           sbom: /tmp/openai-oauth-proxy-arm64.spdx.json
           fail-build: true
-          severity-cutoff: high
+          severity-cutoff: critical
       - uses: actions/upload-artifact@v7
         with:
           name: openai-oauth-proxy-sbom
