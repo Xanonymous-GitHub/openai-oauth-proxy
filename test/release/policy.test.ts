@@ -45,7 +45,7 @@ describe("release policy", () => {
     expect(workflow).toMatch(/tags:\s*\n\s*- ["']v\*/);
     expect(workflow).toContain("packages: write");
     expect(workflow).toContain("linux/amd64,linux/arm64");
-    expect(workflow).toContain("push: true");
+    expect(workflow).toContain("push=true");
     expect(workflow).toContain("ghcr.io");
     expect(workflow).toMatch(/sha256:\[0-9a-f\]\{64\}/);
     expect(workflow).toContain("docker buildx imagetools inspect");
@@ -55,6 +55,31 @@ describe("release policy", () => {
     expect(workflow).toMatch(/sbom/i);
     expect(workflow).toMatch(/vulnerab|scan/i);
     expect(workflow).toMatch(/already exists|refusing to overwrite/i);
+    const authenticate = workflow.indexOf("name: Authenticate to GHCR");
+    const probe = workflow.indexOf(
+      "name: Refuse to overwrite an existing release tag",
+    );
+    const build = workflow.indexOf("name: Build and push multiarch image");
+    const scan = workflow.indexOf("name: Scan SBOM for vulnerabilities");
+    const tag = workflow.indexOf("name: Create final release tags");
+    const verify = workflow.indexOf("name: Verify published release");
+    expect(authenticate).toBeGreaterThan(0);
+    expect(authenticate).toBeLessThan(probe);
+    expect(probe).toBeLessThan(build);
+    expect(build).toBeLessThan(scan);
+    expect(scan).toBeLessThan(tag);
+    expect(tag).toBeLessThan(verify);
+    expect(workflow).toContain("PROBE_STATUS");
+    expect(workflow).toContain('if [ "$PROBE_STATUS" -eq 0 ]');
+    expect(workflow).toMatch(/if ! grep[^\n]+manifest unknown/i);
+    expect(workflow).toMatch(/manifest unknown/i);
+    expect(workflow).toMatch(/unable to verify release tag absence/i);
+    expect(workflow).not.toMatch(/PROBE_STATUS[^\n]*\|\| true/);
+    expect(workflow).toContain("push-by-digest=true");
+    expect(workflow.slice(build, scan)).not.toContain("tags:");
+    expect(workflow).toContain("docker buildx imagetools create");
+    expect(workflow).toMatch(/attestation-manifest/);
+    expect(workflow).toContain('"$IMAGE:$GITHUB_REF_NAME"');
     for (const action of workflow.matchAll(/uses:\s*[^@\s]+@([^\s]+)/g)) {
       expect(action[1]).toMatch(/^[a-f0-9]{40}$/);
     }

@@ -30,6 +30,8 @@ import {
   startResponseSweeper,
   sweepExpiredResponses,
 } from "../../src/openai/responses.js";
+import { TurnCapacity } from "../../src/operations/capacity.js";
+import { TurnDrainRegistry } from "../../src/operations/drain.js";
 import { createLogger, type Logger } from "../../src/operations/log.js";
 import { ToolBridge } from "../../src/tools/bridge.js";
 import type {
@@ -277,6 +279,8 @@ function createToolFixture(
     logger?: Logger;
     streamAbortAt?: number;
     streamWriteFailureAt?: number;
+    testStream?: boolean;
+    withAdmission?: boolean;
   } = {},
 ) {
   const store = openStore();
@@ -291,6 +295,20 @@ function createToolFixture(
     if (options.deleteThreadError) throw options.deleteThreadError;
   });
   const streamEvents: string[] = [];
+  const capacity = new TurnCapacity(1, 0);
+  const drain = new TurnDrainRegistry();
+  const admissionDone = vi.fn();
+  const register = drain.register.bind(drain);
+  vi.spyOn(drain, "register").mockImplementation((permit, signal) => {
+    const admission = register(permit, signal);
+    return {
+      ...admission,
+      done: () => {
+        admissionDone();
+        admission.done();
+      },
+    };
+  });
   const host = {
     generation: 1,
     modelList: vi.fn(async () =>
@@ -331,6 +349,7 @@ function createToolFixture(
     draining: () => false,
     bifrostToken,
     metricsToken: "m".repeat(32),
+    ...(options.withAdmission ? { capacity, drain } : {}),
     ...(options.logger === undefined ? {} : { logger: options.logger }),
     host,
     responses: {
@@ -341,7 +360,8 @@ function createToolFixture(
       operationWorkingDirectory,
       deleteThread,
       ...(options.streamAbortAt === undefined &&
-      options.streamWriteFailureAt === undefined
+      options.streamWriteFailureAt === undefined &&
+      options.testStream !== true
         ? {}
         : {
             streamSSE: ((
@@ -415,8 +435,11 @@ function createToolFixture(
   };
   return {
     app,
+    admissionDone,
+    capacity,
     complete,
     deleteThread,
+    drain,
     events,
     host,
     operationWorkingDirectory,
@@ -445,6 +468,61 @@ async function postJson(
   const response = await postResponse(app, body);
   expect(response.status).toBe(200);
   return (await response.json()) as Record<string, unknown>;
+}
+
+const resumedStreamTools = [
+  { type: "function" as const, name: "lookup", parameters: {} },
+];
+
+async function suspendCompletingTool(
+  fixture: ReturnType<typeof createToolFixture>,
+): Promise<{ id: string; callId: string }> {
+  vi.mocked(fixture.host.turnStart).mockImplementationOnce(async () => {
+    fixture.tools.push({
+      generation: 1,
+      id: "rpc-terminal-write",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        callId: "internal-terminal-write",
+        namespace: null,
+        tool: "lookup",
+        arguments: {},
+      },
+      respond: vi.fn(() => fixture.complete("completed continuation")),
+      reject: vi.fn(),
+    });
+    return { turn: fakeTurn() };
+  });
+  const suspended = await postResponse(fixture.app, {
+    model: "gpt-5.4",
+    input: "lookup",
+    tools: resumedStreamTools,
+  });
+  const body = (await suspended.json()) as {
+    id: string;
+    output: Array<{ call_id: string }>;
+  };
+  return { id: body.id, callId: body.output[0]?.call_id ?? "missing" };
+}
+
+async function postResumedStream(
+  fixture: ReturnType<typeof createToolFixture>,
+  suspended: { id: string; callId: string },
+): Promise<Response> {
+  return postResponse(fixture.app, {
+    model: "gpt-5.4",
+    previous_response_id: suspended.id,
+    tools: resumedStreamTools,
+    stream: true,
+    input: [
+      {
+        type: "function_call_output",
+        call_id: suspended.callId,
+        output: "found",
+      },
+    ],
+  });
 }
 
 describe("POST /v1/responses", () => {
@@ -1106,6 +1184,123 @@ describe("POST /v1/responses", () => {
   });
 
   it.each([
+    ["output_text.done", 2, "lost", 1],
+    ["response.completed", 3, "complete", 0],
+  ] as const)("settles owned continuation state when %s cannot be written", async (_event, streamWriteFailureAt, expectedState, expectedDeletes) => {
+    const fixture = createToolFixture({
+      withAdmission: true,
+      streamWriteFailureAt,
+    });
+    const suspended = await suspendCompletingTool(fixture);
+    const response = await postResumedStream(fixture, suspended);
+
+    await expect(response.text()).rejects.toThrow(
+      `stream write ${streamWriteFailureAt} failed`,
+    );
+    fixture.drain.beginDrain();
+    await expect(
+      Promise.race([
+        fixture.drain.whenIdle().then(() => "idle"),
+        new Promise((resolve) => setTimeout(() => resolve("timed out"), 100)),
+      ]),
+    ).resolves.toBe("idle");
+
+    expect(fixture.store.lookup(suspended.id)).toMatchObject({
+      state: expectedState,
+    });
+    expect(fixture.store.lookupOperation(suspended.id)).toBeUndefined();
+    expect(fixture.deleteThread).toHaveBeenCalledTimes(expectedDeletes);
+    expect(fixture.admissionDone).toHaveBeenCalledOnce();
+    expect(fixture.capacity.active).toBe(0);
+  });
+
+  it("abandons owned continuation state when its consumer aborts", async () => {
+    const fixture = createToolFixture({
+      withAdmission: true,
+      streamAbortAt: 2,
+    });
+    const suspended = await suspendCompletingTool(fixture);
+    const response = await postResumedStream(fixture, suspended);
+
+    await response.text();
+    fixture.drain.beginDrain();
+    await expect(
+      Promise.race([
+        fixture.drain.whenIdle().then(() => "idle"),
+        new Promise((resolve) => setTimeout(() => resolve("timed out"), 100)),
+      ]),
+    ).resolves.toBe("idle");
+    expect(fixture.store.lookup(suspended.id)).toMatchObject({ state: "lost" });
+    expect(fixture.store.lookupOperation(suspended.id)).toBeUndefined();
+    expect(fixture.deleteThread).toHaveBeenCalledOnce();
+    expect(fixture.admissionDone).toHaveBeenCalledOnce();
+  });
+
+  it("settles shutdown when ToolBridge invalidation does not return", async () => {
+    const fixture = createToolFixture({
+      withAdmission: true,
+      streamWriteFailureAt: 2,
+    });
+    const suspended = await suspendCompletingTool(fixture);
+    vi.spyOn(fixture.runner.tools, "invalidateResponse").mockReturnValue(
+      new Promise(() => undefined),
+    );
+    const response = await postResumedStream(fixture, suspended);
+    const body = response.text().catch(() => undefined);
+
+    fixture.drain.beginDrain();
+    await expect(
+      Promise.race([
+        fixture.drain.whenIdle().then(() => "idle"),
+        new Promise((resolve) => setTimeout(() => resolve("timed out"), 100)),
+      ]),
+    ).resolves.toBe("idle");
+    await body;
+    expect(fixture.store.lookup(suspended.id)).toMatchObject({ state: "lost" });
+    expect(fixture.store.lookupOperation(suspended.id)).toBeUndefined();
+    expect(fixture.admissionDone).toHaveBeenCalledOnce();
+  });
+
+  it("abandons owned continuation state when the resumed iterator ends without a terminal event", async () => {
+    const fixture = createToolFixture({
+      testStream: true,
+      withAdmission: true,
+    });
+    const suspended = await suspendCompletingTool(fixture);
+    const continueTurn = fixture.runner.tools.continue.bind(
+      fixture.runner.tools,
+    );
+    vi.spyOn(fixture.runner.tools, "continue").mockImplementation(
+      async (request) => {
+        const continuation = await continueTurn(request);
+        return continuation.type === "continued"
+          ? {
+              ...continuation,
+              events: (async function* () {
+                // A closed iterator without completed/failed is a protocol failure.
+              })(),
+            }
+          : continuation;
+      },
+    );
+    const response = await postResumedStream(fixture, suspended);
+
+    await expect(response.text()).rejects.toMatchObject({
+      code: "codex_protocol_error",
+    });
+    fixture.drain.beginDrain();
+    await expect(
+      Promise.race([
+        fixture.drain.whenIdle().then(() => "idle"),
+        new Promise((resolve) => setTimeout(() => resolve("timed out"), 100)),
+      ]),
+    ).resolves.toBe("idle");
+    expect(fixture.store.lookup(suspended.id)).toMatchObject({ state: "lost" });
+    expect(fixture.store.lookupOperation(suspended.id)).toBeUndefined();
+    expect(fixture.admissionDone).toHaveBeenCalledOnce();
+  });
+
+  it.each([
     ["initial write", { streamWriteFailureAt: 1 }],
     ["mid-item write", { streamWriteFailureAt: 3 }],
     ["final write", { streamWriteFailureAt: 10 }],
@@ -1118,7 +1313,10 @@ describe("POST /v1/responses", () => {
     ],
     ["abort", { streamAbortAt: 2 }],
   ] as const)("invalidates every repeated call after a continuation stream %s failure", async (_name, streamFailure) => {
-    const fixture = createToolFixture(streamFailure);
+    const fixture = createToolFixture({
+      ...streamFailure,
+      withAdmission: true,
+    });
     const repeatedRejects = [vi.fn(), vi.fn()];
     const firstRespond = vi.fn(() => {
       for (const [index, tool] of ["second", "third"].entries()) {
@@ -1199,6 +1397,9 @@ describe("POST /v1/responses", () => {
     expect(
       fixture.store.acquireLease("thread-1", "lease-probe", "turn", 1),
     ).toBe(true);
+    fixture.drain.beginDrain();
+    await fixture.drain.whenIdle();
+    expect(fixture.admissionDone).toHaveBeenCalledOnce();
   });
 
   it("returns response_not_found for outputs targeting an unknown response", async () => {

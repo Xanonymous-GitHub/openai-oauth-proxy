@@ -549,7 +549,19 @@ export function createResponsesHandler(
       const cleanupSignal = continuation.signal
         ? AbortSignal.any([context.req.raw.signal, continuation.signal])
         : context.req.raw.signal;
-      const finishContinuation = (): void => continuation.finish?.();
+      let continuationFinished = false;
+      const finishContinuation = (): void => {
+        if (continuationFinished) return;
+        continuationFinished = true;
+        continuation.finish?.();
+      };
+      let leaseReleased = false;
+      const observeLeaseReleased = (): void => {
+        if (leaseReleased) return;
+        leaseReleased = true;
+        deps.observe?.(context.req.raw, { leaseOutcome: "released" });
+      };
+      let durablyCommitted = false;
       const identity: ResponseIdentity = {
         responseId: request.previous_response_id,
         messageId: opaqueId("msg"),
@@ -564,8 +576,9 @@ export function createResponsesHandler(
           const operationCwd = deps.store.completeOperation(
             identity.responseId,
           );
+          durablyCommitted = true;
           removeOperationDirectory(operationCwd);
-          deps.observe?.(context.req.raw, { leaseOutcome: "released" });
+          observeLeaseReleased();
         } catch (error) {
           try {
             await loseResponseOperation(
@@ -573,7 +586,7 @@ export function createResponsesHandler(
               identity.responseId,
               cleanupSignal,
             );
-            deps.observe?.(context.req.raw, { leaseOutcome: "released" });
+            observeLeaseReleased();
           } finally {
             finishContinuation();
           }
@@ -591,7 +604,7 @@ export function createResponsesHandler(
               request.previous_response_id,
               cleanupSignal,
             );
-            deps.observe?.(context.req.raw, { leaseOutcome: "released" });
+            observeLeaseReleased();
           } finally {
             finishContinuation();
           }
@@ -607,6 +620,34 @@ export function createResponsesHandler(
       const sendStream = deps.streamSSE ?? streamSSE;
       const streamCleanup = Promise.withResolvers<void>();
       deps.observe?.(context.req.raw, { streamCleanup: streamCleanup.promise });
+      let ownerSettlement: Promise<void> | undefined;
+      const settleOwnedContinuation = (): Promise<void> => {
+        if (ownerSettlement) return ownerSettlement;
+        ownerSettlement = (async () => {
+          try {
+            void deps.runner.tools
+              .invalidateResponse(identity.responseId)
+              .catch(() => undefined);
+          } catch {
+            // The durable operation below remains the cleanup authority.
+          }
+          try {
+            if (!durablyCommitted) {
+              await loseResponseOperation(
+                deps,
+                identity.responseId,
+                cleanupSignal,
+              );
+            }
+          } catch {
+            // loseOperation records any undeleted thread for later reconciliation.
+          } finally {
+            observeLeaseReleased();
+            finishContinuation();
+          }
+        })();
+        return ownerSettlement;
+      };
       const executeStream = async (
         stream: Parameters<Parameters<typeof sendStream>[1]>[0],
       ) => {
@@ -628,9 +669,7 @@ export function createResponsesHandler(
             errorCode: "request_aborted",
           });
           controller.abort();
-          invalidation = deps.runner.tools.invalidateResponse(
-            identity.responseId,
-          );
+          invalidation = settleOwnedContinuation();
           return invalidation;
         };
         stream.onAbort(invalidate);
@@ -753,12 +792,7 @@ export function createResponsesHandler(
               if (event.result.finishReason === "stop") finishContinuation();
               return;
             } else if (event.type === "failed") {
-              await loseResponseOperation(
-                deps,
-                identity.responseId,
-                cleanupSignal,
-              );
-              finishContinuation();
+              await settleOwnedContinuation();
               const projected = openAIErrorBody(event.error).error;
               await writeSSE({
                 event: "error",
@@ -804,6 +838,7 @@ export function createResponsesHandler(
         return sendStream(context, executeStream);
       } catch (error) {
         streamCleanup.resolve();
+        await settleOwnedContinuation();
         throw error;
       }
     }
@@ -843,7 +878,12 @@ export function createResponsesHandler(
       else permit?.release();
       permit = undefined;
     };
-    const finishAdmission = (): void => admission?.done();
+    let admissionFinished = false;
+    const finishAdmission = (): void => {
+      if (admissionFinished) return;
+      admissionFinished = true;
+      admission?.done();
+    };
     const turnSignal = admission?.signal ?? context.req.raw.signal;
     try {
       turnSignal.throwIfAborted();

@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
   packages: write
 
 concurrency:
@@ -33,36 +34,40 @@ jobs:
       - run: bun run protocol:check
       - run: bun run deps:check
       - run: bun run check
-      - name: Refuse to overwrite an existing release tag
-        run: |
-          if docker buildx imagetools inspect "$IMAGE:$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo "Release image already exists; refusing to overwrite immutable tag" >&2
-            exit 1
-          fi
       - name: Authenticate to GHCR
         run: echo "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Refuse to overwrite an existing release tag
+        run: |
+          set +e
+          docker buildx imagetools inspect "$IMAGE:$GITHUB_REF_NAME" >/tmp/tag-probe.out 2>/tmp/tag-probe.err
+          PROBE_STATUS=$?
+          set -e
+          if [ "$PROBE_STATUS" -eq 0 ]; then
+            echo "Release image already exists; refusing to overwrite immutable tag" >&2
+            exit 1
+          fi
+          if ! grep -Eiq 'manifest unknown' /tmp/tag-probe.err; then
+            cat /tmp/tag-probe.err >&2
+            echo "Unable to verify release tag absence; refusing to publish" >&2
+            exit 1
+          fi
       - name: Build and push multiarch image
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ${{ env.IMAGE }}:${{ github.ref_name }}
-            ${{ env.IMAGE }}:sha-${{ github.sha }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           provenance: true
           sbom: true
-      - name: Validate manifest digest and platforms
+      - name: Validate candidate digest
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          docker buildx imagetools inspect "$IMAGE@$DIGEST" --raw >/tmp/manifest.json
-          jq -r '.manifests[].platform | "\(.os)/\(.architecture)"' /tmp/manifest.json | sort -u >/tmp/platforms
-          diff -u <(printf '%s\n' linux/amd64 linux/arm64) /tmp/platforms
+          docker buildx imagetools inspect "$IMAGE@$DIGEST" >/dev/null
       - name: Generate published image SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
         with:
@@ -80,3 +85,33 @@ jobs:
           name: openai-oauth-proxy-${{ github.ref_name }}-sbom
           path: /tmp/openai-oauth-proxy.spdx.json
           if-no-files-found: error
+      - name: Install cosign
+        uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22
+      - name: Sign scanned image digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$IMAGE@$DIGEST"
+      - name: Create final release tags
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          docker buildx imagetools create \
+            --tag "$IMAGE:$GITHUB_REF_NAME" \
+            --tag "$IMAGE:sha-$GITHUB_SHA" \
+            --tag "$IMAGE:latest" \
+            "$IMAGE@$DIGEST"
+      - name: Verify published release
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          docker buildx imagetools inspect "$IMAGE:$GITHUB_REF_NAME" | grep -F "Digest: $DIGEST"
+          docker buildx imagetools inspect "$IMAGE:sha-$GITHUB_SHA" | grep -F "Digest: $DIGEST"
+          docker buildx imagetools inspect "$IMAGE:latest" | grep -F "Digest: $DIGEST"
+          docker buildx imagetools inspect "$IMAGE@$DIGEST" --raw >/tmp/manifest.json
+          jq -r '.manifests[] | select(.platform.os != "unknown") | .platform | "\(.os)/\(.architecture)"' /tmp/manifest.json | sort -u >/tmp/platforms
+          diff -u <(printf '%s\n' linux/amd64 linux/arm64) /tmp/platforms
+          jq -e '[.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest")] | length >= 2' /tmp/manifest.json
+          cosign verify \
+            --certificate-identity "https://github.com/$GITHUB_WORKFLOW_REF" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "$IMAGE@$DIGEST"

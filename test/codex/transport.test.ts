@@ -450,7 +450,7 @@ describe("JSONL transport", () => {
     await expect(pending).rejects.toBeInstanceOf(CodexProtocolError);
   });
 
-  it("discards one late response for an aborted request without failing unrelated work", async () => {
+  it("discards responses for issued nonpending IDs without failing unrelated work", async () => {
     const harness = createHarness();
     const controller = new AbortController();
     const aborted = harness.transport.host.accountRead(
@@ -472,31 +472,74 @@ describe("JSONL transport", () => {
     await expect(active).resolves.toEqual({ data: [], nextCursor: null });
 
     const later = harness.transport.host.accountRead(false);
-    await harness.nextOutgoing();
+    const laterRequest = await harness.nextOutgoing();
     harness.send({ id: abortedRequest.id, result: {} });
-    await expect(later).rejects.toBeInstanceOf(CodexProtocolError);
+    harness.send({ id: activeRequest.id, result: {} });
+    harness.send({ id: laterRequest.id, result: { account: null } });
+    await expect(later).resolves.toEqual({ account: null });
   });
 
-  it("bounds aborted-response tombstones", async () => {
+  it("discards more than 1000 aborted late responses without retaining tombstones", async () => {
     const harness = createHarness();
-    let oldestId: string | number | undefined;
 
-    for (let index = 0; index < 257; index += 1) {
+    for (let index = 0; index < 1_001; index += 1) {
       const controller = new AbortController();
       const pending = harness.transport.host.accountRead(
         false,
         controller.signal,
       );
       const request = await harness.nextOutgoing();
-      oldestId ??= request.id as string | number;
       controller.abort();
       await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      harness.send({ id: request.id, result: {} });
     }
 
     const active = harness.transport.host.modelList({});
+    const activeRequest = await harness.nextOutgoing();
+    harness.send({
+      id: activeRequest.id,
+      result: { data: [], nextCursor: null },
+    });
+    await expect(active).resolves.toEqual({ data: [], nextCursor: null });
+
+    const futureVictim = harness.transport.host.accountRead(false);
     await harness.nextOutgoing();
-    harness.send({ id: oldestId, result: {} });
-    await expect(active).rejects.toBeInstanceOf(CodexProtocolError);
+    harness.send({ id: 2_000, result: {} });
+    await expect(futureVictim).rejects.toBeInstanceOf(CodexProtocolError);
+
+    const source = await readFile("src/codex/transport.ts", "utf8");
+    expect(source).not.toContain("abortedResponseIds");
+    expect(source).not.toContain("MAX_ABORTED_RESPONSE_IDS");
+  });
+
+  it.each([
+    "0",
+    -1,
+    0.5,
+    Number.MAX_SAFE_INTEGER + 1,
+  ])("protocol-fails malformed response ID %j", async (id) => {
+    const harness = createHarness();
+    const pending = harness.transport.host.accountRead(false);
+    await harness.nextOutgoing();
+
+    harness.send({ id, result: {} });
+
+    await expect(pending).rejects.toBeInstanceOf(CodexProtocolError);
+  });
+
+  it("resets the issued numeric ID range with a replacement generation", async () => {
+    const retired = createHarness(1);
+    const old = retired.transport.host.accountRead(false);
+    await retired.nextOutgoing();
+    retired.transport.invalidateGeneration();
+    await expect(old).rejects.toBeInstanceOf(CodexGenerationChangedError);
+
+    const replacement = createHarness(2);
+    const pending = replacement.transport.host.accountRead(false);
+    const request = await replacement.nextOutgoing();
+    expect(request.id).toBe(0);
+    replacement.send({ id: 0, result: { account: null } });
+    await expect(pending).resolves.toEqual({ account: null });
   });
 
   it("invalidates every pending request and tool call on generation change", async () => {
