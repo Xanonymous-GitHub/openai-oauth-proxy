@@ -24,6 +24,7 @@ import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { AccountState } from "../../codex/account.js";
 import { parseAdminResponse } from "../contract.js";
+import { ThemeControl } from "./theme-control.js";
 
 type Action = "login" | "cancel" | "refresh" | "logout";
 type Issue = "authentication_unavailable" | "session_unavailable";
@@ -168,6 +169,7 @@ function AccountContent({
             </p>
           </div>
           <Button
+            className="w-full sm:w-auto"
             type="button"
             onClick={() => run("login")}
             disabled={disabled}
@@ -182,11 +184,16 @@ function AccountContent({
         <div className="grid gap-6">
           <div className="grid gap-2">
             <p className="text-sm font-medium">One-time device code</p>
-            <div className="flex flex-col gap-3 rounded-lg border bg-muted p-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-col gap-3 rounded-lg border bg-muted p-4 md:flex-row md:items-center md:justify-between">
               <code className="break-all font-mono text-xl font-semibold tracking-[0.12em]">
                 {state.userCode}
               </code>
-              <Button type="button" variant="outline" onClick={copyCode}>
+              <Button
+                className="w-full sm:w-auto"
+                type="button"
+                variant="outline"
+                onClick={copyCode}
+              >
                 {copyStatus === "Copied" ? (
                   <IconCheck aria-hidden="true" />
                 ) : (
@@ -203,7 +210,7 @@ function AccountContent({
             </p>
           </div>
           {verificationUrl ? (
-            <Button asChild>
+            <Button className="w-full sm:w-auto" asChild>
               <a
                 href={verificationUrl}
                 target="_blank"
@@ -222,8 +229,9 @@ function AccountContent({
               </AlertDescription>
             </Alert>
           )}
-          <div className="flex flex-col gap-2 sm:flex-row">
+          <div className="flex flex-wrap gap-2">
             <Button
+              className="w-full sm:w-auto"
               type="button"
               variant="outline"
               onClick={() => run("refresh")}
@@ -233,6 +241,7 @@ function AccountContent({
               Refresh status
             </Button>
             <Button
+              className="w-full sm:w-auto"
               type="button"
               variant="ghost"
               onClick={() => run("cancel")}
@@ -262,7 +271,7 @@ function AccountContent({
               </p>
             </div>
           </div>
-          <dl className="grid gap-4 rounded-lg border bg-muted/50 p-4 sm:grid-cols-2">
+          <dl className="grid gap-4 rounded-lg border bg-muted/50 p-4 md:grid-cols-2">
             <div>
               <dt className="text-xs font-medium text-muted-foreground">
                 Email
@@ -280,8 +289,9 @@ function AccountContent({
               </dd>
             </div>
           </dl>
-          <div className="flex flex-col gap-2 sm:flex-row">
+          <div className="flex flex-wrap gap-2">
             <Button
+              className="w-full sm:w-auto"
               type="button"
               variant="outline"
               onClick={() => run("refresh")}
@@ -291,6 +301,7 @@ function AccountContent({
               Refresh account
             </Button>
             <Button
+              className="w-full sm:w-auto"
               type="button"
               variant="destructive"
               onClick={() => run("logout")}
@@ -313,6 +324,7 @@ function AccountContent({
             </AlertDescription>
           </Alert>
           <Button
+            className="w-full sm:w-auto"
             type="button"
             onClick={() => run("login")}
             disabled={disabled}
@@ -413,9 +425,14 @@ export function AdminApp() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <Badge variant="outline" role="status">
+            <Badge
+              className="hidden sm:inline-flex"
+              variant="outline"
+              role="status"
+            >
               {statusLabel(state)}
             </Badge>
+            <ThemeControl />
           </div>
         </div>
       </header>
@@ -425,7 +442,7 @@ export function AdminApp() {
         aria-busy={busy !== null || bootstrapping}
       >
         <section className="md:col-span-7" aria-labelledby="account-title">
-          <Card className="rounded-2xl shadow-sm">
+          <Card className="rounded-2xl shadow-[0_18px_50px_-32px_oklch(0.48_0.095_190_/_0.3)]">
             <CardHeader>
               <CardTitle
                 id="account-title"

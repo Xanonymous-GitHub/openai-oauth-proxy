@@ -1,1 +1,133 @@
 @import "tailwindcss";
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+:root {
+  --radius: 0.625rem;
+  --background: oklch(0.975 0.004 230);
+  --foreground: oklch(0.19 0.015 235);
+  --card: oklch(0.995 0.002 230);
+  --card-foreground: var(--foreground);
+  --popover: var(--card);
+  --popover-foreground: var(--foreground);
+  --primary: oklch(0.48 0.095 190);
+  --primary-foreground: oklch(0.985 0.004 190);
+  --secondary: oklch(0.93 0.008 225);
+  --secondary-foreground: oklch(0.25 0.018 230);
+  --muted: oklch(0.945 0.006 225);
+  --muted-foreground: oklch(0.46 0.018 230);
+  --accent: oklch(0.91 0.025 190);
+  --accent-foreground: oklch(0.29 0.055 190);
+  --destructive: oklch(0.55 0.19 27);
+  --border: oklch(0.87 0.012 225);
+  --input: var(--border);
+  --ring: oklch(0.55 0.095 190);
+}
+
+[data-theme="dark"] {
+  --background: oklch(0.16 0.012 235);
+  --foreground: oklch(0.94 0.006 225);
+  --card: oklch(0.205 0.015 235);
+  --card-foreground: var(--foreground);
+  --popover: var(--card);
+  --popover-foreground: var(--foreground);
+  --primary: oklch(0.72 0.105 188);
+  --primary-foreground: oklch(0.18 0.025 190);
+  --secondary: oklch(0.27 0.016 232);
+  --secondary-foreground: oklch(0.92 0.007 225);
+  --muted: oklch(0.245 0.015 232);
+  --muted-foreground: oklch(0.69 0.015 225);
+  --accent: oklch(0.29 0.04 190);
+  --accent-foreground: oklch(0.88 0.055 188);
+  --destructive: oklch(0.65 0.17 25);
+  --border: oklch(0.34 0.016 232);
+  --input: var(--border);
+  --ring: oklch(0.67 0.095 188);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --background: oklch(0.16 0.012 235);
+    --foreground: oklch(0.94 0.006 225);
+    --card: oklch(0.205 0.015 235);
+    --card-foreground: var(--foreground);
+    --popover: var(--card);
+    --popover-foreground: var(--foreground);
+    --primary: oklch(0.72 0.105 188);
+    --primary-foreground: oklch(0.18 0.025 190);
+    --secondary: oklch(0.27 0.016 232);
+    --secondary-foreground: oklch(0.92 0.007 225);
+    --muted: oklch(0.245 0.015 232);
+    --muted-foreground: oklch(0.69 0.015 225);
+    --accent: oklch(0.29 0.04 190);
+    --accent-foreground: oklch(0.88 0.055 188);
+    --destructive: oklch(0.65 0.17 25);
+    --border: oklch(0.34 0.016 232);
+    --input: var(--border);
+    --ring: oklch(0.67 0.095 188);
+  }
+}
+
+@theme inline {
+  --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, monospace;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: 1rem;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html {
+    @apply bg-background;
+  }
+
+  body {
+    @apply min-w-80 bg-background font-sans text-foreground antialiased;
+  }
+
+  button,
+  a {
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  button,
+  a,
+  [data-slot="card"] {
+    transition:
+      color 160ms ease,
+      background-color 160ms ease,
+      border-color 160ms ease,
+      opacity 160ms ease,
+      transform 160ms ease;
+  }
+
+  button:active {
+    transform: translateY(1px);
+  }
+}

@@ -1,8 +1,23 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AdminApp } from "../../../src/admin/ui/admin-app.js";
+
+beforeEach(() => {
+  vi.stubGlobal("localStorage", {
+    getItem: vi.fn(() => null),
+    setItem: vi.fn(),
+  });
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn(() => ({
+      matches: false,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })),
+  );
+});
 
 afterEach(() => {
   cleanup();
