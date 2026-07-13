@@ -17,10 +17,14 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    env:
-      IMAGE: ghcr.io/${{ github.repository_owner }}/openai-oauth-proxy
     steps:
       - uses: actions/checkout@v7
+      - name: Normalize GHCR image name
+        id: image
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/openai-oauth-proxy"
+          printf 'IMAGE=%s\n' "$IMAGE" >> "$GITHUB_ENV"
+          printf 'image=%s\n' "$IMAGE" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v6
         with:
           node-version: "26"
@@ -74,7 +78,7 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ steps.image.outputs.image }},push-by-digest=true,name-canonical=true,push=true
           provenance: true
           sbom: true
       - name: Validate candidate digest
@@ -86,7 +90,7 @@ jobs:
       - name: Generate published image SBOM
         uses: anchore/sbom-action@v0
         with:
-          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          image: ${{ steps.image.outputs.image }}@${{ steps.build.outputs.digest }}
           format: spdx-json
           output-file: /tmp/openai-oauth-proxy.spdx.json
       - name: Scan SBOM for vulnerabilities
