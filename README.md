@@ -11,6 +11,20 @@ Single-user, single-replica OpenAI-compatible proxy backed by a ChatGPT-authenti
 
 Unknown fields and unsupported endpoints fail explicitly. Embeddings, audio, file APIs, remote image URLs, hosted tools, internal Codex tools, multi-user isolation, and a downstream Codex CLI are non-goals. Exact `max_completion_tokens` and `verbosity` semantics are unsupported and rejected rather than ignored. Streaming Chat honors `stream_options.include_usage`: `true` emits the required separate usage chunk and `false` suppresses usage; authoritative usage remains App Server-provided.
 
+## Run Locally With Docker Compose
+
+The bearer tokens are required; the service exits at startup without them rather than accepting unauthenticated requests. Install `direnv`, then create a local, untracked `.envrc` and set independent values generated with `openssl rand -hex 32`:
+
+```sh
+cp .envrc.example .envrc
+# Edit .envrc and set both token values.
+direnv allow
+
+docker compose up --build --detach
+```
+
+Direnv loads the tokens while the repository directory is active; `compose.yml` consumes them without storing secrets in Compose configuration. Compose persists `/data`, binds ports 8080 and 8081 to host loopback only, and exposes the admin listener through that loopback binding. Do not change the admin port binding to a non-loopback address. Verify `http://127.0.0.1:8080/healthz`, then open `http://127.0.0.1:8081` to complete device login. Until login succeeds, model requests return `authentication_required`. Stop the local service with `docker compose down`.
+
 ## Bifrost
 
 Use pinned multiarch Bifrost `maximhq/bifrost:v1.6.3@sha256:95caedb1c368c6d88178c2b98b9238d8a6a62b51d9cb12b6661bf2671ed1aaa4`. Start from `deploy/bifrost/config.example.json`, replace the example `namespace` in its service FQDN, and keep `allow_private_network: true`.

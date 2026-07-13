@@ -1,0 +1,35 @@
+services:
+  proxy:
+    build: .
+    # image: ghcr.io/xanonymous-github/openai-oauth-proxy:v0.0.4
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      ADMIN_HOST: 0.0.0.0
+      BIFROST_PROXY_TOKEN: ${BIFROST_PROXY_TOKEN:?BIFROST_PROXY_TOKEN must be set}
+      METRICS_TOKEN: ${METRICS_TOKEN:?METRICS_TOKEN must be set}
+    ports:
+      - 127.0.0.1:8080:8080
+      - 127.0.0.1:8081:8081
+    volumes:
+      - openai-oauth-proxy-data:/data
+    tmpfs:
+      - /tmp:size=256m
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8080/healthz').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 2s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  openai-oauth-proxy-data:

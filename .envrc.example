@@ -1,0 +1,3 @@
+# Generate each value with: openssl rand -hex 32
+export BIFROST_PROXY_TOKEN=""
+export METRICS_TOKEN=""

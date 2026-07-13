@@ -4,6 +4,7 @@ coverage/
 graphify-out/
 .env
 .env.*
+.envrc
 /data/
 .idea
 auth.json
