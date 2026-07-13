@@ -56,6 +56,18 @@ it("persists explicit light and dark modes", async () => {
   expect(localStorage.getItem("admin-theme")).toBe("dark");
 });
 
+it("restores a stored explicit mode on mount", () => {
+  localStorage.setItem("admin-theme", "light");
+  render(<ThemeControl />);
+
+  expect(document.documentElement.dataset.theme).toBe("light");
+  expect(
+    screen
+      .getByRole("button", { name: "Use light theme" })
+      .getAttribute("aria-pressed"),
+  ).toBe("true");
+});
+
 it("exposes the theme modes in keyboard order", async () => {
   const user = userEvent.setup();
   render(<ThemeControl />);
@@ -89,4 +101,24 @@ it("tracks system theme changes while system mode is active", () => {
   dark = true;
   listener?.();
   expect(document.documentElement.dataset.theme).toBe("dark");
+});
+
+it("removes the system listener when an explicit mode is selected", async () => {
+  const addEventListener = vi.fn();
+  const removeEventListener = vi.fn();
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn(() => ({
+      matches: false,
+      addEventListener,
+      removeEventListener,
+    })),
+  );
+  const user = userEvent.setup();
+  render(<ThemeControl />);
+  const listener = addEventListener.mock.calls[0]?.[1];
+
+  await user.click(screen.getByRole("button", { name: "Use dark theme" }));
+
+  expect(removeEventListener).toHaveBeenCalledWith("change", listener);
 });
