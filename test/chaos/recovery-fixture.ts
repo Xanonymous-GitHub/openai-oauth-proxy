@@ -1,4 +1,5 @@
 import {
+  type ChildProcess,
   type ChildProcessWithoutNullStreams,
   execFileSync,
   spawn,
@@ -39,6 +40,20 @@ async function availablePort(): Promise<number> {
   return port;
 }
 
+async function terminateChild(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const closed = new Promise((resolve) => child.once("close", resolve));
+  child.kill("SIGTERM");
+  await Promise.race([
+    closed,
+    new Promise((resolve) => setTimeout(resolve, 10_000)),
+  ]);
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill("SIGKILL");
+    await closed;
+  }
+}
+
 async function startProxyChild(dataDir: string, codexBin: string) {
   const dataPort = await availablePort();
   const adminPort = await availablePort();
@@ -65,37 +80,33 @@ async function startProxyChild(dataDir: string, codexBin: string) {
   });
   const origin = `http://127.0.0.1:${dataPort}`;
   const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) {
-      throw new Error(
-        `Proxy child exited during startup (${child.exitCode}): ${childError.slice(-500)}`,
-      );
-    }
-    try {
-      if ((await fetch(`${origin}/readyz`)).ok) break;
-    } catch {
-      // Child is still starting.
-    }
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  if (!(await fetch(`${origin}/readyz`).catch(() => undefined))?.ok) {
-    child.kill("SIGKILL");
-    throw new Error("Proxy child did not become ready");
-  }
-  return {
-    origin,
-    async close() {
-      child.kill("SIGTERM");
-      await Promise.race([
-        new Promise((resolve) => child.once("close", resolve)),
-        new Promise((resolve) => setTimeout(resolve, 10_000)),
-      ]);
-      if (child.exitCode === null) {
-        child.kill("SIGKILL");
-        await new Promise((resolve) => child.once("close", resolve));
+  try {
+    while (Date.now() < deadline) {
+      if (child.exitCode !== null) {
+        throw new Error(
+          `Proxy child exited during startup (${child.exitCode}): ${childError.slice(-500)}`,
+        );
       }
-    },
-  };
+      try {
+        if ((await fetch(`${origin}/readyz`)).ok) break;
+      } catch {
+        // Child is still starting.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    if (!(await fetch(`${origin}/readyz`).catch(() => undefined))?.ok) {
+      throw new Error("Proxy child did not become ready");
+    }
+    if (child.pid === undefined) throw new Error("Proxy child has no PID");
+    return {
+      origin,
+      pid: child.pid,
+      close: () => terminateChild(child),
+    };
+  } catch (error) {
+    await terminateChild(child);
+    throw error;
+  }
 }
 
 async function postResponse(origin: string, body: unknown): Promise<Response> {
@@ -109,7 +120,9 @@ async function postResponse(origin: string, body: unknown): Promise<Response> {
   });
 }
 
-export async function runRecoveryContract() {
+export async function runRecoveryContract(
+  options: { afterFirstProxyStart?(pid: number): void } = {},
+) {
   const directory = mkdtempSync(join(tmpdir(), "proxy-recovery-"));
   const codexHome = join(directory, "codex-home");
   const cwd = join(directory, "work");
@@ -133,6 +146,8 @@ export async function runRecoveryContract() {
       return child;
     },
   });
+  let firstProxy: Awaited<ReturnType<typeof startProxyChild>> | undefined;
+  let secondProxy: Awaited<ReturnType<typeof startProxyChild>> | undefined;
   try {
     const host = await supervisor.start();
     const first = await host.threadStart({
@@ -252,7 +267,8 @@ export async function runRecoveryContract() {
         parameters: { type: "object", properties: {} },
       },
     ];
-    const firstProxy = await startProxyChild(data, codexLauncher);
+    firstProxy = await startProxyChild(data, codexLauncher);
+    options.afterFirstProxyStart?.(firstProxy.pid);
     const storedResponse = await postResponse(firstProxy.origin, {
       model: "gpt-5.2-codex",
       input: "persist this response",
@@ -286,8 +302,9 @@ export async function runRecoveryContract() {
       );
     }
     await firstProxy.close();
+    firstProxy = undefined;
     cpSync(data, copied, { recursive: true, preserveTimestamps: true });
-    const secondProxy = await startProxyChild(copied, codexLauncher);
+    secondProxy = await startProxyChild(copied, codexLauncher);
     const resumedResponse = await postResponse(secondProxy.origin, {
       model: "gpt-5.2-codex",
       input: "resume after process restart",
@@ -314,6 +331,7 @@ export async function runRecoveryContract() {
       error?: { code?: string };
     };
     await secondProxy.close();
+    secondProxy = undefined;
     const sqlitePreserved = resumedResponse.ok;
     const copiedAuth = join(copied, "codex", "auth.json");
     const credentialFilePreserved =
@@ -339,6 +357,7 @@ export async function runRecoveryContract() {
       proxyStarts: 2,
     };
   } finally {
+    await Promise.allSettled([secondProxy?.close(), firstProxy?.close()]);
     await supervisor.stop();
     await fake.close();
     rmSync(directory, { recursive: true, force: true });

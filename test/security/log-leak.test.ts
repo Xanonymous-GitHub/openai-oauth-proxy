@@ -7,5 +7,9 @@ describe("secret-free process logs", () => {
 
     expect(result.matches).toEqual([]);
     expect(result.logs).not.toContain(result.requestBody);
+    expect(result.childClosed).toBe(true);
+    for (const sentinel of result.upstreamSentinels) {
+      expect(result.logs).not.toContain(sentinel);
+    }
   });
 });

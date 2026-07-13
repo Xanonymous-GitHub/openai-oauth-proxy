@@ -16,4 +16,21 @@ describe("process recovery", () => {
     expect(result.credentialContentRead).toBe(false);
     expect(result.proxyStarts).toBe(2);
   }, 120_000);
+
+  it("closes a started proxy child when an intermediate check fails", async () => {
+    let childPid: number | undefined;
+    await expect(
+      runRecoveryContract({
+        afterFirstProxyStart(pid) {
+          childPid = pid;
+          throw new Error("induced intermediate failure");
+        },
+      }),
+    ).rejects.toThrow("induced intermediate failure");
+
+    expect(childPid).toBeDefined();
+    expect(() => process.kill(childPid as number, 0)).toThrow(
+      expect.objectContaining({ code: "ESRCH" }),
+    );
+  }, 120_000);
 });

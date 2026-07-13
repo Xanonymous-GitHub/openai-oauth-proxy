@@ -221,6 +221,10 @@ function handleRequest({ id, method, params }) {
       break;
     }
     case "turn/start": {
+      if (process.env.FAKE_CODEX_TURN_ERROR) {
+        reject(id, -32000, process.env.FAKE_CODEX_TURN_ERROR);
+        break;
+      }
       turnId += 1;
       const currentTurnId = `turn-${turnId}`;
       respond(id, { turn: turn(currentTurnId) });
