@@ -254,13 +254,14 @@ Supported request concepts:
 - text content;
 - user image parts containing inline `data:` URLs;
 - `stream`;
+- `stream_options` only as `{ "include_usage": true }` for streaming requests, producing a separate usage chunk before `[DONE]`;
 - function-only `tools`;
 - `tool_choice` values `auto` and `none`;
 - omitted or `true` `parallel_tool_calls`;
 - supported reasoning-effort values;
 - JSON Schema structured output when supplied as `response_format.type = "json_schema"`.
 
-Unsupported examples include sampling controls, log probabilities, audio output, remote image URLs, file IDs, built-in Platform tools, forced tool selection, and exact output-token limits. These fields produce `invalid_request_error`; they are not ignored.
+Unsupported examples include sampling controls, log probabilities, audio output, remote image URLs, file IDs, built-in Platform tools, forced tool selection, exact output-token limits, and verbosity controls. These fields produce `invalid_request_error`; they are not ignored.
 
 ### Stateless Chat Lifecycle
 
@@ -570,7 +571,7 @@ Metrics include request counts and latency, errors by stable code, active turns,
 Verified on 2026-07-11:
 
 - Node.js 26.5.0 Current;
-- Hono 4.12.29;
+- Hono 4.12.30;
 - `@hono/node-server` 2.0.8;
 - Zod 4.4.3;
 - `@openai/codex` 0.144.1;
@@ -578,6 +579,7 @@ Verified on 2026-07-11:
 - Biome 2.5.3;
 - Vitest 4.1.10;
 - `@types/node` 26.1.1;
+- Ajv 8.20.0 for test-only validation of captured App Server frames against generated JSON Schemas;
 - Bun 1.3.14 for package management and task orchestration;
 - `npm-check-updates` 22.2.9.
 

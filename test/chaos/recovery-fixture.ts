@@ -1,20 +1,22 @@
-import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import {
+  type ChildProcessWithoutNullStreams,
+  execFileSync,
+  spawn,
+} from "node:child_process";
+import {
+  chmodSync,
   cpSync,
-  existsSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
+import { type AddressInfo, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { CodexSupervisor } from "../../src/codex/supervisor.js";
 import { CodexGenerationChangedError } from "../../src/codex/transport.js";
-import type { Config } from "../../src/config.js";
-import { ConversationStore } from "../../src/conversations/store.js";
-import { start } from "../../src/main.js";
 import { startFakeResponsesServer } from "../integration/fake-responses-server.js";
 
 async function until(
@@ -29,34 +31,82 @@ async function until(
   return Date.now() - started;
 }
 
-function proxyConfig(dataDir: string): Config {
+async function availablePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return port;
+}
+
+async function startProxyChild(dataDir: string, codexBin: string) {
+  const dataPort = await availablePort();
+  const adminPort = await availablePort();
+  const child = spawn(process.execPath, [resolve("dist/main.js")], {
+    env: {
+      ...process.env,
+      DATA_DIR: dataDir,
+      DATA_PORT: String(dataPort),
+      ADMIN_PORT: String(adminPort),
+      CODEX_BIN: codexBin,
+      BIFROST_PROXY_TOKEN: "b".repeat(32),
+      METRICS_TOKEN: "m".repeat(32),
+      TURN_TIMEOUT_MS: "30000",
+      TOOL_TIMEOUT_MS: "30000",
+      RESPONSE_TTL_MS: "60000",
+      FAKE_CODEX_AUTOCOMPLETE: "1",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let childError = "";
+  child.stdout.resume();
+  child.stderr.on("data", (chunk: Buffer) => {
+    childError += chunk.toString();
+  });
+  const origin = `http://127.0.0.1:${dataPort}`;
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null) {
+      throw new Error(
+        `Proxy child exited during startup (${child.exitCode}): ${childError.slice(-500)}`,
+      );
+    }
+    try {
+      if ((await fetch(`${origin}/readyz`)).ok) break;
+    } catch {
+      // Child is still starting.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  if (!(await fetch(`${origin}/readyz`).catch(() => undefined))?.ok) {
+    child.kill("SIGKILL");
+    throw new Error("Proxy child did not become ready");
+  }
   return {
-    dataHost: "0.0.0.0",
-    dataPort: 0,
-    adminHost: "127.0.0.1",
-    adminPort: 0,
-    dataDir,
-    codexHome: join(dataDir, "codex"),
-    codexBin: "codex",
-    bifrostProxyToken: "b".repeat(32),
-    metricsToken: "m".repeat(32),
-    maxActiveTurns: 1,
-    queueCapacity: 0,
-    turnTimeoutMs: 30_000,
-    toolTimeoutMs: 30_000,
-    responseTtlMs: 60_000,
+    origin,
+    async close() {
+      child.kill("SIGTERM");
+      await Promise.race([
+        new Promise((resolve) => child.once("close", resolve)),
+        new Promise((resolve) => setTimeout(resolve, 10_000)),
+      ]);
+      if (child.exitCode === null) {
+        child.kill("SIGKILL");
+        await new Promise((resolve) => child.once("close", resolve));
+      }
+    },
   };
 }
 
-async function startAndStopProxy(dataDir: string): Promise<void> {
-  const supervisor = {
-    health: () => true,
-    ready: () => false,
-    start: () => new Promise<never>(() => undefined),
-    stop: async () => undefined,
-  };
-  const service = await start(proxyConfig(dataDir), { supervisor });
-  await service.close();
+async function postResponse(origin: string, body: unknown): Promise<Response> {
+  return fetch(`${origin}/v1/responses`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${"b".repeat(32)}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
 }
 
 export async function runRecoveryContract() {
@@ -115,6 +165,18 @@ export async function runRecoveryContract() {
       input: [{ type: "text", text: "pending fixture", text_elements: [] }],
     });
     await fake.waitForRequests(2);
+    let streamedDeltaBeforeCrash = false;
+    for (;;) {
+      const event = await events.next();
+      if (event.done) throw new Error("Event stream ended before active delta");
+      if (
+        event.value.method === "item/agentMessage/delta" &&
+        event.value.params.delta === "stream-before-crash"
+      ) {
+        streamedDeltaBeforeCrash = true;
+        break;
+      }
+    }
     const activeFailure = (async () => {
       try {
         for (;;) await events.next();
@@ -169,45 +231,108 @@ export async function runRecoveryContract() {
     const data = join(directory, "data");
     const copied = join(directory, "copied-data");
     mkdirSync(data, { mode: 0o700 });
-    const databasePath = join(data, "proxy.sqlite");
-    const store = ConversationStore.open(
-      databasePath,
-      { now: () => Date.now() },
-      { responseTtlMs: 60_000, turnLeaseMs: 30_000, toolLeaseMs: 30_000 },
-    );
-    store.beginPending("resp_recovery", {
-      threadId: first.thread.id,
-      stored: true,
-      processGeneration: 1,
-    });
-    store.complete("resp_recovery", "turn-recovery");
-    store.close();
     const codexData = join(data, "codex");
     mkdirSync(codexData, { mode: 0o700 });
     const authPath = join(codexData, "auth.json");
     writeFileSync(authPath, "opaque credential fixture", { mode: 0o600 });
     const credentialSize = statSync(authPath).size;
-    await startAndStopProxy(data);
-    cpSync(data, copied, { recursive: true, preserveTimestamps: true });
-    await startAndStopProxy(copied);
-    const reopened = ConversationStore.open(
-      join(copied, "proxy.sqlite"),
-      { now: () => Date.now() },
-      { responseTtlMs: 60_000, turnLeaseMs: 30_000, toolLeaseMs: 30_000 },
+    const codexLauncher = join(directory, "fake-codex");
+    writeFileSync(
+      codexLauncher,
+      `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(resolve("test/fixtures/fake-app-server.mjs"))} "$@"\n`,
+      { mode: 0o700 },
     );
-    const sqlitePreserved =
-      reopened.lookup("resp_recovery")?.state === "complete";
-    reopened.close();
+    chmodSync(codexLauncher, 0o700);
+    execFileSync("bun", ["run", "build"], { stdio: "ignore" });
+    const tools = [
+      {
+        type: "function",
+        name: "fixture_tool",
+        description: "Fixture tool",
+        parameters: { type: "object", properties: {} },
+      },
+    ];
+    const firstProxy = await startProxyChild(data, codexLauncher);
+    const storedResponse = await postResponse(firstProxy.origin, {
+      model: "gpt-5.2-codex",
+      input: "persist this response",
+      store: true,
+    });
+    const storedBody = (await storedResponse.json()) as {
+      id?: string;
+      output_text?: string;
+    };
+    if (!storedResponse.ok || !storedBody.id) {
+      throw new Error(
+        `First proxy stored response failed (${storedResponse.status})`,
+      );
+    }
+    const toolResponse = await postResponse(firstProxy.origin, {
+      model: "gpt-5.2-codex",
+      input: "call a tool",
+      store: true,
+      tools,
+    });
+    const toolBody = (await toolResponse.json()) as {
+      id?: string;
+      output?: Array<{ type?: string; call_id?: string }>;
+    };
+    const toolCall = toolBody.output?.find(
+      (item) => item.type === "function_call",
+    );
+    if (!toolResponse.ok || !toolBody.id || !toolCall?.call_id) {
+      throw new Error(
+        `First proxy tool response failed (${toolResponse.status})`,
+      );
+    }
+    await firstProxy.close();
+    cpSync(data, copied, { recursive: true, preserveTimestamps: true });
+    const secondProxy = await startProxyChild(copied, codexLauncher);
+    const resumedResponse = await postResponse(secondProxy.origin, {
+      model: "gpt-5.2-codex",
+      input: "resume after process restart",
+      previous_response_id: storedBody.id,
+      store: true,
+    });
+    const resumedBody = (await resumedResponse.json()) as {
+      output?: Array<{ content?: Array<{ text?: string }> }>;
+    };
+    const lostResponse = await postResponse(secondProxy.origin, {
+      model: "gpt-5.2-codex",
+      previous_response_id: toolBody.id,
+      input: [
+        {
+          type: "function_call_output",
+          call_id: toolCall.call_id,
+          output: "late fixture output",
+        },
+      ],
+      tools,
+      store: true,
+    });
+    const lostBody = (await lostResponse.json()) as {
+      error?: { code?: string };
+    };
+    await secondProxy.close();
+    const sqlitePreserved = resumedResponse.ok;
     const copiedAuth = join(copied, "codex", "auth.json");
     const credentialFilePreserved =
-      existsSync(copiedAuth) && statSync(copiedAuth).size === credentialSize;
+      statSync(copiedAuth).size === credentialSize;
 
     return {
       activeRequestFailed,
+      streamedDeltaBeforeCrash,
       readinessRemoved,
       recoveredWithinMs,
-      storedThreadResumed: resumed.thread.id === first.thread.id,
-      toolContinuationCode,
+      storedThreadResumed:
+        resumed.thread.id === first.thread.id &&
+        resumedBody.output?.[0]?.content?.[0]?.text ===
+          "fixture child response",
+      toolContinuationCode:
+        toolContinuationCode === "proxy_continuation_lost" &&
+        lostResponse.status === 409
+          ? lostBody.error?.code
+          : "",
       sqlitePreserved,
       credentialFilePreserved,
       credentialContentRead: false,

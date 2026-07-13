@@ -4,6 +4,9 @@ import { createInterface } from "node:readline";
 const scriptedRecords = process.env.FAKE_CODEX_SCRIPT
   ? JSON.parse(readFileSync(process.env.FAKE_CODEX_SCRIPT, "utf8"))
   : [];
+if (process.env.FAKE_CODEX_STDERR_SENTINEL) {
+  process.stderr.write(`${process.env.FAKE_CODEX_STDERR_SENTINEL}\n`);
+}
 
 let initializeReceived = false;
 let initializedReceived = false;
@@ -79,6 +82,44 @@ function turn(id) {
 
 function respond(id, result) {
   write({ id, result });
+}
+
+function emitCompletion(
+  threadIdValue,
+  turnIdValue,
+  text = "fixture child response",
+) {
+  write({
+    method: "item/agentMessage/delta",
+    params: {
+      threadId: threadIdValue,
+      turnId: turnIdValue,
+      itemId: `message-${turnIdValue}`,
+      delta: text,
+    },
+  });
+  write({
+    method: "item/completed",
+    params: {
+      threadId: threadIdValue,
+      turnId: turnIdValue,
+      completedAtMs: 1,
+      item: {
+        type: "agentMessage",
+        id: `message-${turnIdValue}`,
+        text,
+        phase: null,
+        memoryCitation: null,
+      },
+    },
+  });
+  write({
+    method: "turn/completed",
+    params: {
+      threadId: threadIdValue,
+      turn: { ...turn(turnIdValue), status: "completed", completedAt: 1 },
+    },
+  });
 }
 
 function reject(id, code, message) {
@@ -200,6 +241,8 @@ function handleRequest({ id, method, params }) {
             arguments: {},
           },
         });
+      } else if (process.env.FAKE_CODEX_AUTOCOMPLETE === "1") {
+        emitCompletion(params.threadId, currentTurnId);
       }
       break;
     }

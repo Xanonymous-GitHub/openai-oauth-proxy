@@ -166,6 +166,35 @@ describe("parseChatRequest", () => {
     ],
     ["sampling fields", { ...chatRequest, top_p: 0.9 }, "top_p"],
     [
+      "exact output token limits",
+      { ...chatRequest, max_completion_tokens: 128 },
+      "max_completion_tokens",
+    ],
+    [
+      "non-streaming stream options",
+      { ...chatRequest, stream_options: { include_usage: true } },
+      "stream_options",
+    ],
+    [
+      "disabled stream usage",
+      {
+        ...chatRequest,
+        stream: true,
+        stream_options: { include_usage: false },
+      },
+      "stream_options.include_usage",
+    ],
+    [
+      "unknown stream options",
+      {
+        ...chatRequest,
+        stream: true,
+        stream_options: { include_usage: true, extra: true },
+      },
+      "stream_options.extra",
+    ],
+    ["verbosity", { ...chatRequest, verbosity: "low" }, "verbosity"],
+    [
       "forced function selection",
       {
         ...chatRequest,
@@ -194,6 +223,16 @@ describe("parseChatRequest", () => {
     expect(() => parseChatRequest(request)).toThrowError(
       expect.objectContaining({ status: 400, param }),
     );
+  });
+
+  it("accepts the supported streaming usage option", () => {
+    expect(
+      parseChatRequest({
+        ...chatRequest,
+        stream: true,
+        stream_options: { include_usage: true },
+      }).stream_options,
+    ).toEqual({ include_usage: true });
   });
 
   it.each([

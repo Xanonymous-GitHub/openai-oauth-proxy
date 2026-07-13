@@ -6,6 +6,7 @@ describe("process recovery", () => {
     const result = await runRecoveryContract();
 
     expect(result.activeRequestFailed).toBe(true);
+    expect(result.streamedDeltaBeforeCrash).toBe(true);
     expect(result.readinessRemoved).toBe(true);
     expect(result.recoveredWithinMs).toBeLessThanOrEqual(35_000);
     expect(result.storedThreadResumed).toBe(true);
@@ -14,5 +15,5 @@ describe("process recovery", () => {
     expect(result.credentialFilePreserved).toBe(true);
     expect(result.credentialContentRead).toBe(false);
     expect(result.proxyStarts).toBe(2);
-  });
+  }, 120_000);
 });

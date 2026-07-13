@@ -102,6 +102,55 @@ function responseEvents(id: string, text: string): string {
   return `${events.map((event, index) => `event: ${event.type}\ndata: ${JSON.stringify({ ...event, sequence_number: index })}\n\n`).join("")}data: [DONE]\n\n`;
 }
 
+function partialResponseEvents(id: string, text: string): string {
+  const itemId = `msg_${id}`;
+  const events = [
+    {
+      type: "response.created",
+      response: {
+        id,
+        object: "response",
+        created_at: 1,
+        status: "in_progress",
+        model: "gpt-5.4",
+        output: [],
+      },
+    },
+    {
+      type: "response.output_item.added",
+      output_index: 0,
+      item: {
+        id: itemId,
+        type: "message",
+        status: "in_progress",
+        role: "assistant",
+        content: [],
+      },
+    },
+    {
+      type: "response.content_part.added",
+      item_id: itemId,
+      output_index: 0,
+      content_index: 0,
+      part: { type: "output_text", text: "", annotations: [], logprobs: [] },
+    },
+    {
+      type: "response.output_text.delta",
+      item_id: itemId,
+      output_index: 0,
+      content_index: 0,
+      delta: text,
+      logprobs: [],
+    },
+  ];
+  return events
+    .map(
+      (event, index) =>
+        `event: ${event.type}\ndata: ${JSON.stringify({ ...event, sequence_number: index })}\n\n`,
+    )
+    .join("");
+}
+
 function toolEvents(id: string): string {
   const item = {
     id: `fc_${id}`,
@@ -180,6 +229,9 @@ export async function startFakeResponsesServer(): Promise<FakeResponsesServer> {
     requests.push(body);
     if (requests.length === 2) {
       response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write(
+        partialResponseEvents("resp_fixture_pending", "stream-before-crash"),
+      );
       request.once("close", () => response.end());
       return;
     }

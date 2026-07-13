@@ -109,13 +109,15 @@ function chunk(
     };
     finish_reason: "stop" | "tool_calls" | null;
   },
-  usage?: TokenUsage,
+  usage?: TokenUsage | null,
 ) {
   return {
     ...identity,
     object: "chat.completion.chunk" as const,
     choices: [choice],
-    ...(usage === undefined ? {} : { usage: usageBody(usage) }),
+    ...(usage === undefined
+      ? {}
+      : { usage: usage === null ? null : usageBody(usage) }),
   };
 }
 
@@ -263,21 +265,6 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
         lastMessage?.role === "user"
           ? translateTurnInput(lastMessage.content)
           : [],
-      ...(request.max_completion_tokens === undefined &&
-      request.verbosity === undefined
-        ? {}
-        : {
-            instructions: [
-              request.max_completion_tokens === undefined
-                ? undefined
-                : `Limit the final answer to at most ${request.max_completion_tokens} tokens.`,
-              request.verbosity === undefined
-                ? undefined
-                : `Use ${request.verbosity} verbosity.`,
-            ]
-              .filter((instruction) => instruction !== undefined)
-              .join("\n"),
-          }),
       ...(request.reasoning_effort === undefined
         ? {}
         : { effort: request.reasoning_effort }),
@@ -368,6 +355,8 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
       };
 
       try {
+        const emptyUsage =
+          request.stream_options === undefined ? undefined : null;
         const continuationStage = continuationResult
           ? await continuationResult
           : undefined;
@@ -376,11 +365,15 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
         }
         await writeSSE({
           data: JSON.stringify(
-            chunk(identity, {
-              index: 0,
-              delta: { role: "assistant" },
-              finish_reason: null,
-            }),
+            chunk(
+              identity,
+              {
+                index: 0,
+                delta: { role: "assistant" },
+                finish_reason: null,
+              },
+              emptyUsage,
+            ),
           ),
         });
         turnSignal.throwIfAborted();
@@ -408,11 +401,15 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
           if (event.type === "text.delta") {
             await writeSSE({
               data: JSON.stringify(
-                chunk(identity, {
-                  index: 0,
-                  delta: { content: event.delta },
-                  finish_reason: null,
-                }),
+                chunk(
+                  identity,
+                  {
+                    index: 0,
+                    delta: { content: event.delta },
+                    finish_reason: null,
+                  },
+                  emptyUsage,
+                ),
               ),
             });
           } else if (event.type === "tool.call") {
@@ -421,23 +418,27 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
             }
             await writeSSE({
               data: JSON.stringify(
-                chunk(identity, {
-                  index: 0,
-                  delta: {
-                    tool_calls: [
-                      {
-                        index: toolIndex,
-                        id: event.call.id,
-                        type: "function",
-                        function: {
-                          name: event.call.name,
-                          arguments: JSON.stringify(event.call.arguments),
+                chunk(
+                  identity,
+                  {
+                    index: 0,
+                    delta: {
+                      tool_calls: [
+                        {
+                          index: toolIndex,
+                          id: event.call.id,
+                          type: "function",
+                          function: {
+                            name: event.call.name,
+                            arguments: JSON.stringify(event.call.arguments),
+                          },
                         },
-                      },
-                    ],
+                      ],
+                    },
+                    finish_reason: null,
                   },
-                  finish_reason: null,
-                }),
+                  emptyUsage,
+                ),
               ),
             });
             toolIndex += 1;
@@ -453,10 +454,26 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
                     delta: {},
                     finish_reason: event.result.finishReason,
                   },
-                  event.result.usage ?? usage,
+                  request.stream_options === undefined
+                    ? (event.result.usage ?? usage)
+                    : null,
                 ),
               ),
             });
+            const finalUsage = event.result.usage ?? usage;
+            if (
+              request.stream_options !== undefined &&
+              finalUsage !== undefined
+            ) {
+              await writeSSE({
+                data: JSON.stringify({
+                  ...identity,
+                  object: "chat.completion.chunk",
+                  choices: [],
+                  usage: usageBody(finalUsage),
+                }),
+              });
+            }
             await writeSSE({ data: "[DONE]" });
             deps.observe?.(context.req.raw, { streamOutcome: "completed" });
             if (event.result.finishReason === "stop") admission?.done();

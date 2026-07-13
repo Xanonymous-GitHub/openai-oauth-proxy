@@ -12,7 +12,7 @@ live("live ChatGPT account (consumes subscription capacity)", () => {
     expect(result.models).toBeGreaterThan(0);
     expect(result.text).not.toBe("");
     expect(result.deviceLoginType).toBe("chatgptDeviceCode");
-  });
+  }, 120_000);
 });
 
 if (enabled && !codexHome) {

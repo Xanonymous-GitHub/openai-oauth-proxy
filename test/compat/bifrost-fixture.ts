@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   chmodSync,
   mkdirSync,
@@ -152,6 +152,25 @@ export async function runBifrostContract() {
       reason: "Docker unavailable",
     };
   }
+  const manifest = JSON.parse(
+    execFileSync(
+      "docker",
+      [
+        "buildx",
+        "imagetools",
+        "inspect",
+        BIFROST_IMAGE,
+        "--format",
+        "{{json .Manifest}}",
+      ],
+      { encoding: "utf8" },
+    ),
+  ) as {
+    manifests: Array<{ platform: { architecture: string; os: string } }>;
+  };
+  const imagePlatforms = manifest.manifests
+    .map(({ platform }) => `${platform.os}/${platform.architecture}`)
+    .sort();
   const upstreamPort = await availablePort("0.0.0.0");
   const bifrostPort = await availablePort();
   const upstreamRequests: Array<{
@@ -260,23 +279,51 @@ export async function runBifrostContract() {
         },
       ],
     });
-    let errorStatus = 0;
+    let errorDetails:
+      | {
+          status: number;
+          type: string | undefined;
+          code: string | null | undefined;
+          message: string;
+        }
+      | undefined;
     try {
       await client.chat.completions.create({
         model: "openai/gpt-5.4",
         messages: [{ role: "user", content: "error fixture" }],
       });
     } catch (error) {
-      if (error instanceof OpenAI.APIError) errorStatus = error.status;
+      if (error instanceof OpenAI.APIError) {
+        errorDetails = {
+          status: error.status,
+          type: error.type,
+          code: error.code,
+          message: error.message,
+        };
+      }
     }
-    let rateLimitStatus = 0;
+    let rateLimitDetails:
+      | {
+          status: number;
+          type: string | undefined;
+          code: string | null | undefined;
+          message: string;
+        }
+      | undefined;
     try {
       await client.chat.completions.create({
         model: "openai/gpt-5.4",
         messages: [{ role: "user", content: "rate fixture" }],
       });
     } catch (error) {
-      if (error instanceof OpenAI.APIError) rateLimitStatus = error.status;
+      if (error instanceof OpenAI.APIError) {
+        rateLimitDetails = {
+          status: error.status,
+          type: error.type,
+          code: error.code,
+          message: error.message,
+        };
+      }
     }
     return {
       availability: "passed" as const,
@@ -288,8 +335,9 @@ export async function runBifrostContract() {
       upstreamPaths: upstreamRequests.map((request) => request.path),
       streaming,
       tools: tool.choices[0]?.finish_reason === "tool_calls",
-      errorStatus,
-      rateLimitStatus,
+      error: errorDetails,
+      rateLimit: rateLimitDetails,
+      imagePlatforms,
     };
   } finally {
     container.kill("SIGTERM");

@@ -134,19 +134,29 @@ const chatResponseFormatSchema = z.strictObject({
   json_schema: jsonSchemaDefinition,
 });
 
-const chatRequestSchema = z.strictObject({
-  model: nonEmptyString,
-  messages: z.array(chatMessageSchema).min(1),
-  stream: z.boolean().optional(),
-  tools: z.array(chatFunctionToolSchema).optional(),
-  tool_choice: z.enum(["auto", "none"]).optional(),
-  parallel_tool_calls: z.literal(true).optional(),
-  max_completion_tokens: z.number().int().positive().max(32_000).optional(),
-  stream_options: z.strictObject({ include_usage: z.literal(true) }).optional(),
-  verbosity: z.enum(["low", "medium", "high"]).optional(),
-  reasoning_effort: reasoningEffortSchema.optional(),
-  response_format: chatResponseFormatSchema.optional(),
-});
+const chatRequestSchema = z
+  .strictObject({
+    model: nonEmptyString,
+    messages: z.array(chatMessageSchema).min(1),
+    stream: z.boolean().optional(),
+    stream_options: z
+      .strictObject({ include_usage: z.literal(true) })
+      .optional(),
+    tools: z.array(chatFunctionToolSchema).optional(),
+    tool_choice: z.enum(["auto", "none"]).optional(),
+    parallel_tool_calls: z.literal(true).optional(),
+    reasoning_effort: reasoningEffortSchema.optional(),
+    response_format: chatResponseFormatSchema.optional(),
+  })
+  .superRefine((request, context) => {
+    if (request.stream_options !== undefined && request.stream !== true) {
+      context.addIssue({
+        code: "custom",
+        message: "Stream options require streaming",
+        path: ["stream_options"],
+      });
+    }
+  });
 
 const responseInputTextSchema = z.strictObject({
   type: z.literal("input_text"),

@@ -20,8 +20,14 @@ describe("agent-client smoke contracts", () => {
       const result = await runAgentSmoke(agent);
       expect(result).toMatchObject({
         availability: "passed",
-        clientToolCalls: 1,
+        clientToolCalls: 5,
+        toolRoundWidths: [1, 2, 1, 1],
         internalCodexToolEvents: 0,
+        proxyListenHost: "0.0.0.0",
+        hostBaseURL: expect.stringMatching(/^http:\/\/127\.0\.0\.1:/),
+        dockerBaseURL: expect.stringMatching(
+          /^http:\/\/host\.docker\.internal:/,
+        ),
       });
     }, 120_000);
   }

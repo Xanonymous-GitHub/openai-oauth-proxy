@@ -79,8 +79,7 @@ export async function runAgentSmoke(agent: "opencode" | "hermes") {
   const bifrostData = join(directory, "bifrost");
   mkdirSync(join(bifrostData, "logs"), { recursive: true, mode: 0o777 });
   chmodSync(bifrostData, 0o777);
-  const upstream = new URL(proxy.baseURL);
-  upstream.hostname = "host.docker.internal";
+  const upstream = new URL(proxy.dockerBaseURL);
   upstream.pathname = "";
   writeFileSync(
     join(bifrostData, "config.json"),
@@ -139,12 +138,22 @@ export async function runAgentSmoke(agent: "opencode" | "hermes") {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     if (!ready) throw new Error("Bifrost unavailable for agent smoke");
-    proxy.armAgentTool(agent === "opencode" ? "bash" : "terminal", {
-      command: "printf task15-agent-smoke",
-      description: "Run deterministic smoke command",
-    });
+    proxy.armAgentToolRounds(
+      agent === "opencode" ? "bash" : "terminal",
+      {
+        command: "printf task15-agent-smoke",
+        description: "Run deterministic smoke command",
+      },
+      [1, 2, 1, 1],
+    );
     let exitCode: number;
     if (agent === "opencode") {
+      const pluginDirectory = join(directory, ".opencode", "plugins");
+      mkdirSync(pluginDirectory, { recursive: true });
+      writeFileSync(
+        join(pluginDirectory, "strict-proxy.js"),
+        'export const StrictProxy = async () => ({ "chat.params": async (_input, output) => { output.maxOutputTokens = undefined; delete output.options.verbosity; delete output.options.textVerbosity; } });\n',
+      );
       writeFileSync(
         join(directory, "opencode.json"),
         JSON.stringify({
@@ -155,6 +164,7 @@ export async function runAgentSmoke(agent: "opencode" | "hermes") {
               options: {
                 baseURL: `http://127.0.0.1:${port}/v1`,
                 apiKey: "agent-client-fixture",
+                includeUsage: false,
               },
               models: {
                 "fixture-model": {
@@ -172,14 +182,13 @@ export async function runAgentSmoke(agent: "opencode" | "hermes") {
           binary,
           [
             "run",
-            "--pure",
             "--format",
             "json",
             "--model",
             "fixture/fixture-model",
             "--dir",
             directory,
-            "Use the bash tool once, then finish.",
+            "Execute every requested bash tool call until the model says the multi-round smoke is complete.",
           ],
           {
             cwd: directory,
@@ -193,7 +202,7 @@ export async function runAgentSmoke(agent: "opencode" | "hermes") {
         );
       } catch (error) {
         throw new Error(
-          `${error instanceof Error ? error.message : "OpenCode failed"}; proxy paths=${proxy.requestedPaths.join(",")}`,
+          `${error instanceof Error ? error.message : "OpenCode failed"}; proxy paths=${proxy.requestedPaths.join(",")}; proxy errors=${JSON.stringify(proxy.requestErrors)}`,
         );
       }
     } else {
@@ -214,7 +223,7 @@ export async function runAgentSmoke(agent: "opencode" | "hermes") {
           "--toolsets",
           "terminal",
           "-q",
-          "Use the terminal tool once, then finish.",
+          "Execute every requested terminal tool call until the model says the multi-round smoke is complete.",
         ],
         {
           cwd: directory,
@@ -227,7 +236,11 @@ export async function runAgentSmoke(agent: "opencode" | "hermes") {
     return {
       availability: "passed" as const,
       clientToolCalls: proxy.completedToolCalls.length,
+      toolRoundWidths: proxy.completedToolRoundWidths,
       internalCodexToolEvents: proxy.internalToolEvents,
+      proxyListenHost: proxy.listenHost,
+      hostBaseURL: proxy.baseURL,
+      dockerBaseURL: proxy.dockerBaseURL,
     };
   } finally {
     container.kill("SIGTERM");

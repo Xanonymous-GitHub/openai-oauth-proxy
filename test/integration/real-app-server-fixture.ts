@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
@@ -8,6 +8,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { PassThrough } from "node:stream";
+import Ajv, { type ErrorObject, type ValidateFunction } from "ajv";
 import type { CodexHost, HostNotification } from "../../src/codex/host.js";
 import { createSupervisor } from "../../src/codex/supervisor.js";
 import { startFakeResponsesServer } from "./fake-responses-server.js";
@@ -19,7 +21,159 @@ interface ContractResult {
   cancelled: boolean;
   dynamicToolResult: string;
   toolOutputForwarded: boolean;
+  frameCounts: { requests: number; responses: number; notifications: number };
   schemaErrors: string[];
+}
+
+type JsonFrame = Record<string, unknown>;
+export interface CapturedFrames {
+  client: JsonFrame[];
+  server: JsonFrame[];
+}
+
+const generatedDirectory = resolve("src/codex/generated");
+const responseSchemas: Record<string, string> = {
+  initialize: "v1/InitializeResponse.json",
+  "model/list": "v2/ModelListResponse.json",
+  "thread/start": "v2/ThreadStartResponse.json",
+  "thread/resume": "v2/ThreadResumeResponse.json",
+  "thread/fork": "v2/ThreadForkResponse.json",
+  "thread/inject_items": "v2/ThreadInjectItemsResponse.json",
+  "thread/delete": "v2/ThreadDeleteResponse.json",
+  "turn/start": "v2/TurnStartResponse.json",
+  "turn/interrupt": "v2/TurnInterruptResponse.json",
+  "item/tool/call": "DynamicToolCallResponse.json",
+};
+
+function schema(path: string): object {
+  return JSON.parse(readFileSync(resolve(generatedDirectory, path), "utf8"));
+}
+
+function diagnostic(
+  direction: "client" | "server",
+  kind: string,
+  method: string,
+  errors: ErrorObject[] | null | undefined,
+): Error {
+  const issue = errors?.[0];
+  const location = issue?.instancePath || "/";
+  const keyword = issue?.keyword ?? "schema";
+  const message = issue?.message ?? "validation failed";
+  return new Error(
+    `${direction} ${kind} ${method} ${location} ${keyword}: ${message}`,
+  );
+}
+
+export function validateCapturedFrames(frames: CapturedFrames): string[] {
+  const ajv = new Ajv({
+    allErrors: true,
+    strict: false,
+    formats: {
+      double: true,
+      int32: true,
+      int64: true,
+      uint: true,
+      uint16: true,
+      uint32: true,
+      uint64: true,
+    },
+  });
+  const validators = new Map<string, ValidateFunction>();
+  const validator = (path: string) => {
+    let validate = validators.get(path);
+    if (!validate) {
+      validate = ajv.compile(schema(path));
+      validators.set(path, validate);
+    }
+    return validate;
+  };
+  const clientMethods = new Map<string | number, string>();
+  const serverMethods = new Map<string | number, string>();
+  for (const frame of frames.client) {
+    if (frame.id !== undefined && typeof frame.method === "string") {
+      clientMethods.set(frame.id as string | number, frame.method);
+    }
+  }
+  for (const frame of frames.server) {
+    if (frame.id !== undefined && typeof frame.method === "string") {
+      serverMethods.set(frame.id as string | number, frame.method);
+    }
+  }
+  const validate = (
+    direction: "client" | "server",
+    kind: string,
+    method: string,
+    path: string,
+    value: unknown,
+  ) => {
+    const check = validator(path);
+    if (!check(value)) throw diagnostic(direction, kind, method, check.errors);
+  };
+
+  for (const frame of frames.client) {
+    const method = typeof frame.method === "string" ? frame.method : "response";
+    if (frame.id !== undefined && typeof frame.method === "string") {
+      validate("client", "request", method, "ClientRequest.json", frame);
+    } else if (typeof frame.method === "string") {
+      validate(
+        "client",
+        "notification",
+        method,
+        "ClientNotification.json",
+        frame,
+      );
+    } else if (frame.id !== undefined) {
+      const requestMethod =
+        serverMethods.get(frame.id as string | number) ?? "unknown";
+      const path = responseSchemas[requestMethod] ?? "JSONRPCResponse.json";
+      validate(
+        "client",
+        "response",
+        requestMethod,
+        path,
+        responseSchemas[requestMethod] ? frame.result : frame,
+      );
+    }
+  }
+  for (const frame of frames.server) {
+    const method = typeof frame.method === "string" ? frame.method : "response";
+    if (frame.id !== undefined && typeof frame.method === "string") {
+      validate("server", "request", method, "ServerRequest.json", frame);
+    } else if (typeof frame.method === "string") {
+      validate(
+        "server",
+        "notification",
+        method,
+        "ServerNotification.json",
+        frame,
+      );
+    } else if (frame.id !== undefined) {
+      const requestMethod =
+        clientMethods.get(frame.id as string | number) ?? "unknown";
+      const responsePath =
+        responseSchemas[requestMethod] ?? "JSONRPCResponse.json";
+      validate(
+        "server",
+        "response",
+        requestMethod,
+        responsePath,
+        responseSchemas[requestMethod] ? frame.result : frame,
+      );
+    }
+  }
+  return [];
+}
+
+function frameCollector(target: JsonFrame[]): (chunk: Buffer | string) => void {
+  let pending = "";
+  return (chunk) => {
+    pending += chunk.toString();
+    const lines = pending.split("\n");
+    pending = lines.pop() ?? "";
+    for (const line of lines) {
+      if (line.trim() !== "") target.push(JSON.parse(line) as JsonFrame);
+    }
+  };
 }
 
 async function nextEvent(
@@ -45,13 +199,6 @@ async function nextAgentText(
       return event.params.item.text;
     }
   }
-}
-
-function generatedMethods(schemaName: string): string[] {
-  const schema = JSON.parse(
-    readFileSync(resolve("src/codex/generated", schemaName), "utf8"),
-  ) as { oneOf: Array<{ properties: { method: { enum: string[] } } }> };
-  return schema.oneOf.flatMap((entry) => entry.properties.method.enum);
 }
 
 async function startThread(host: CodexHost, cwd: string) {
@@ -92,9 +239,28 @@ export async function runRealAppServerContract(): Promise<ContractResult> {
   })
     .trim()
     .replace("codex-cli ", "");
+  const frames: CapturedFrames = { client: [], server: [] };
+  const collectClient = frameCollector(frames.client);
+  const collectServer = frameCollector(frames.server);
   const supervisor = createSupervisor({
     config: { codexBin, codexHome },
     random: () => 0,
+    childFactory(command, args, options) {
+      const child = spawn(command, args, options);
+      const input = new PassThrough();
+      input.on("data", collectClient);
+      input.pipe(child.stdin);
+      child.stdout.on("data", collectServer);
+      return {
+        stdin: input,
+        stdout: child.stdout,
+        stderr: child.stderr,
+        on: child.on.bind(child),
+        once: child.once.bind(child),
+        off: child.off.bind(child),
+        kill: child.kill.bind(child),
+      };
+    },
   });
   const methods = [
     "initialize",
@@ -205,13 +371,18 @@ export async function runRealAppServerContract(): Promise<ContractResult> {
     const dynamicToolResult = await nextAgentText(events);
     await nextEvent(events, "turn/completed");
 
-    const schemaErrors = methods.filter((method) => {
-      const generated = [
-        ...generatedMethods("ClientRequest.json"),
-        ...generatedMethods("ServerRequest.json"),
-      ];
-      return !generated.includes(method);
-    });
+    const schemaErrors = validateCapturedFrames(frames);
+    const frameCounts = {
+      requests: frames.client.filter(
+        (frame) => frame.id !== undefined && typeof frame.method === "string",
+      ).length,
+      responses: frames.server.filter(
+        (frame) => frame.id !== undefined && frame.method === undefined,
+      ).length,
+      notifications: frames.server.filter(
+        (frame) => frame.id === undefined && typeof frame.method === "string",
+      ).length,
+    };
     return {
       codexVersion,
       methods,
@@ -221,6 +392,7 @@ export async function runRealAppServerContract(): Promise<ContractResult> {
       toolOutputForwarded: JSON.stringify(fake.requests.at(-1)).includes(
         "fixture tool result",
       ),
+      frameCounts,
       schemaErrors,
     };
   } finally {

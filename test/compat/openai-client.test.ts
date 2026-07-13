@@ -11,6 +11,9 @@ describe("official OpenAI JavaScript client compatibility", () => {
 
   beforeAll(async () => {
     fixture = await startListeningProxyFixture();
+    expect(fixture.listenHost).toBe("0.0.0.0");
+    expect(fixture.baseURL).toMatch(/^http:\/\/127\.0\.0\.1:/);
+    expect(fixture.dockerBaseURL).toMatch(/^http:\/\/host\.docker\.internal:/);
     client = new OpenAI({ apiKey: fixture.token, baseURL: fixture.baseURL });
   });
 
@@ -79,6 +82,59 @@ describe("official OpenAI JavaScript client compatibility", () => {
     });
   });
 
+  it("parses Responses images and JSON Schema", async () => {
+    const response = await client.responses.create({
+      model: "gpt-5.4",
+      input: [
+        {
+          role: "user",
+          content: [
+            { type: "input_text", text: "inspect response images" },
+            {
+              type: "input_image",
+              detail: "auto",
+              image_url: fixture.images.png,
+            },
+            {
+              type: "input_image",
+              detail: "auto",
+              image_url: fixture.images.jpeg,
+            },
+            {
+              type: "input_image",
+              detail: "auto",
+              image_url: fixture.images.webp,
+            },
+          ],
+        },
+      ],
+      text: {
+        format: {
+          type: "json_schema",
+          name: "answer",
+          strict: true,
+          schema: {
+            type: "object",
+            properties: { answer: { type: "string" } },
+            required: ["answer"],
+            additionalProperties: false,
+          },
+        },
+      },
+    });
+
+    expect(response.output_text).toBe('{"answer":"fixture"}');
+    expect(fixture.commands.at(-1)).toMatchObject({
+      outputSchema: { type: "object" },
+      input: [
+        expect.objectContaining({ type: "text" }),
+        expect.objectContaining({ type: "image" }),
+        expect.objectContaining({ type: "image" }),
+        expect.objectContaining({ type: "image" }),
+      ],
+    });
+  });
+
   it("parses Chat and Responses SSE without response adapters", async () => {
     const chat = await client.chat.completions.create({
       model: "gpt-5.4",
@@ -104,6 +160,29 @@ describe("official OpenAI JavaScript client compatibility", () => {
 
     expect(chatText).toBe("fixture answer");
     expect(responseText).toBe("fixture answer");
+  });
+
+  it("emits the official separate Chat streaming usage chunk", async () => {
+    const stream = await client.chat.completions.create({
+      model: "gpt-5.4",
+      messages: [{ role: "user", content: "stream usage" }],
+      stream: true,
+      stream_options: { include_usage: true },
+    });
+    const chunks = [];
+    for await (const chunk of stream) chunks.push(chunk);
+
+    expect(chunks.filter((chunk) => chunk.choices.length === 0)).toEqual([
+      expect.objectContaining({
+        choices: [],
+        usage: { prompt_tokens: 7, completion_tokens: 5, total_tokens: 12 },
+      }),
+    ]);
+    expect(
+      chunks
+        .filter((chunk) => chunk.choices.length > 0)
+        .every((chunk) => chunk.usage === null),
+    ).toBe(true);
   });
 
   it("stores, resumes, and branches Responses", async () => {
@@ -133,19 +212,64 @@ describe("official OpenAI JavaScript client compatibility", () => {
     ).toEqual(["resume", "fork"]);
   });
 
-  it("supports single, parallel, and repeated client function loops", async () => {
-    await fixture.runToolLoop(client, ["first"]);
-    await fixture.runToolLoop(client, ["parallel-a", "parallel-b"]);
-    await fixture.runToolLoop(client, ["repeat", "repeat"]);
+  it("supports Chat tool history through single, parallel, and repeated rounds", async () => {
+    await fixture.runChatToolRounds(client, [
+      ["single"],
+      ["parallel-a", "parallel-b"],
+      ["repeat"],
+      ["repeat"],
+    ]);
 
     expect(fixture.completedToolCalls).toEqual([
-      "first",
+      "single",
       "parallel-a",
       "parallel-b",
       "repeat",
       "repeat",
     ]);
+    expect(fixture.completedToolRoundWidths).toEqual([1, 2, 1, 1]);
     expect(fixture.internalToolEvents).toBe(0);
+  });
+
+  it("supports Responses tool history through single, parallel, and repeated rounds", async () => {
+    fixture.completedToolCalls.length = 0;
+    fixture.completedToolRoundWidths.length = 0;
+    await fixture.runResponsesToolRounds(client, [
+      ["single"],
+      ["parallel-a", "parallel-b"],
+      ["repeat"],
+      ["repeat"],
+    ]);
+
+    expect(fixture.completedToolCalls).toEqual([
+      "single",
+      "parallel-a",
+      "parallel-b",
+      "repeat",
+      "repeat",
+    ]);
+    expect(fixture.completedToolRoundWidths).toEqual([1, 2, 1, 1]);
+    expect(fixture.internalToolEvents).toBe(0);
+  });
+
+  it("rejects every unsupported Chat field through the official client", async () => {
+    for (const [field, value] of [
+      ["max_completion_tokens", 128],
+      ["verbosity", "low"],
+      ["unknown_fixture_field", true],
+    ] as const) {
+      await expect(
+        client.chat.completions.create({
+          model: "gpt-5.4",
+          messages: [{ role: "user", content: "reject unsupported field" }],
+          [field]: value,
+        }),
+      ).rejects.toMatchObject({
+        status: 400,
+        code: "unsupported_field",
+        param: field,
+      });
+    }
   });
 
   it("propagates cancellation and stable OpenAI errors", async () => {

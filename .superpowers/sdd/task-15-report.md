@@ -87,3 +87,42 @@ Graphify's code-only AST path analyzed 44 test files and about 38,790 words. It 
 - Hermes Agent is not installed on this machine: neither `hermes` nor `hermes-agent` exists on `PATH`. Its local smoke is explicitly reported skipped; Linux CI installs `hermes-agent==0.15.2` and fails if the binary is still absent.
 - The live suite was not run because `LIVE_CHATGPT_TESTS=1` and a preauthenticated `LIVE_CHATGPT_CODEX_HOME` were not supplied. This is intentional and prevents accidental subscription use.
 - SBOM generation and high-severity vulnerability scanning are immutable CI gates; the local acceptance command built the multiarch OCI archive but did not duplicate those CI-only scanners.
+
+## Final Reviewer Wave
+
+The final Task 15 review was resolved in one TDD wave:
+
+- The official OpenAI JavaScript client now exercises Chat tool history and four genuine continuation rounds with widths `1, 2, 1, 1`, then repeats the same single/parallel/repeated sequence through Responses. Responses also sends PNG, JPEG, and WebP data URLs with JSON Schema output.
+- `max_completion_tokens` and `verbosity` are again strict `unsupported_field` errors because exact output limits and verbosity semantics are not implemented. Streaming Chat accepts only `stream_options: {"include_usage":true}` and now honors it with `usage: null` on ordinary chunks plus a separate empty-choice usage chunk immediately before `[DONE]`; non-streaming, disabled, and unknown stream options are rejected at exact parameter paths.
+- Real App Server stdin/stdout JSONL frames are captured and validated with test-only Ajv `8.20.0` against generated experimental client-request, client-notification, server-request, server-notification, and method-specific response schemas. Invalid fixture diagnostics include direction, frame kind, method, schema path, and keyword without captured values. A self-review found and fixed method indexing for client responses to App Server tool requests.
+- OpenCode and Hermes share a four-round agent fixture that requires five client tool calls and widths `1, 2, 1, 1`. OpenCode uses a local `chat.params` hook to omit unsupported exact-limit and verbosity fields rather than weakening the proxy contract. Both agents remain mandatory in CI.
+- Recovery now observes `stream-before-crash` from a real App Server before killing it, then verifies active failure, readiness loss, and bounded recovery. Two complete proxy child processes run sequentially against original and copied data directories; stored response resume and lost tool continuation are verified only through `/v1/responses` HTTP calls.
+- Bifrost asserts exact SDK-observed `500` and `429` status, type, code, and sanitized message. Its pinned manifest is inspected at runtime and must contain both `linux/amd64` and `linux/arm64`.
+- The leak gate runs a production proxy child and passes unique raw App Server event and child-stderr sentinels through actual process paths. Combined proxy stdout/stderr contains zero prompt, image, tool, authorization, token, credential-path, raw-event, or child-stderr matches.
+- The shared agent proxy listens on `0.0.0.0`, retains `127.0.0.1` as its host URL, exposes `host.docker.internal` to Docker, and asserts all three topology values. The serial opt-in live suite has an explicit 120-second test timeout.
+
+### Reviewer RED Evidence
+
+- Request-schema and official-client tests initially failed because `max_completion_tokens`, `stream_options`, and `verbosity` were accepted and genuine multi-round helper methods did not exist.
+- The real App Server test initially had no frame counts or runtime validator, and a later method-specific client-response test proved dynamic tool responses were falling back to generic JSON-RPC validation.
+- OpenCode first failed on `max_completion_tokens`, then `stream_options`, then `verbosity`; strict client configuration plus implemented usage-chunk semantics closed each failure without silently discarding fields in the proxy.
+- Recovery initially lacked a streamed delta and used same-process SQLite inspection. The new HTTP child-process contract failed until the Node production build, fake App Server completion mode, and copied-response output checks were exercised end to end.
+- Bifrost initially exposed only status integers, so exact error objects and registry manifest platforms were absent.
+- The first full run caught automatic fake App Server completions perturbing an existing protocol fixture. Autocomplete is now opt-in only for proxy-child contracts, and the previously failing transport test passes with both child-process suites.
+
+### Final GREEN Evidence
+
+```bash
+bun run protocol:check
+bun run deps:check
+bun run check
+bunx vitest run test/integration test/compat test/chaos test/security
+```
+
+All commands exited `0`. Biome checked 83 files, TypeScript and the production build passed, the complete suite passed `410` tests in 34 files with two intentional skips, and the explicit offline release subset passed `23` tests in 7 files with one Hermes skip.
+
+The real Bifrost contract passed against `maximhq/bifrost:v1.6.3@sha256:95caedb1c368c6d88178c2b98b9238d8a6a62b51d9cb12b6661bf2671ed1aaa4`. A separate multiarch OCI build passed for amd64 and arm64 with manifest list `sha256:281d5c40eba24c2b8dc68813329f540be809db2c8a45d2d2947e26bf861e82f0`. Kubernetes client dry-run passed the Service, PVC, StatefulSet, and NetworkPolicy.
+
+Graphify's final code-only pass analyzed 44 test files and about 41,200 words, producing 278 nodes, 313 edges, 34 communities, no import cycles, and an estimated 86.0x query-token reduction. The leading cross-community bridges are `runRealAppServerContract()`, `runRecoveryContract()`, `runAgentSmoke()`, and `startFakeResponsesServer()`.
+
+Residual constraints are unchanged: Hermes is unavailable locally but mandatory in Linux CI; the live ChatGPT suite was not opted in; SBOM and vulnerability scanning remain immutable CI-only gates. No credential, image, cluster resource, graph artifact, branch, or commit was pushed.

@@ -35,7 +35,11 @@ interface PendingTools {
 class FixtureTools {
   pending: PendingTools | undefined;
 
-  constructor(private readonly completed: string[]) {}
+  constructor(
+    private readonly completed: string[],
+    private readonly completedRoundWidths: number[],
+    private readonly nextRound: (fingerprint: string) => TurnResult | undefined,
+  ) {}
 
   toDynamicTools(tools: Array<Record<string, unknown>>) {
     return tools.map((tool) => {
@@ -81,18 +85,22 @@ class FixtureTools {
           : call.name;
       this.completed.push(name);
     }
+    this.completedRoundWidths.push(pending.calls.length);
     this.pending = undefined;
+    const next = this.nextRound(request.toolFingerprint);
     return {
       type: "continued" as const,
       threadId: "thread-tools",
       turnId: "turn-tools",
-      result: Promise.resolve({
-        threadId: "thread-tools",
-        turnId: "turn-tools",
-        text: "tool loop complete",
-        finishReason: "stop" as const,
-        usage: { inputTokens: 2, outputTokens: 2, totalTokens: 4 },
-      }),
+      result: Promise.resolve(
+        next ?? {
+          threadId: "thread-tools",
+          turnId: "turn-tools",
+          text: "tool loop complete",
+          finishReason: "stop" as const,
+          usage: { inputTokens: 2, outputTokens: 2, totalTokens: 4 },
+        },
+      ),
     };
   }
 
@@ -114,17 +122,30 @@ function closeServer(server: ServerType): Promise<void> {
 
 export interface ListeningProxyFixture {
   readonly token: string;
+  readonly listenHost: "0.0.0.0";
   readonly baseURL: string;
+  readonly dockerBaseURL: string;
   readonly commands: TurnCommand[];
   readonly images: { png: string; jpeg: string; webp: string };
   readonly completedToolCalls: string[];
+  readonly completedToolRoundWidths: number[];
   readonly internalToolEvents: number;
   readonly abortedTurns: number;
   readonly requestedPaths: string[];
-  runToolLoop(client: OpenAI, names: string[]): Promise<void>;
+  readonly requestErrors: Array<{
+    status: number;
+    code?: string;
+    param?: string;
+  }>;
+  runChatToolRounds(client: OpenAI, rounds: string[][]): Promise<void>;
+  runResponsesToolRounds(client: OpenAI, rounds: string[][]): Promise<void>;
   waitForBlockedTurn(): Promise<void>;
   waitForAbortedTurn(): Promise<void>;
-  armAgentTool(name: string, arguments_: Record<string, JsonValue>): void;
+  armAgentToolRounds(
+    name: string,
+    arguments_: Record<string, JsonValue>,
+    widths: number[],
+  ): void;
   close(): Promise<void>;
 }
 
@@ -142,13 +163,49 @@ export async function startListeningProxyFixture(): Promise<ListeningProxyFixtur
   );
   const commands: TurnCommand[] = [];
   const completedToolCalls: string[] = [];
+  const completedToolRoundWidths: number[] = [];
   const requestedPaths: string[] = [];
-  const tools = new FixtureTools(completedToolCalls);
-  let sequence = 0;
-  let nextToolCalls: Array<{
-    name: string;
-    arguments: Record<string, JsonValue>;
+  const requestErrors: Array<{
+    status: number;
+    code?: string;
+    param?: string;
   }> = [];
+  let sequence = 0;
+  let toolSequence = 0;
+  let nextToolRounds: Array<
+    Array<{
+      name: string;
+      arguments: Record<string, JsonValue>;
+    }>
+  > = [];
+  const nextToolResult = (fingerprint: string): TurnResult | undefined => {
+    const round = nextToolRounds.shift();
+    if (!round) return undefined;
+    toolSequence += 1;
+    const calls = round.map((call, index) => ({
+      id: `call_fixture_${toolSequence}_${index}`,
+      name: call.name,
+      arguments: call.arguments,
+    }));
+    tools.pending = { calls, fingerprint };
+    return {
+      threadId: "thread-tools",
+      turnId: `turn-tools-${toolSequence}`,
+      text: "",
+      finishReason: "tool_calls",
+      toolCalls: calls,
+    };
+  };
+  const tools = new FixtureTools(
+    completedToolCalls,
+    completedToolRoundWidths,
+    nextToolResult,
+  );
+  const armRounds = (name: string, rounds: string[][]) => {
+    nextToolRounds = rounds.map((round) =>
+      round.map((label) => ({ name, arguments: { name: label } })),
+    );
+  };
   let abortedTurns = 0;
   let blockedStarted = Promise.withResolvers<void>();
 
@@ -187,32 +244,18 @@ export async function startListeningProxyFixture(): Promise<ListeningProxyFixtur
       });
     }
     if (
-      nextToolCalls.length > 0 &&
-      nextToolCalls.every((call) =>
+      nextToolRounds.length > 0 &&
+      (nextToolRounds[0] ?? []).every((call) =>
         command.dynamicTools?.some(
           (tool) => tool.type === "function" && tool.name === call.name,
         ),
       )
     ) {
-      const calls = nextToolCalls.map((call, index) => ({
-        id: `call_fixture_${sequence}_${index}`,
-        name: call.name,
-        arguments: call.arguments,
-      }));
-      nextToolCalls = [];
-      tools.pending = {
-        calls,
-        fingerprint: lifecycle?.tool?.toolFingerprint ?? "",
-      };
+      const result = nextToolResult(lifecycle?.tool?.toolFingerprint ?? "");
+      if (!result) throw new Error("Fixture tool round missing");
       await lifecycle?.tool?.suspended?.(threadId, turnId);
       await lifecycle?.release?.();
-      return {
-        threadId,
-        turnId,
-        text: "",
-        finishReason: "tool_calls",
-        toolCalls: calls,
-      };
+      return { ...result, threadId, turnId };
     }
     await lifecycle?.release?.();
     return {
@@ -276,11 +319,27 @@ export async function startListeningProxyFixture(): Promise<ListeningProxyFixtur
     },
   });
   const server = serve({
-    fetch(request) {
+    async fetch(request) {
       requestedPaths.push(new URL(request.url).pathname);
-      return app.fetch(request);
+      const response = await app.fetch(request);
+      if (!response.ok) {
+        const body = (await response
+          .clone()
+          .json()
+          .catch(() => ({}))) as {
+          error?: { code?: string; param?: string };
+        };
+        requestErrors.push({
+          status: response.status,
+          ...(body.error?.code === undefined ? {} : { code: body.error.code }),
+          ...(body.error?.param === undefined
+            ? {}
+            : { param: body.error.param }),
+        });
+      }
+      return response;
     },
-    hostname: "127.0.0.1",
+    hostname: "0.0.0.0",
     port: 0,
   });
   await new Promise<void>((resolve, reject) => {
@@ -294,24 +353,73 @@ export async function startListeningProxyFixture(): Promise<ListeningProxyFixtur
 
   return {
     token,
+    listenHost: "0.0.0.0",
     baseURL: `http://127.0.0.1:${port}/v1`,
+    dockerBaseURL: `http://host.docker.internal:${port}/v1`,
     commands,
     requestedPaths,
+    requestErrors,
     images: {
       png: `data:image/png;base64,${signatures.png.toString("base64")}`,
       jpeg: `data:image/jpeg;base64,${signatures.jpeg.toString("base64")}`,
       webp: `data:image/webp;base64,${signatures.webp.toString("base64")}`,
     },
     completedToolCalls,
+    completedToolRoundWidths,
     internalToolEvents: 0,
     get abortedTurns() {
       return abortedTurns;
     },
-    async runToolLoop(client, names) {
-      nextToolCalls = names.map((name) => ({
-        name: "fixture_tool",
-        arguments: { name },
-      }));
+    async runChatToolRounds(client, rounds) {
+      armRounds("fixture_tool", rounds);
+      const toolsDefinition = [
+        {
+          type: "function" as const,
+          function: {
+            name: "fixture_tool",
+            description: "Return the supplied fixture name",
+            parameters: {
+              type: "object" as const,
+              properties: { name: { type: "string" } },
+              required: ["name"],
+              additionalProperties: false,
+            },
+          },
+        },
+      ];
+      const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+        { role: "user", content: "call tools across rounds" },
+      ];
+      for (;;) {
+        const response = await client.chat.completions.create({
+          model: "gpt-5.4",
+          messages,
+          tools: toolsDefinition,
+          parallel_tool_calls: true,
+        });
+        const message = response.choices[0]?.message;
+        if (!message) throw new Error("Chat fixture returned no message");
+        messages.push(message);
+        if (!message.tool_calls || message.tool_calls.length === 0) {
+          if (message.content !== "tool loop complete") {
+            throw new Error("Chat tool loop did not complete");
+          }
+          return;
+        }
+        for (const call of message.tool_calls) {
+          if (call.type !== "function") {
+            throw new Error("Chat fixture returned a non-function tool");
+          }
+          messages.push({
+            role: "tool",
+            tool_call_id: call.id,
+            content: `result:${call.function.arguments}`,
+          });
+        }
+      }
+    },
+    async runResponsesToolRounds(client, rounds) {
+      armRounds("fixture_tool", rounds);
       const toolsDefinition = [
         {
           type: "function" as const,
@@ -326,33 +434,46 @@ export async function startListeningProxyFixture(): Promise<ListeningProxyFixtur
           strict: true,
         },
       ];
-      const first = await client.responses.create({
+      let response = await client.responses.create({
         model: "gpt-5.4",
         input: "call tools",
         tools: toolsDefinition,
         parallel_tool_calls: true,
         store: true,
       });
-      const calls = first.output.filter(
-        (item) => item.type === "function_call",
-      );
-      const final = await client.responses.create({
-        model: "gpt-5.4",
-        previous_response_id: first.id,
-        tools: toolsDefinition,
-        input: calls.map((call) => ({
-          type: "function_call_output" as const,
-          call_id: call.call_id,
-          output: `result:${call.arguments}`,
-        })),
-        store: true,
-      });
-      if (final.output_text !== "tool loop complete") {
-        throw new Error("Tool loop did not complete");
+      for (;;) {
+        const calls = response.output.filter(
+          (item) => item.type === "function_call",
+        );
+        if (calls.length === 0) {
+          if (response.output_text !== "tool loop complete") {
+            throw new Error("Responses tool loop did not complete");
+          }
+          return;
+        }
+        response = await client.responses.create({
+          model: "gpt-5.4",
+          previous_response_id: response.id,
+          tools: toolsDefinition,
+          input: calls.map((call) => ({
+            type: "function_call_output" as const,
+            call_id: call.call_id,
+            output: `result:${call.arguments}`,
+          })),
+          store: true,
+        });
       }
     },
-    armAgentTool(name, arguments_) {
-      nextToolCalls = [{ name, arguments: arguments_ }];
+    armAgentToolRounds(name, arguments_, widths) {
+      nextToolRounds = widths.map((width, round) =>
+        Array.from({ length: width }, (_, index) => ({
+          name,
+          arguments: {
+            ...arguments_,
+            name: `${round}:${index}`,
+          },
+        })),
+      );
     },
     async waitForBlockedTurn() {
       await blockedStarted.promise;
