@@ -122,8 +122,8 @@ jobs:
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          docker buildx imagetools inspect "$IMAGE:$GITHUB_REF_NAME" | grep -F "Digest: $DIGEST"
-          docker buildx imagetools inspect "$IMAGE:sha-$GITHUB_SHA" | grep -F "Digest: $DIGEST"
+          docker buildx imagetools inspect "$IMAGE:$GITHUB_REF_NAME" | grep -Eq "^Digest:[[:space:]]+$DIGEST$"
+          docker buildx imagetools inspect "$IMAGE:sha-$GITHUB_SHA" | grep -Eq "^Digest:[[:space:]]+$DIGEST$"
           docker buildx imagetools inspect "$IMAGE@$DIGEST" --raw >/tmp/manifest.json
           jq -r '.manifests[] | select(.platform.os != "unknown") | .platform | "\(.os)/\(.architecture)"' /tmp/manifest.json | sort -u >/tmp/platforms
           diff -u <(printf '%s\n' linux/amd64 linux/arm64) /tmp/platforms

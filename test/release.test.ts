@@ -23,4 +23,10 @@ describe("release workflow", () => {
       workflow.match(/grep -Eiq 'manifest unknown\|not found'/g) ?? [],
     ).toHaveLength(2);
   });
+
+  it("matches the aligned digest output from imagetools inspect", () => {
+    expect(
+      workflow.match(/grep -Eq "\^Digest:\[\[:space:\]\]\+\$DIGEST\$"/g) ?? [],
+    ).toHaveLength(2);
+  });
 });
