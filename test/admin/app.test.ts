@@ -312,9 +312,7 @@ it("rejects encoded asset traversal", async () => {
   const { app } = fixture({ type: "signed_out" }, assetRoot);
 
   try {
-    const response = await app.request(
-      "/assets/%2e%2e%2f%2e%2e%2fsecret.js",
-    );
+    const response = await app.request("/assets/%2e%2e%2f%2e%2e%2fsecret.js");
     expect(response.status).toBe(404);
     expect(await response.text()).not.toContain("not public");
   } finally {

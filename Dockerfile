@@ -2,7 +2,7 @@
 
 FROM --platform=$BUILDPLATFORM oven/bun:1-alpine AS build
 WORKDIR /app
-COPY package.json bun.lock tsconfig.json tsconfig.build.json ./
+COPY package.json bun.lock tsconfig.json tsconfig.build.json tsconfig.admin.json vite.config.ts components.json ./
 RUN bun install --frozen-lockfile
 COPY src ./src
 COPY config ./config

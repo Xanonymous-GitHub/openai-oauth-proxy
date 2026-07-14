@@ -64,10 +64,7 @@ function accountState(value: unknown): AccountState | null {
 
 export function parseAdminResponse(value: unknown): AdminResponse | null {
   if (!record(value) || typeof value.csrfToken !== "string") return null;
-  if (
-    value.error !== undefined &&
-    value.error !== "authentication_required"
-  ) {
+  if (value.error !== undefined && value.error !== "authentication_required") {
     return null;
   }
   const state = accountState(value.state);

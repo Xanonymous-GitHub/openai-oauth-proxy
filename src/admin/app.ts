@@ -36,12 +36,8 @@ export function createAdminApp({
   });
 
   app.get("/", (context) => context.html(ADMIN_PAGE));
-  app.get("/app.js", (context) =>
-    adminAsset(context, assetRoot, "app.js"),
-  );
-  app.get("/app.css", (context) =>
-    adminAsset(context, assetRoot, "app.css"),
-  );
+  app.get("/app.js", (context) => adminAsset(context, assetRoot, "app.js"));
+  app.get("/app.css", (context) => adminAsset(context, assetRoot, "app.css"));
   app.get("/assets/*", (context) =>
     adminAsset(context, assetRoot, context.req.path.slice(1)),
   );

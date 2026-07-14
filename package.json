@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build:server": "tsc -p tsconfig.build.json",
+    "build:admin": "tsc -p tsconfig.admin.json --noEmit && vite build",
+    "build": "bun run build:server && bun run build:admin",
     "typecheck:server": "tsc -p tsconfig.json --noEmit",
     "typecheck:admin": "tsc -p tsconfig.admin.json --noEmit",
     "typecheck": "bun run typecheck:server && bun run typecheck:admin",
