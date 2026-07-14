@@ -12,8 +12,12 @@ const OPTIONS = [
 ] as const;
 
 function storedMode(): ThemeMode {
-  const value = localStorage.getItem(STORAGE_KEY);
-  return value === "light" || value === "dark" ? value : "system";
+  try {
+    const value = localStorage.getItem(STORAGE_KEY);
+    return value === "light" || value === "dark" ? value : "system";
+  } catch {
+    return "system";
+  }
 }
 
 export function ThemeControl() {
@@ -26,7 +30,11 @@ export function ThemeControl() {
         mode === "system" ? (media.matches ? "dark" : "light") : mode;
     };
     apply();
-    localStorage.setItem(STORAGE_KEY, mode);
+    try {
+      localStorage.setItem(STORAGE_KEY, mode);
+    } catch {
+      // Persistence is optional; the selected theme is already applied.
+    }
     if (mode !== "system") return;
     media.addEventListener("change", apply);
     return () => media.removeEventListener("change", apply);

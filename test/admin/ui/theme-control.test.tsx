@@ -68,6 +68,44 @@ it("restores a stored explicit mode on mount", () => {
   ).toBe("true");
 });
 
+it("falls back to the system theme when storage reads throw", () => {
+  vi.stubGlobal("localStorage", {
+    ...storage,
+    getItem: () => {
+      throw new Error("storage unavailable");
+    },
+  });
+
+  render(<ThemeControl />);
+
+  expect(document.documentElement.dataset.theme).toBe("dark");
+  expect(
+    screen
+      .getByRole("button", { name: "Use system theme" })
+      .getAttribute("aria-pressed"),
+  ).toBe("true");
+});
+
+it("applies theme changes when storage writes throw", async () => {
+  vi.stubGlobal("localStorage", {
+    ...storage,
+    setItem: () => {
+      throw new Error("storage unavailable");
+    },
+  });
+  const user = userEvent.setup();
+
+  render(<ThemeControl />);
+  await user.click(screen.getByRole("button", { name: "Use light theme" }));
+
+  expect(document.documentElement.dataset.theme).toBe("light");
+  expect(
+    screen
+      .getByRole("button", { name: "Use light theme" })
+      .getAttribute("aria-pressed"),
+  ).toBe("true");
+});
+
 it("exposes the theme modes in keyboard order", async () => {
   const user = userEvent.setup();
   render(<ThemeControl />);

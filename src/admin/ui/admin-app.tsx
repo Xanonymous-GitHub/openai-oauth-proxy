@@ -18,7 +18,6 @@ import {
   CardContent,
   CardDescription,
   CardHeader,
-  CardTitle,
 } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -393,14 +392,16 @@ export function AdminApp() {
         setIssue("session_unavailable");
         return;
       }
+      if (!response.ok && response.status !== 503) {
+        setIssue("session_unavailable");
+        return;
+      }
       setState(parsed.state);
       setCsrfToken(parsed.csrfToken);
       setIssue(
         response.status === 503 || parsed.error
           ? "authentication_unavailable"
-          : response.ok
-            ? null
-            : "session_unavailable",
+          : null,
       );
     } catch {
       setIssue("session_unavailable");
@@ -444,12 +445,12 @@ export function AdminApp() {
         <section className="md:col-span-7" aria-labelledby="account-title">
           <Card className="rounded-2xl shadow-[0_18px_50px_-32px_oklch(0.48_0.095_190_/_0.3)]">
             <CardHeader>
-              <CardTitle
+              <h1
                 id="account-title"
                 className="text-sm font-medium text-muted-foreground"
               >
                 Codex authentication
-              </CardTitle>
+              </h1>
               <CardDescription>
                 Manage the account used by this local proxy.
               </CardDescription>
@@ -482,12 +483,12 @@ export function AdminApp() {
             <p className="text-sm font-medium text-primary">
               Secure by location
             </p>
-            <h1
+            <h2
               id="guidance-title"
               className="mt-2 text-3xl font-semibold tracking-tight"
             >
               A focused path to authorization.
-            </h1>
+            </h2>
             <p className="mt-3 max-w-[48ch] text-sm leading-6 text-muted-foreground">
               This panel stays on loopback and handles only the Codex account
               lifecycle.

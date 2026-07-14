@@ -40,11 +40,24 @@ function fetchSequence(...items: Array<Response | Error | Promise<Response>>) {
   return fetchMock;
 }
 
-function requestInit(
+function expectMutation(
   fetchMock: ReturnType<typeof fetchSequence>,
   call: number,
+  path: string,
+  body: object,
+  token = csrfToken,
 ) {
-  return fetchMock.mock.calls[call]?.[1] as RequestInit;
+  expect(fetchMock.mock.calls[call]).toEqual([
+    path,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-csrf-token": token,
+      },
+      body: JSON.stringify(body),
+    },
+  ]);
 }
 
 const pending = {
@@ -67,12 +80,7 @@ describe("AdminApp", () => {
       await screen.findByRole("button", { name: "Refresh status" }),
     );
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-    expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/refresh");
-    expect(requestInit(fetchMock, 1).body).toBe("{}");
-    expect(requestInit(fetchMock, 1).headers).toMatchObject({
-      "content-type": "application/json",
-      "x-csrf-token": csrfToken,
-    });
+    expectMutation(fetchMock, 1, "/api/refresh", {});
   });
 
   it("starts device login with the exact payload", async () => {
@@ -87,10 +95,31 @@ describe("AdminApp", () => {
       await screen.findByRole("button", { name: "Connect Codex" }),
     );
     await screen.findByText("ABCD-EFGH");
-    expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/login");
-    expect(requestInit(fetchMock, 1).body).toBe(
-      JSON.stringify({ type: "chatgptDeviceCode" }),
-    );
+    expectMutation(fetchMock, 1, "/api/login", { type: "chatgptDeviceCode" });
+  });
+
+  it("uses the authentication title as the page heading", async () => {
+    fetchSequence(response({ type: "signed_out" }));
+    render(<AdminApp />);
+
+    expect(
+      await screen.findByRole("heading", {
+        level: 1,
+        name: "Codex authentication",
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("heading", {
+        level: 2,
+        name: "A focused path to authorization.",
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("heading", {
+        level: 2,
+        name: "Connect your Codex account",
+      }),
+    ).toBeTruthy();
   });
 
   it("renders ready details and a nullable-email fallback", async () => {
@@ -139,6 +168,8 @@ describe("AdminApp", () => {
       "/api/refresh",
       "/api/cancel",
     ]);
+    expectMutation(fetchMock, 1, "/api/refresh", {});
+    expectMutation(fetchMock, 2, "/api/cancel", {});
   });
 
   it("links only the canonical OpenAI device URL", async () => {
@@ -231,9 +262,7 @@ describe("AdminApp", () => {
     await user.click(
       await screen.findByRole("button", { name: "Refresh status" }),
     );
-    expect(requestInit(loginFetch, 2).headers).toMatchObject({
-      "x-csrf-token": rotatedToken,
-    });
+    expectMutation(loginFetch, 2, "/api/refresh", {}, rotatedToken);
     first.unmount();
 
     const logoutFetch = fetchSequence(
@@ -250,19 +279,26 @@ describe("AdminApp", () => {
     await user.click(
       await screen.findByRole("button", { name: "Connect Codex" }),
     );
-    expect(requestInit(logoutFetch, 2).headers).toMatchObject({
-      "x-csrf-token": rotatedToken,
-    });
+    expectMutation(logoutFetch, 1, "/api/logout", {});
+    expectMutation(
+      logoutFetch,
+      2,
+      "/api/login",
+      { type: "chatgptDeviceCode" },
+      rotatedToken,
+    );
   });
 
-  it("bootstraps once after 403 without replaying the mutation", async () => {
+  it.each([
+    401, 403,
+  ])("bootstraps once after %i without replaying the mutation", async (status) => {
     const fetchMock = fetchSequence(
       response({
         type: "ready",
         email: "dev@example.com",
         planType: "plus",
       }),
-      Response.json({ error: "forbidden" }, { status: 403 }),
+      Response.json({ error: "unauthorized" }, { status }),
       response({ type: "signed_out" }, rotatedToken),
     );
     const user = userEvent.setup();
@@ -276,6 +312,9 @@ describe("AdminApp", () => {
       "/api/refresh",
       "/api/state",
     ]);
+    expect(
+      fetchMock.mock.calls.filter(([path]) => path === "/api/refresh"),
+    ).toHaveLength(1);
   });
 
   it("applies a valid 503 state and shows sanitized failure copy", async () => {
@@ -297,6 +336,36 @@ describe("AdminApp", () => {
       screen.getByRole("button", { name: "Reconnect Codex" }),
     ).toBeTruthy();
     expect(document.body.textContent).not.toContain("refresh-token");
+  });
+
+  it("preserves state and CSRF token after a valid-shaped 500 response", async () => {
+    const fetchMock = fetchSequence(
+      response({
+        type: "ready",
+        email: "dev@example.com",
+        planType: "plus",
+      }),
+      response({ type: "signed_out" }, rotatedToken, { status: 500 }),
+      response({
+        type: "ready",
+        email: "dev@example.com",
+        planType: "plus",
+      }),
+    );
+    const user = userEvent.setup();
+    render(<AdminApp />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Refresh account" }),
+    );
+    expect(
+      await screen.findByText("Session unavailable. Try again."),
+    ).toBeTruthy();
+    expect(screen.getByText("dev@example.com")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Refresh account" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    expectMutation(fetchMock, 2, "/api/refresh", {}, csrfToken);
   });
 
   it("preserves the last valid state after malformed or failed responses", async () => {
