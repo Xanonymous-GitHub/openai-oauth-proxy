@@ -207,16 +207,19 @@ describe("AdminApp", () => {
       "https://auth.openai.com/codex/device?redirect=https://evil.example",
     ],
     ["fragment", "https://auth.openai.com/codex/device#fragment"],
-  ])("rejects the canonical device URL with a %s", async (_, verificationUrl) => {
-    fetchSequence(response({ ...pending, verificationUrl }));
-    render(<AdminApp />);
-    expect(
-      await screen.findByText("Verification link unavailable"),
-    ).toBeTruthy();
-    expect(
-      screen.queryByRole("link", { name: "Open verification page" }),
-    ).toBeNull();
-  });
+  ])(
+    "rejects the canonical device URL with a %s",
+    async (_, verificationUrl) => {
+      fetchSequence(response({ ...pending, verificationUrl }));
+      render(<AdminApp />);
+      expect(
+        await screen.findByText("Verification link unavailable"),
+      ).toBeTruthy();
+      expect(
+        screen.queryByRole("link", { name: "Open verification page" }),
+      ).toBeNull();
+    },
+  );
 
   it("reconnects from authentication error", async () => {
     const fetchMock = fetchSequence(
@@ -289,33 +292,34 @@ describe("AdminApp", () => {
     );
   });
 
-  it.each([
-    401, 403,
-  ])("bootstraps once after %i without replaying the mutation", async (status) => {
-    const fetchMock = fetchSequence(
-      response({
-        type: "ready",
-        email: "dev@example.com",
-        planType: "plus",
-      }),
-      Response.json({ error: "unauthorized" }, { status }),
-      response({ type: "signed_out" }, rotatedToken),
-    );
-    const user = userEvent.setup();
-    render(<AdminApp />);
-    await user.click(
-      await screen.findByRole("button", { name: "Refresh account" }),
-    );
-    await screen.findByRole("button", { name: "Connect Codex" });
-    expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
-      "/api/state",
-      "/api/refresh",
-      "/api/state",
-    ]);
-    expect(
-      fetchMock.mock.calls.filter(([path]) => path === "/api/refresh"),
-    ).toHaveLength(1);
-  });
+  it.each([401, 403])(
+    "bootstraps once after %i without replaying the mutation",
+    async (status) => {
+      const fetchMock = fetchSequence(
+        response({
+          type: "ready",
+          email: "dev@example.com",
+          planType: "plus",
+        }),
+        Response.json({ error: "unauthorized" }, { status }),
+        response({ type: "signed_out" }, rotatedToken),
+      );
+      const user = userEvent.setup();
+      render(<AdminApp />);
+      await user.click(
+        await screen.findByRole("button", { name: "Refresh account" }),
+      );
+      await screen.findByRole("button", { name: "Connect Codex" });
+      expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
+        "/api/state",
+        "/api/refresh",
+        "/api/state",
+      ]);
+      expect(
+        fetchMock.mock.calls.filter(([path]) => path === "/api/refresh"),
+      ).toHaveLength(1);
+    },
+  );
 
   it("applies a valid 503 state and shows sanitized failure copy", async () => {
     fetchSequence(

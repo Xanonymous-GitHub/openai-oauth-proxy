@@ -264,21 +264,24 @@ describe("JSONL transport", () => {
       [{ threadId: "thread-1", turnId: "turn-1" }],
       { threadId: "thread-1", turnId: "turn-1" },
     ],
-  ] as const)("maps %s to literal method %s", async (hostMethod, rpcMethod, args, expectedParams) => {
-    const harness = createHarness();
-    const call = harness.transport.host[hostMethod] as (
-      ...values: never[]
-    ) => Promise<unknown>;
-    const pending = call(...(args as unknown as never[]));
-    const request = await harness.nextOutgoing();
+  ] as const)(
+    "maps %s to literal method %s",
+    async (hostMethod, rpcMethod, args, expectedParams) => {
+      const harness = createHarness();
+      const call = harness.transport.host[hostMethod] as (
+        ...values: never[]
+      ) => Promise<unknown>;
+      const pending = call(...(args as unknown as never[]));
+      const request = await harness.nextOutgoing();
 
-    expect(request).toMatchObject({ method: rpcMethod });
-    if (expectedParams === undefined)
-      expect(request).not.toHaveProperty("params");
-    else expect(request.params).toEqual(expectedParams);
-    harness.send({ id: request.id, result: {} });
-    await expect(pending).resolves.toEqual({});
-  });
+      expect(request).toMatchObject({ method: rpcMethod });
+      if (expectedParams === undefined)
+        expect(request).not.toHaveProperty("params");
+      else expect(request.params).toEqual(expectedParams);
+      harness.send({ id: request.id, result: {} });
+      await expect(pending).resolves.toEqual({});
+    },
+  );
 
   it("correlates out-of-order responses by request ID", async () => {
     const harness = createHarness();
@@ -415,30 +418,34 @@ describe("JSONL transport", () => {
     await expect(within(pending)).rejects.toBeInstanceOf(CodexProtocolError);
   });
 
-  it.each([
-    "input",
-    "output",
-  ] as const)("rejects pending requests and queues on %s stream error", async (streamName) => {
-    const harness = createHarness();
-    const pending = harness.transport.host.accountRead(false);
-    await harness.nextOutgoing();
-    const nextEvent = harness.transport.host
-      .events()
-      [Symbol.asyncIterator]()
-      .next();
-    const nextTool = harness.transport.host
-      .toolCalls()
-      [Symbol.asyncIterator]()
-      .next();
-    const stream =
-      streamName === "input" ? harness.fromServer : harness.toServer;
+  it.each(["input", "output"] as const)(
+    "rejects pending requests and queues on %s stream error",
+    async (streamName) => {
+      const harness = createHarness();
+      const pending = harness.transport.host.accountRead(false);
+      await harness.nextOutgoing();
+      const nextEvent = harness.transport.host
+        .events()
+        [Symbol.asyncIterator]()
+        .next();
+      const nextTool = harness.transport.host
+        .toolCalls()
+        [Symbol.asyncIterator]()
+        .next();
+      const stream =
+        streamName === "input" ? harness.fromServer : harness.toServer;
 
-    expect(() => stream.emit("error", new Error("secret-token"))).not.toThrow();
+      expect(() =>
+        stream.emit("error", new Error("secret-token")),
+      ).not.toThrow();
 
-    await expect(within(pending)).rejects.toBeInstanceOf(CodexProtocolError);
-    await expect(within(nextEvent)).rejects.toBeInstanceOf(CodexProtocolError);
-    await expect(within(nextTool)).rejects.toBeInstanceOf(CodexProtocolError);
-  });
+      await expect(within(pending)).rejects.toBeInstanceOf(CodexProtocolError);
+      await expect(within(nextEvent)).rejects.toBeInstanceOf(
+        CodexProtocolError,
+      );
+      await expect(within(nextTool)).rejects.toBeInstanceOf(CodexProtocolError);
+    },
+  );
 
   it("rejects pending requests when a response has an unknown ID", async () => {
     const harness = createHarness();
@@ -512,20 +519,18 @@ describe("JSONL transport", () => {
     expect(source).not.toContain("MAX_ABORTED_RESPONSE_IDS");
   });
 
-  it.each([
-    "0",
-    -1,
-    0.5,
-    Number.MAX_SAFE_INTEGER + 1,
-  ])("protocol-fails malformed response ID %j", async (id) => {
-    const harness = createHarness();
-    const pending = harness.transport.host.accountRead(false);
-    await harness.nextOutgoing();
+  it.each(["0", -1, 0.5, Number.MAX_SAFE_INTEGER + 1])(
+    "protocol-fails malformed response ID %j",
+    async (id) => {
+      const harness = createHarness();
+      const pending = harness.transport.host.accountRead(false);
+      await harness.nextOutgoing();
 
-    harness.send({ id, result: {} });
+      harness.send({ id, result: {} });
 
-    await expect(pending).rejects.toBeInstanceOf(CodexProtocolError);
-  });
+      await expect(pending).rejects.toBeInstanceOf(CodexProtocolError);
+    },
+  );
 
   it("resets the issued numeric ID range with a replacement generation", async () => {
     const retired = createHarness(1);

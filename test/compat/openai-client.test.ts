@@ -667,28 +667,29 @@ describe("official OpenAI JavaScript client compatibility", () => {
       },
     },
   ])("accepts documented Responses concept: $concept", async ({ run }) =>
-    run());
+    run(),
+  );
 
-  it.each(rejectionCases)("rejects documented concept: $concept", async ({
-    endpoint,
-    body,
-    code,
-    param,
-  }) => {
-    const commandCount = fixture.commands.length;
-    const request =
-      endpoint === "chat"
-        ? client.chat.completions.create(
-            body(
-              fixture,
-            ) as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming,
-          )
-        : client.responses.create(
-            body(fixture) as OpenAI.Responses.ResponseCreateParamsNonStreaming,
-          );
-    await expect(request).rejects.toMatchObject({ status: 400, code, param });
-    expect(fixture.commands).toHaveLength(commandCount);
-  });
+  it.each(rejectionCases)(
+    "rejects documented concept: $concept",
+    async ({ endpoint, body, code, param }) => {
+      const commandCount = fixture.commands.length;
+      const request =
+        endpoint === "chat"
+          ? client.chat.completions.create(
+              body(
+                fixture,
+              ) as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming,
+            )
+          : client.responses.create(
+              body(
+                fixture,
+              ) as OpenAI.Responses.ResponseCreateParamsNonStreaming,
+            );
+      await expect(request).rejects.toMatchObject({ status: 400, code, param });
+      expect(fixture.commands).toHaveLength(commandCount);
+    },
+  );
 
   it("supports non-resumable Responses with store false", async () => {
     const transient = await client.responses.create({
@@ -772,17 +773,18 @@ describe("official OpenAI JavaScript client compatibility", () => {
       request: () => client.fineTuning.jobs.list(),
     },
     { family: "vector stores", request: () => client.vectorStores.list() },
-  ])("rejects unsupported SDK endpoint family: $family", async ({
-    request,
-  }) => {
-    const commandCount = fixture.commands.length;
-    await expect(request()).rejects.toMatchObject({
-      status: 404,
-      code: "unsupported_endpoint",
-      param: null,
-    });
-    expect(fixture.commands).toHaveLength(commandCount);
-  });
+  ])(
+    "rejects unsupported SDK endpoint family: $family",
+    async ({ request }) => {
+      const commandCount = fixture.commands.length;
+      await expect(request()).rejects.toMatchObject({
+        status: 404,
+        code: "unsupported_endpoint",
+        param: null,
+      });
+      expect(fixture.commands).toHaveLength(commandCount);
+    },
+  );
 
   it("parses models, Chat Completions, role history, images, and JSON Schema", async () => {
     expect((await client.models.list()).data.map((model) => model.id)).toEqual([

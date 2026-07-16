@@ -221,30 +221,27 @@ describe("parseChatRequest", () => {
     );
   });
 
-  it.each([
-    true,
-    false,
-  ])("accepts streaming include_usage=%s", (include_usage) => {
-    expect(
-      parseChatRequest({
-        ...chatRequest,
-        stream: true,
-        stream_options: { include_usage },
-      }).stream_options,
-    ).toEqual({ include_usage });
-  });
+  it.each([true, false])(
+    "accepts streaming include_usage=%s",
+    (include_usage) => {
+      expect(
+        parseChatRequest({
+          ...chatRequest,
+          stream: true,
+          stream_options: { include_usage },
+        }).stream_options,
+      ).toEqual({ include_usage });
+    },
+  );
 
-  it.each([
-    "minimal",
-    "low",
-    "medium",
-    "high",
-    "xhigh",
-  ])("accepts syntactic reasoning effort %s", (reasoning_effort) => {
-    expect(
-      parseChatRequest({ ...chatRequest, reasoning_effort }).reasoning_effort,
-    ).toBe(reasoning_effort);
-  });
+  it.each(["minimal", "low", "medium", "high", "xhigh"])(
+    "accepts syntactic reasoning effort %s",
+    (reasoning_effort) => {
+      expect(
+        parseChatRequest({ ...chatRequest, reasoning_effort }).reasoning_effort,
+      ).toBe(reasoning_effort);
+    },
+  );
 
   it("rejects an unknown reasoning effort", () => {
     expect(() =>
@@ -252,39 +249,43 @@ describe("parseChatRequest", () => {
     ).toThrowError(expect.objectContaining({ param: "reasoning_effort" }));
   });
 
-  it.each(
-    invalidJsonObjectRoots,
-  )("rejects a %s function parameters root", (_name, parameters) => {
-    expect(() =>
-      parseChatRequest({
-        ...chatRequest,
-        tools: [
-          {
-            type: "function",
-            function: { name: "lookup", parameters },
-          },
-        ],
-      }),
-    ).toThrowError(
-      expect.objectContaining({ param: "tools.0.function.parameters" }),
-    );
-  });
+  it.each(invalidJsonObjectRoots)(
+    "rejects a %s function parameters root",
+    (_name, parameters) => {
+      expect(() =>
+        parseChatRequest({
+          ...chatRequest,
+          tools: [
+            {
+              type: "function",
+              function: { name: "lookup", parameters },
+            },
+          ],
+        }),
+      ).toThrowError(
+        expect.objectContaining({ param: "tools.0.function.parameters" }),
+      );
+    },
+  );
 
-  it.each(
-    invalidJsonObjectRoots,
-  )("rejects a %s structured-output schema root", (_name, schema) => {
-    expect(() =>
-      parseChatRequest({
-        ...chatRequest,
-        response_format: {
-          type: "json_schema",
-          json_schema: { name: "answer", schema },
-        },
-      }),
-    ).toThrowError(
-      expect.objectContaining({ param: "response_format.json_schema.schema" }),
-    );
-  });
+  it.each(invalidJsonObjectRoots)(
+    "rejects a %s structured-output schema root",
+    (_name, schema) => {
+      expect(() =>
+        parseChatRequest({
+          ...chatRequest,
+          response_format: {
+            type: "json_schema",
+            json_schema: { name: "answer", schema },
+          },
+        }),
+      ).toThrowError(
+        expect.objectContaining({
+          param: "response_format.json_schema.schema",
+        }),
+      );
+    },
+  );
 });
 
 describe("parseResponsesRequest", () => {
@@ -440,27 +441,25 @@ describe("parseResponsesRequest", () => {
     );
   });
 
-  it.each([
-    "system",
-    "developer",
-    "user",
-    "assistant",
-  ] as const)("rejects output_text in %s request messages", (role) => {
-    expect(() =>
-      parseResponsesRequest({
-        model: "gpt-5.4",
-        input: [
-          {
-            type: "message",
-            role,
-            content: [{ type: "output_text", text: "output-only" }],
-          },
-        ],
-      }),
-    ).toThrowError(
-      expect.objectContaining({ param: "input.0.content.0.type" }),
-    );
-  });
+  it.each(["system", "developer", "user", "assistant"] as const)(
+    "rejects output_text in %s request messages",
+    (role) => {
+      expect(() =>
+        parseResponsesRequest({
+          model: "gpt-5.4",
+          input: [
+            {
+              type: "message",
+              role,
+              content: [{ type: "output_text", text: "output-only" }],
+            },
+          ],
+        }),
+      ).toThrowError(
+        expect.objectContaining({ param: "input.0.content.0.type" }),
+      );
+    },
+  );
 
   it("rejects the nested Chat tool shape in Responses", () => {
     expect(() =>
@@ -477,31 +476,33 @@ describe("parseResponsesRequest", () => {
     ).toThrowError(expect.objectContaining({ status: 400 }));
   });
 
-  it.each(
-    invalidJsonObjectRoots,
-  )("rejects a %s function parameters root", (_name, parameters) => {
-    expect(() =>
-      parseResponsesRequest({
-        model: "gpt-5.4",
-        input: "hi",
-        tools: [{ type: "function", name: "lookup", parameters }],
-      }),
-    ).toThrowError(expect.objectContaining({ param: "tools.0.parameters" }));
-  });
+  it.each(invalidJsonObjectRoots)(
+    "rejects a %s function parameters root",
+    (_name, parameters) => {
+      expect(() =>
+        parseResponsesRequest({
+          model: "gpt-5.4",
+          input: "hi",
+          tools: [{ type: "function", name: "lookup", parameters }],
+        }),
+      ).toThrowError(expect.objectContaining({ param: "tools.0.parameters" }));
+    },
+  );
 
-  it.each(
-    invalidJsonObjectRoots,
-  )("rejects a %s structured-output schema root", (_name, schema) => {
-    expect(() =>
-      parseResponsesRequest({
-        model: "gpt-5.4",
-        input: "hi",
-        text: {
-          format: { type: "json_schema", name: "answer", schema },
-        },
-      }),
-    ).toThrowError(expect.objectContaining({ param: "text.format.schema" }));
-  });
+  it.each(invalidJsonObjectRoots)(
+    "rejects a %s structured-output schema root",
+    (_name, schema) => {
+      expect(() =>
+        parseResponsesRequest({
+          model: "gpt-5.4",
+          input: "hi",
+          text: {
+            format: { type: "json_schema", name: "answer", schema },
+          },
+        }),
+      ).toThrowError(expect.objectContaining({ param: "text.format.schema" }));
+    },
+  );
 });
 
 describe("shared HTTP boundary", () => {

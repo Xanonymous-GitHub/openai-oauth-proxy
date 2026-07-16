@@ -22,19 +22,20 @@ function dataUrl(
 }
 
 describe("decodeImages", () => {
-  it.each(
-    Object.keys(signatures) as Array<keyof typeof signatures>,
-  )("validates and counts %s without changing the data URL", (mediaType) => {
-    const url = dataUrl(mediaType);
+  it.each(Object.keys(signatures) as Array<keyof typeof signatures>)(
+    "validates and counts %s without changing the data URL",
+    (mediaType) => {
+      const url = dataUrl(mediaType);
 
-    expect(decodeImages([{ type: "input_image", image_url: url }])).toEqual([
-      {
-        mediaType,
-        dataUrl: url,
-        decodedBytes: signatures[mediaType].byteLength,
-      },
-    ]);
-  });
+      expect(decodeImages([{ type: "input_image", image_url: url }])).toEqual([
+        {
+          mediaType,
+          dataUrl: url,
+          decodedBytes: signatures[mediaType].byteLength,
+        },
+      ]);
+    },
+  );
 
   it("accepts Chat image parts", () => {
     const url = dataUrl("image/png");
@@ -47,18 +48,21 @@ describe("decodeImages", () => {
     ["PNG declared as JPEG", "image/jpeg", signatures["image/png"]],
     ["JPEG declared as WebP", "image/webp", signatures["image/jpeg"]],
     ["WebP declared as PNG", "image/png", signatures["image/webp"]],
-  ])("rejects a declaration/signature mismatch: %s", (_name, mediaType, bytes) => {
-    expect(() =>
-      decodeImages([
-        {
-          type: "input_image",
-          image_url: `data:${mediaType};base64,${bytes.toString("base64")}`,
-        },
-      ]),
-    ).toThrowError(
-      expect.objectContaining({ code: "invalid_image", status: 400 }),
-    );
-  });
+  ])(
+    "rejects a declaration/signature mismatch: %s",
+    (_name, mediaType, bytes) => {
+      expect(() =>
+        decodeImages([
+          {
+            type: "input_image",
+            image_url: `data:${mediaType};base64,${bytes.toString("base64")}`,
+          },
+        ]),
+      ).toThrowError(
+        expect.objectContaining({ code: "invalid_image", status: 400 }),
+      );
+    },
+  );
 
   it.each([
     ["empty data", "data:image/png;base64,"],

@@ -137,24 +137,21 @@ describe("ToolBridge", () => {
     ]);
   });
 
-  it.each([
-    "mcp",
-    "mcp__server",
-    "has space",
-    "slash/name",
-    "",
-  ])("rejects reserved or invalid function name %j", (name) => {
-    const { bridge } = createBridge();
-    expect(() =>
-      bridge.toDynamicTools([
-        {
-          type: "function",
-          name,
-          parameters: { type: "object" },
-        },
-      ]),
-    ).toThrowError(expect.objectContaining({ status: 400 }));
-  });
+  it.each(["mcp", "mcp__server", "has space", "slash/name", ""])(
+    "rejects reserved or invalid function name %j",
+    (name) => {
+      const { bridge } = createBridge();
+      expect(() =>
+        bridge.toDynamicTools([
+          {
+            type: "function",
+            name,
+            parameters: { type: "object" },
+          },
+        ]),
+      ).toThrowError(expect.objectContaining({ status: 400 }));
+    },
+  );
 
   it("canonicalizes definitions without mutating array order", () => {
     const { bridge } = createBridge();
@@ -289,23 +286,26 @@ describe("ToolBridge", () => {
   it.each([
     ["undeclared tool", { tool: "filesystem", namespace: null }],
     ["namespaced tool", { tool: "weather", namespace: "internal" }],
-  ] as const)("rejects an %s before allocating an external ID", (_name, override) => {
-    const { bridge } = createBridge();
-    const call = serverCall("rpc-secret", override.tool);
-    call.params.namespace = override.namespace;
+  ] as const)(
+    "rejects an %s before allocating an external ID",
+    (_name, override) => {
+      const { bridge } = createBridge();
+      const call = serverCall("rpc-secret", override.tool);
+      call.params.namespace = override.namespace;
 
-    expect(() => bridge.register(call, context())).toThrowError(
-      expect.objectContaining({ code: "codex_protocol_error", status: 502 }),
-    );
-    expect(call.reject).toHaveBeenCalledWith(
-      -32602,
-      "Tool call did not match the active turn",
-    );
-    expect(bridge.pending).toBe(0);
-    expect(JSON.stringify(vi.mocked(call.reject).mock.calls)).not.toContain(
-      "filesystem",
-    );
-  });
+      expect(() => bridge.register(call, context())).toThrowError(
+        expect.objectContaining({ code: "codex_protocol_error", status: 502 }),
+      );
+      expect(call.reject).toHaveBeenCalledWith(
+        -32602,
+        "Tool call did not match the active turn",
+      );
+      expect(bridge.pending).toBe(0);
+      expect(JSON.stringify(vi.mocked(call.reject).mock.calls)).not.toContain(
+        "filesystem",
+      );
+    },
+  );
 
   it("does not resolve a partial set and rejects unknown or duplicate IDs", async () => {
     const { bridge } = createBridge();

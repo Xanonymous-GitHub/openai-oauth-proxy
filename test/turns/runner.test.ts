@@ -825,34 +825,37 @@ describe("TurnRunner", () => {
   it.each([
     ["failed", 502, "codex_turn_failed"],
     ["interrupted", 499, "codex_turn_interrupted"],
-  ] as const)("maps %s turns to a stable error", async (status, httpStatus, code) => {
-    const { events, host } = createHost();
-    vi.mocked(host.turnStart).mockImplementation(async () => {
-      events.push({
-        method: "turn/completed",
-        params: {
-          threadId: "thread-1",
-          turn: fakeTurn({
-            status,
-            error:
-              status === "failed"
-                ? {
-                    message: "sensitive upstream failure",
-                    codexErrorInfo: null,
-                    additionalDetails: null,
-                  }
-                : null,
-          }),
-        },
+  ] as const)(
+    "maps %s turns to a stable error",
+    async (status, httpStatus, code) => {
+      const { events, host } = createHost();
+      vi.mocked(host.turnStart).mockImplementation(async () => {
+        events.push({
+          method: "turn/completed",
+          params: {
+            threadId: "thread-1",
+            turn: fakeTurn({
+              status,
+              error:
+                status === "failed"
+                  ? {
+                      message: "sensitive upstream failure",
+                      codexErrorInfo: null,
+                      additionalDetails: null,
+                    }
+                  : null,
+            }),
+          },
+        });
+        return { turn: fakeTurn() };
       });
-      return { turn: fakeTurn() };
-    });
 
-    await expect(createRunner(host).run(command())).rejects.toMatchObject({
-      status: httpStatus,
-      code,
-    });
-  });
+      await expect(createRunner(host).run(command())).rejects.toMatchObject({
+        status: httpStatus,
+        code,
+      });
+    },
+  );
 
   it("interrupts once on abort and runs release and cleanup once", async () => {
     const { events, host } = createHost();

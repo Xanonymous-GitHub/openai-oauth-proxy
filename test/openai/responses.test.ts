@@ -1186,33 +1186,36 @@ describe("POST /v1/responses", () => {
   it.each([
     ["output_text.done", 2, "lost", 1],
     ["response.completed", 3, "complete", 0],
-  ] as const)("settles owned continuation state when %s cannot be written", async (_event, streamWriteFailureAt, expectedState, expectedDeletes) => {
-    const fixture = createToolFixture({
-      withAdmission: true,
-      streamWriteFailureAt,
-    });
-    const suspended = await suspendCompletingTool(fixture);
-    const response = await postResumedStream(fixture, suspended);
+  ] as const)(
+    "settles owned continuation state when %s cannot be written",
+    async (_event, streamWriteFailureAt, expectedState, expectedDeletes) => {
+      const fixture = createToolFixture({
+        withAdmission: true,
+        streamWriteFailureAt,
+      });
+      const suspended = await suspendCompletingTool(fixture);
+      const response = await postResumedStream(fixture, suspended);
 
-    await expect(response.text()).rejects.toThrow(
-      `stream write ${streamWriteFailureAt} failed`,
-    );
-    fixture.drain.beginDrain();
-    await expect(
-      Promise.race([
-        fixture.drain.whenIdle().then(() => "idle"),
-        new Promise((resolve) => setTimeout(() => resolve("timed out"), 100)),
-      ]),
-    ).resolves.toBe("idle");
+      await expect(response.text()).rejects.toThrow(
+        `stream write ${streamWriteFailureAt} failed`,
+      );
+      fixture.drain.beginDrain();
+      await expect(
+        Promise.race([
+          fixture.drain.whenIdle().then(() => "idle"),
+          new Promise((resolve) => setTimeout(() => resolve("timed out"), 100)),
+        ]),
+      ).resolves.toBe("idle");
 
-    expect(fixture.store.lookup(suspended.id)).toMatchObject({
-      state: expectedState,
-    });
-    expect(fixture.store.lookupOperation(suspended.id)).toBeUndefined();
-    expect(fixture.deleteThread).toHaveBeenCalledTimes(expectedDeletes);
-    expect(fixture.admissionDone).toHaveBeenCalledOnce();
-    expect(fixture.capacity.active).toBe(0);
-  });
+      expect(fixture.store.lookup(suspended.id)).toMatchObject({
+        state: expectedState,
+      });
+      expect(fixture.store.lookupOperation(suspended.id)).toBeUndefined();
+      expect(fixture.deleteThread).toHaveBeenCalledTimes(expectedDeletes);
+      expect(fixture.admissionDone).toHaveBeenCalledOnce();
+      expect(fixture.capacity.active).toBe(0);
+    },
+  );
 
   it("abandons owned continuation state when its consumer aborts", async () => {
     const fixture = createToolFixture({
@@ -1312,95 +1315,98 @@ describe("POST /v1/responses", () => {
       },
     ],
     ["abort", { streamAbortAt: 2 }],
-  ] as const)("invalidates every repeated call after a continuation stream %s failure", async (_name, streamFailure) => {
-    const fixture = createToolFixture({
-      ...streamFailure,
-      withAdmission: true,
-    });
-    const repeatedRejects = [vi.fn(), vi.fn()];
-    const firstRespond = vi.fn(() => {
-      for (const [index, tool] of ["second", "third"].entries()) {
+  ] as const)(
+    "invalidates every repeated call after a continuation stream %s failure",
+    async (_name, streamFailure) => {
+      const fixture = createToolFixture({
+        ...streamFailure,
+        withAdmission: true,
+      });
+      const repeatedRejects = [vi.fn(), vi.fn()];
+      const firstRespond = vi.fn(() => {
+        for (const [index, tool] of ["second", "third"].entries()) {
+          fixture.tools.push({
+            generation: 1,
+            id: `rpc-repeat-${index}`,
+            params: {
+              threadId: "thread-1",
+              turnId: "turn-1",
+              callId: `internal-repeat-${index}`,
+              namespace: null,
+              tool,
+              arguments: { index },
+            },
+            respond: vi.fn(),
+            reject: repeatedRejects[index] ?? vi.fn(),
+          });
+        }
+      });
+      vi.mocked(fixture.host.turnStart).mockImplementationOnce(async () => {
         fixture.tools.push({
           generation: 1,
-          id: `rpc-repeat-${index}`,
+          id: "rpc-first",
           params: {
             threadId: "thread-1",
             turnId: "turn-1",
-            callId: `internal-repeat-${index}`,
+            callId: "internal-first",
             namespace: null,
-            tool,
-            arguments: { index },
+            tool: "first",
+            arguments: {},
           },
-          respond: vi.fn(),
-          reject: repeatedRejects[index] ?? vi.fn(),
+          respond: firstRespond,
+          reject: vi.fn(),
         });
-      }
-    });
-    vi.mocked(fixture.host.turnStart).mockImplementationOnce(async () => {
-      fixture.tools.push({
-        generation: 1,
-        id: "rpc-first",
-        params: {
-          threadId: "thread-1",
-          turnId: "turn-1",
-          callId: "internal-first",
-          namespace: null,
-          tool: "first",
-          arguments: {},
-        },
-        respond: firstRespond,
-        reject: vi.fn(),
+        return { turn: fakeTurn() };
       });
-      return { turn: fakeTurn() };
-    });
-    const definitions = ["first", "second", "third"].map((name) => ({
-      type: "function" as const,
-      name,
-      parameters: { type: "object" },
-    }));
-    const suspended = await postResponse(fixture.app, {
-      model: "gpt-5.4",
-      input: "start",
-      tools: definitions,
-    });
-    const body = (await suspended.json()) as {
-      id: string;
-      output: Array<{ call_id: string }>;
-    };
-    const continuation = await postResponse(fixture.app, {
-      model: "gpt-5.4",
-      previous_response_id: body.id,
-      tools: definitions,
-      stream: true,
-      input: [
-        {
-          type: "function_call_output",
-          call_id: body.output[0]?.call_id ?? "missing",
-          output: "first result",
-        },
-      ],
-    });
+      const definitions = ["first", "second", "third"].map((name) => ({
+        type: "function" as const,
+        name,
+        parameters: { type: "object" },
+      }));
+      const suspended = await postResponse(fixture.app, {
+        model: "gpt-5.4",
+        input: "start",
+        tools: definitions,
+      });
+      const body = (await suspended.json()) as {
+        id: string;
+        output: Array<{ call_id: string }>;
+      };
+      const continuation = await postResponse(fixture.app, {
+        model: "gpt-5.4",
+        previous_response_id: body.id,
+        tools: definitions,
+        stream: true,
+        input: [
+          {
+            type: "function_call_output",
+            call_id: body.output[0]?.call_id ?? "missing",
+            output: "first result",
+          },
+        ],
+      });
 
-    if (_name === "abort")
-      await expect(continuation.text()).resolves.toBeDefined();
-    else
-      await expect(continuation.text()).rejects.toThrow(
-        /stream write \d+ failed/,
+      if (_name === "abort")
+        await expect(continuation.text()).resolves.toBeDefined();
+      else
+        await expect(continuation.text()).rejects.toThrow(
+          /stream write \d+ failed/,
+        );
+      await vi.waitFor(() =>
+        expect(fixture.host.turnInterrupt).toHaveBeenCalledOnce(),
       );
-    await vi.waitFor(() =>
-      expect(fixture.host.turnInterrupt).toHaveBeenCalledOnce(),
-    );
-    expect(repeatedRejects[0]).toHaveBeenCalledOnce();
-    expect(repeatedRejects[1]).toHaveBeenCalledOnce();
-    expect(fixture.deleteThread).toHaveBeenCalledOnce();
-    expect(fixture.streamEvents).not.toContain("response.completed");
-    expect(
-      fixture.store.acquireLease("thread-1", "lease-probe", "turn", 1),
-    ).toBe(true);
-    fixture.drain.beginDrain();
-    await fixture.drain.whenIdle();
-    expect(fixture.admissionDone).toHaveBeenCalledOnce();
-  });
+      expect(repeatedRejects[0]).toHaveBeenCalledOnce();
+      expect(repeatedRejects[1]).toHaveBeenCalledOnce();
+      expect(fixture.deleteThread).toHaveBeenCalledOnce();
+      expect(fixture.streamEvents).not.toContain("response.completed");
+      expect(
+        fixture.store.acquireLease("thread-1", "lease-probe", "turn", 1),
+      ).toBe(true);
+      fixture.drain.beginDrain();
+      await fixture.drain.whenIdle();
+      expect(fixture.admissionDone).toHaveBeenCalledOnce();
+    },
+  );
 
   it("returns response_not_found for outputs targeting an unknown response", async () => {
     const { app, invocations } = createFixture();
@@ -1696,15 +1702,18 @@ describe("POST /v1/responses", () => {
       },
       "unknown_tool_call",
     ],
-  ])("rejects %s before model lookup or thread start", async (_name, request, code) => {
-    const { app, host, invocations } = createFixture();
-    const response = await postResponse(app, request);
+  ])(
+    "rejects %s before model lookup or thread start",
+    async (_name, request, code) => {
+      const { app, host, invocations } = createFixture();
+      const response = await postResponse(app, request);
 
-    expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({ error: { code } });
-    expect(host.modelList).not.toHaveBeenCalled();
-    expect(invocations).toEqual([]);
-  });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: { code } });
+      expect(host.modelList).not.toHaveBeenCalled();
+      expect(invocations).toEqual([]);
+    },
+  );
 
   it("validates reasoning before acquiring a continuation lease", async () => {
     const { app, invocations } = createFixture();

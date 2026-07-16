@@ -72,18 +72,21 @@ it.each([
     },
     { type: "signed_out" },
   ],
-])("forces startup refresh and rejects a non-ChatGPT account", async (account, expected) => {
-  const fixture = fakeHost(
-    vi.fn(async () => ({ account, requiresOpenaiAuth: true })),
-  );
-  const manager = new AccountManager(fixture.host);
+])(
+  "forces startup refresh and rejects a non-ChatGPT account",
+  async (account, expected) => {
+    const fixture = fakeHost(
+      vi.fn(async () => ({ account, requiresOpenaiAuth: true })),
+    );
+    const manager = new AccountManager(fixture.host);
 
-  await manager.start();
+    await manager.start();
 
-  expect(fixture.accountRead).toHaveBeenCalledWith(true);
-  expect(manager.state()).toEqual(expected);
-  expect(manager.ready()).toBe(false);
-});
+    expect(fixture.accountRead).toHaveBeenCalledWith(true);
+    expect(manager.state()).toEqual(expected);
+    expect(manager.ready()).toBe(false);
+  },
+);
 
 it("makes only a ChatGPT account ready", async () => {
   const fixture = fakeHost();

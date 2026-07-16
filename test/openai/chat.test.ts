@@ -772,14 +772,17 @@ describe("POST /v1/chat/completions", () => {
       400,
       "unknown_tool_call",
     ],
-  ])("rejects %s before creating a thread", async (_name, request, status, code) => {
-    const { app, host } = createFixture();
-    const response = await post(app, request);
+  ])(
+    "rejects %s before creating a thread",
+    async (_name, request, status, code) => {
+      const { app, host } = createFixture();
+      const response = await post(app, request);
 
-    expect(response.status).toBe(status);
-    expect(await response.json()).toMatchObject({ error: { code } });
-    expect(host.threadStart).not.toHaveBeenCalled();
-  });
+      expect(response.status).toBe(status);
+      expect(await response.json()).toMatchObject({ error: { code } });
+      expect(host.threadStart).not.toHaveBeenCalled();
+    },
+  );
 
   it("rejects image input for a text-only model before creating a thread", async () => {
     const png = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
@@ -837,17 +840,20 @@ describe("POST /v1/chat/completions", () => {
       502,
     ],
     ["turn times out", async () => new Promise<never>(() => undefined), 5, 504],
-  ])("deletes the disposable thread once when %s", async (_name, turnStart, timeoutMs, status) => {
-    const { app, host, release } = createFixture({
-      turnStart,
-      ...(timeoutMs === undefined ? {} : { timeoutMs }),
-    });
-    const response = await post(app, ordinaryRequest);
+  ])(
+    "deletes the disposable thread once when %s",
+    async (_name, turnStart, timeoutMs, status) => {
+      const { app, host, release } = createFixture({
+        turnStart,
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      });
+      const response = await post(app, ordinaryRequest);
 
-    expect(response.status).toBe(status);
-    expect(host.threadDelete).toHaveBeenCalledOnce();
-    expect(release).toHaveBeenCalledOnce();
-  });
+      expect(response.status).toBe(status);
+      expect(host.threadDelete).toHaveBeenCalledOnce();
+      expect(release).toHaveBeenCalledOnce();
+    },
+  );
 
   it("streams only OpenAI chunks with one stable identity and terminal usage", async () => {
     const { app, host } = createFixture();
@@ -964,95 +970,99 @@ describe("POST /v1/chat/completions", () => {
   it.each([
     ["write", { streamWriteFailureAt: 2 }],
     ["abort", { streamAbortAt: 2 }],
-  ] as const)("invalidates mixed text and parallel repeated calls when text streaming %s fails", async (_name, streamFailure) => {
-    const { app, events, host, release, streamPayloads, tools } =
-      createFixture(streamFailure);
-    const repeatedRejects = [vi.fn(), vi.fn()];
-    const firstRespond = vi.fn(() => {
-      events.push({
-        method: "item/completed",
-        params: {
-          threadId: "thread-1",
-          turnId: "turn-1",
-          completedAtMs: 1,
-          item: {
-            type: "agentMessage",
-            id: "message-preamble",
-            text: "tool preamble",
-            phase: null,
-            memoryCitation: null,
-          },
-        },
-      });
-      for (const [index, tool] of ["second", "third"].entries()) {
-        tools.push({
-          generation: 1,
-          id: `rpc-repeat-${index}`,
+  ] as const)(
+    "invalidates mixed text and parallel repeated calls when text streaming %s fails",
+    async (_name, streamFailure) => {
+      const { app, events, host, release, streamPayloads, tools } =
+        createFixture(streamFailure);
+      const repeatedRejects = [vi.fn(), vi.fn()];
+      const firstRespond = vi.fn(() => {
+        events.push({
+          method: "item/completed",
           params: {
             threadId: "thread-1",
             turnId: "turn-1",
-            callId: `internal-repeat-${index}`,
-            namespace: null,
-            tool,
-            arguments: { index },
+            completedAtMs: 1,
+            item: {
+              type: "agentMessage",
+              id: "message-preamble",
+              text: "tool preamble",
+              phase: null,
+              memoryCitation: null,
+            },
           },
-          respond: vi.fn(),
-          reject: repeatedRejects[index] ?? vi.fn(),
         });
-      }
-    });
-    vi.mocked(host.turnStart).mockImplementationOnce(async () => {
-      tools.push({
-        generation: 1,
-        id: "rpc-first",
-        params: {
-          threadId: "thread-1",
-          turnId: "turn-1",
-          callId: "internal-first",
-          namespace: null,
-          tool: "first",
-          arguments: {},
-        },
-        respond: firstRespond,
-        reject: vi.fn(),
+        for (const [index, tool] of ["second", "third"].entries()) {
+          tools.push({
+            generation: 1,
+            id: `rpc-repeat-${index}`,
+            params: {
+              threadId: "thread-1",
+              turnId: "turn-1",
+              callId: `internal-repeat-${index}`,
+              namespace: null,
+              tool,
+              arguments: { index },
+            },
+            respond: vi.fn(),
+            reject: repeatedRejects[index] ?? vi.fn(),
+          });
+        }
       });
-      return { turn: fakeTurn() };
-    });
-    const definitions = ["first", "second", "third"].map((name) => ({
-      type: "function" as const,
-      function: { name, parameters: { type: "object" } },
-    }));
-    const suspended = await post(app, {
-      ...ordinaryRequest,
-      tools: definitions,
-    });
-    const body = (await suspended.json()) as {
-      choices: Array<{
-        message: { tool_calls: Array<{ id: string }> };
-      }>;
-    };
-    const firstCallId = body.choices[0]?.message.tool_calls[0]?.id ?? "missing";
-    const continuation = await post(app, {
-      model: "gpt-5.4",
-      tools: definitions,
-      stream: true,
-      messages: [
-        ...ordinaryRequest.messages,
-        body.choices[0]?.message,
-        { role: "tool", tool_call_id: firstCallId, content: "first result" },
-      ],
-    });
+      vi.mocked(host.turnStart).mockImplementationOnce(async () => {
+        tools.push({
+          generation: 1,
+          id: "rpc-first",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            callId: "internal-first",
+            namespace: null,
+            tool: "first",
+            arguments: {},
+          },
+          respond: firstRespond,
+          reject: vi.fn(),
+        });
+        return { turn: fakeTurn() };
+      });
+      const definitions = ["first", "second", "third"].map((name) => ({
+        type: "function" as const,
+        function: { name, parameters: { type: "object" } },
+      }));
+      const suspended = await post(app, {
+        ...ordinaryRequest,
+        tools: definitions,
+      });
+      const body = (await suspended.json()) as {
+        choices: Array<{
+          message: { tool_calls: Array<{ id: string }> };
+        }>;
+      };
+      const firstCallId =
+        body.choices[0]?.message.tool_calls[0]?.id ?? "missing";
+      const continuation = await post(app, {
+        model: "gpt-5.4",
+        tools: definitions,
+        stream: true,
+        messages: [
+          ...ordinaryRequest.messages,
+          body.choices[0]?.message,
+          { role: "tool", tool_call_id: firstCallId, content: "first result" },
+        ],
+      });
 
-    if (_name === "abort")
-      await expect(continuation.text()).resolves.toBeDefined();
-    else await expect(continuation.text()).rejects.toThrow();
-    await vi.waitFor(() => expect(host.turnInterrupt).toHaveBeenCalledOnce());
-    expect(repeatedRejects[0]).toHaveBeenCalledOnce();
-    expect(repeatedRejects[1]).toHaveBeenCalledOnce();
-    expect(host.threadDelete).toHaveBeenCalledOnce();
-    expect(release).toHaveBeenCalledOnce();
-    expect(streamPayloads).not.toContain("[DONE]");
-  });
+      if (_name === "abort")
+        await expect(continuation.text()).resolves.toBeDefined();
+      else await expect(continuation.text()).rejects.toThrow();
+      await vi.waitFor(() => expect(host.turnInterrupt).toHaveBeenCalledOnce());
+      expect(repeatedRejects[0]).toHaveBeenCalledOnce();
+      expect(repeatedRejects[1]).toHaveBeenCalledOnce();
+      expect(host.threadDelete).toHaveBeenCalledOnce();
+      expect(release).toHaveBeenCalledOnce();
+      expect(streamPayloads).not.toContain("[DONE]");
+    },
+  );
 
   it("aborts a pending repeated stage before call IDs or stream output exist", async () => {
     vi.useFakeTimers();

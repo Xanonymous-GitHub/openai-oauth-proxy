@@ -45,22 +45,20 @@ describe("readJsonBody", () => {
     expect(fixture.pulls).not.toHaveBeenCalled();
   });
 
-  it.each([
-    "-1",
-    "+1",
-    "1.5",
-    "1, 2",
-  ])("rejects malformed Content-Length %j before reading the body", async (contentLength) => {
-    const fixture = streamingRequest([new TextEncoder().encode("{}")], {
-      "content-length": contentLength,
-    });
+  it.each(["-1", "+1", "1.5", "1, 2"])(
+    "rejects malformed Content-Length %j before reading the body",
+    async (contentLength) => {
+      const fixture = streamingRequest([new TextEncoder().encode("{}")], {
+        "content-length": contentLength,
+      });
 
-    await expect(readJsonBody(fixture.request)).rejects.toMatchObject({
-      status: 400,
-      code: "invalid_content_length",
-    });
-    expect(fixture.pulls).not.toHaveBeenCalled();
-  });
+      await expect(readJsonBody(fixture.request)).rejects.toMatchObject({
+        status: 400,
+        code: "invalid_content_length",
+      });
+      expect(fixture.pulls).not.toHaveBeenCalled();
+    },
+  );
 
   it("cancels a chunked body as soon as byte 32 MiB plus one arrives", async () => {
     const fixture = streamingRequest([

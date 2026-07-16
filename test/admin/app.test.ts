@@ -107,24 +107,27 @@ it.each([
   "http://127.0.0.1:8080",
   "http://127.0.0.1:8081.evil.example",
   "http://localhost:8081/",
-])("rejects mutating requests without an exact allowed Origin", async (origin) => {
-  const { app, account } = fixture();
-  const session = await sessionFor(app);
+])(
+  "rejects mutating requests without an exact allowed Origin",
+  async (origin) => {
+    const { app, account } = fixture();
+    const session = await sessionFor(app);
 
-  const response = await post(
-    app,
-    "/api/logout",
-    session.cookie,
-    session.csrf,
-    {
-      origin,
-    },
-  );
+    const response = await post(
+      app,
+      "/api/logout",
+      session.cookie,
+      session.csrf,
+      {
+        origin,
+      },
+    );
 
-  expect(response.status).toBe(403);
-  expect(account.logout).not.toHaveBeenCalled();
-  expect(response.headers.get("access-control-allow-origin")).toBeNull();
-});
+    expect(response.status).toBe(403);
+    expect(account.logout).not.toHaveBeenCalled();
+    expect(response.headers.get("access-control-allow-origin")).toBeNull();
+  },
+);
 
 it("accepts both exact loopback origins", async () => {
   const { app, account } = fixture();
