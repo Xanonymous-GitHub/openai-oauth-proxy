@@ -19,13 +19,13 @@
     "protocol:check": "bun run protocol:generate && git diff --exit-code -- src/codex/generated"
   },
   "dependencies": {
-    "@hono/node-server": "2.0.8",
-    "@openai/codex": "0.144.3",
+    "@hono/node-server": "2.0.10",
+    "@openai/codex": "0.144.4",
     "hono": "4.12.30",
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.3",
+    "@biomejs/biome": "2.5.4",
     "@fontsource-variable/geist": "5.2.9",
     "@fontsource-variable/geist-mono": "5.2.8",
     "@tabler/icons-react": "3.44.0",
@@ -42,7 +42,7 @@
     "clsx": "2.1.1",
     "jsdom": "29.1.1",
     "npm-check-updates": "22.2.9",
-    "openai": "6.46.0",
+    "openai": "6.47.0",
     "radix-ui": "1.6.2",
     "react": "19.2.7",
     "react-dom": "19.2.7",
