@@ -6,10 +6,10 @@ Single-user, single-replica OpenAI-compatible proxy backed by a ChatGPT-authenti
 
 - `GET /v1/models`: visible Codex Models.
 - `POST /v1/chat/completions`: streaming and non-streaming Chat Completions, system/developer/user/assistant history, inline PNG/JPEG/WebP data URLs, JSON Schema output, reasoning effort, and client function tools.
-- `POST /v1/responses`: streaming and non-streaming Responses, stored resume/branch behavior, inline images, JSON Schema output, cancellation, and single/parallel/repeated client function tools.
+- `POST /v1/responses`: streaming and non-streaming Responses, stored resume/branch behavior, inline images, JSON Schema output, reasoning effort and summaries, cancellation, and single/parallel/repeated client function tools.
 - `/healthz`, `/readyz`, and bearer-protected `/metrics` operational endpoints.
 
-Unknown fields and unsupported endpoints fail explicitly. Embeddings, audio, file APIs, remote image URLs, hosted tools, internal Codex tools, multi-user isolation, and a downstream Codex CLI are non-goals. Exact `max_completion_tokens` and `verbosity` semantics are unsupported and rejected rather than ignored. Streaming Chat honors `stream_options.include_usage`: `true` emits the required separate usage chunk and `false` suppresses usage; authoritative usage remains App Server-provided.
+Unknown fields and unsupported endpoints fail explicitly. Embeddings, audio, file APIs, remote image URLs, hosted tools, internal Codex tools, multi-user isolation, and a downstream Codex CLI are non-goals. `max_completion_tokens` and `max_output_tokens` are validated but intentionally ignored compatibility fields because Codex App Server does not expose a per-turn output-token limit; clients must not rely on them for cost, latency, truncation, or `finish_reason: "length"`. Exact `verbosity` semantics remain unsupported and rejected. Streaming Chat honors `stream_options.include_usage`: `true` emits the required separate usage chunk and `false` suppresses usage; authoritative usage remains App Server-provided.
 
 ## Run Locally With Docker Compose
 
