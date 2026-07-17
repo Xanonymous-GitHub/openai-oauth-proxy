@@ -103,9 +103,18 @@ describe("OpenAI input translation", () => {
       model: "gpt-5.4",
       input: [
         {
+          id: "msg_exact",
           type: "message",
           role: "assistant",
-          content: [{ type: "output_text", text: "calling" }],
+          status: "completed",
+          phase: "commentary",
+          content: [
+            {
+              type: "output_text",
+              text: "calling",
+              annotations: [],
+            },
+          ],
         },
         {
           type: "function_call",
@@ -127,7 +136,9 @@ describe("OpenAI input translation", () => {
     expect(translateHistory(request.input)).toEqual([
       {
         type: "message",
+        id: "msg_exact",
         role: "assistant",
+        phase: "commentary",
         content: [{ type: "output_text", text: "calling" }],
       },
       {

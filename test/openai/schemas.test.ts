@@ -568,14 +568,24 @@ describe("parseResponsesRequest", () => {
     expect(parseResponsesRequest(request)).toEqual(request);
   });
 
-  it("accepts output_text in assistant request messages", () => {
+  it("accepts replayed assistant output messages", () => {
     const request = {
       model: "gpt-5.4",
       input: [
         {
+          id: "msg_history",
           type: "message" as const,
           role: "assistant" as const,
-          content: [{ type: "output_text" as const, text: "prior answer" }],
+          status: "completed" as const,
+          phase: "final_answer" as const,
+          content: [
+            {
+              type: "output_text" as const,
+              text: "prior answer",
+              annotations: [],
+              logprobs: [],
+            },
+          ],
         },
       ],
     };

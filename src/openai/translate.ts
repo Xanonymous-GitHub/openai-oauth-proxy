@@ -75,7 +75,21 @@ export function translateHistory(
 
       const content = messageContent(message.role, message.content);
       if (content.length > 0) {
-        translated.push({ type: "message", role: message.role, content });
+        translated.push({
+          type: "message",
+          ...(message.role !== "assistant" ||
+          !("id" in message) ||
+          message.id === undefined
+            ? {}
+            : { id: message.id }),
+          role: message.role,
+          content,
+          ...(message.role !== "assistant" ||
+          !("phase" in message) ||
+          message.phase === undefined
+            ? {}
+            : { phase: message.phase }),
+        });
       }
       if (message.role === "assistant" && "tool_calls" in message) {
         for (const call of message.tool_calls ?? []) {

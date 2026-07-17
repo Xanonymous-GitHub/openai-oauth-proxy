@@ -173,6 +173,8 @@ const responseInputTextSchema = z.strictObject({
 const responseOutputTextSchema = z.strictObject({
   type: z.literal("output_text"),
   text: z.string(),
+  annotations: z.array(z.never()).optional(),
+  logprobs: z.array(z.never()).optional(),
 });
 const responseInputImageSchema = z.strictObject({
   type: z.literal("input_image"),
@@ -209,8 +211,12 @@ const responseUserMessageSchema = z.strictObject({
   content: responseUserContentSchema,
 });
 const responseAssistantMessageSchema = z.strictObject({
+  id: nonEmptyString.optional(),
   type: z.literal("message").optional(),
   role: z.literal("assistant"),
+  // Output-item metadata accepted for replay; status is validated but is not model-visible history.
+  status: z.enum(["in_progress", "completed", "incomplete"]).optional(),
+  phase: z.enum(["commentary", "final_answer"]).optional(),
   content: z.union([
     z.string(),
     z.array(
