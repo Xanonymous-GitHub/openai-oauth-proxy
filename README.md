@@ -39,6 +39,8 @@ The Bifrost environment variable `OPENAI_PROXY_TOKEN` must equal the proxy Secre
 4. Create a Kustomize overlay that replaces the base's intentionally non-pullable example image with a published `repository@sha256` manifest digest, apply the overlay, and wait for `pod/openai-oauth-proxy-0` readiness.
 5. Open the loopback-only admin service with `kubectl port-forward pod/openai-oauth-proxy-0 8081:8081`, visit `http://127.0.0.1:8081`, and complete device login.
 
+The admin service can be exposed to a trusted private network as an explicit opt-in. Set `ADMIN_HOST=0.0.0.0` and `ADMIN_ORIGIN` to its exact HTTPS origin, such as `https://openai-proxy-admin.example.ts.net`. Keep the Service private, restrict access with network identity policy, and configure only one origin. Loopback access remains allowed.
+
 The example Secret is intentionally invalid and excluded from Kustomize. Never commit rendered Secrets.
 
 ## Operations

@@ -5,6 +5,7 @@ export interface Config {
   dataPort: number;
   adminHost: "127.0.0.1" | "0.0.0.0";
   adminPort: number;
+  adminOrigin?: string;
   dataDir: string;
   codexHome: string;
   codexBin: string;
@@ -20,10 +21,20 @@ export interface Config {
 const boundedInteger = (fallback: number, minimum: number, maximum: number) =>
   z.coerce.number().int().min(minimum).max(maximum).default(fallback);
 
+const httpsOrigin = z.string().refine((value) => {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.origin === value;
+  } catch {
+    return false;
+  }
+}, "must be an exact HTTPS origin");
+
 const envSchema = z.strictObject({
   DATA_PORT: boundedInteger(8080, 1, 65_535),
   ADMIN_HOST: z.enum(["127.0.0.1", "0.0.0.0"]).default("127.0.0.1"),
   ADMIN_PORT: boundedInteger(8081, 1, 65_535),
+  ADMIN_ORIGIN: httpsOrigin.optional(),
   DATA_DIR: z.string().min(1),
   CODEX_HOME: z.string().min(1).optional(),
   CODEX_BIN: z.string().min(1).default("codex"),
@@ -41,6 +52,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     DATA_PORT: env.DATA_PORT,
     ADMIN_HOST: env.ADMIN_HOST,
     ADMIN_PORT: env.ADMIN_PORT,
+    ADMIN_ORIGIN: env.ADMIN_ORIGIN,
     DATA_DIR: env.DATA_DIR,
     CODEX_HOME: env.CODEX_HOME,
     CODEX_BIN: env.CODEX_BIN,
@@ -58,6 +70,9 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     dataPort: parsed.DATA_PORT,
     adminHost: parsed.ADMIN_HOST,
     adminPort: parsed.ADMIN_PORT,
+    ...(parsed.ADMIN_ORIGIN === undefined
+      ? {}
+      : { adminOrigin: parsed.ADMIN_ORIGIN }),
     dataDir: parsed.DATA_DIR,
     codexHome: parsed.CODEX_HOME ?? `${parsed.DATA_DIR}/codex`,
     codexBin: parsed.CODEX_BIN,

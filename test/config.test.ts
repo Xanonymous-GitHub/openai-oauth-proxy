@@ -27,10 +27,24 @@ describe("loadConfig", () => {
     );
   });
 
+  it("allows one exact HTTPS admin origin", () => {
+    expect(
+      loadConfig({
+        ...valid,
+        ADMIN_ORIGIN: "https://openai-proxy-admin.example.ts.net",
+      }).adminOrigin,
+    ).toBe("https://openai-proxy-admin.example.ts.net");
+  });
+
   it.each([
     [{ ...valid, BIFROST_PROXY_TOKEN: "short" }, "BIFROST_PROXY_TOKEN"],
     [{ ...valid, MAX_ACTIVE_TURNS: "17" }, "MAX_ACTIVE_TURNS"],
     [{ ...valid, QUEUE_CAPACITY: "257" }, "QUEUE_CAPACITY"],
+    [{ ...valid, ADMIN_ORIGIN: "http://admin.example.com" }, "ADMIN_ORIGIN"],
+    [
+      { ...valid, ADMIN_ORIGIN: "https://admin.example.com/path" },
+      "ADMIN_ORIGIN",
+    ],
   ])("rejects invalid environment", (env, field) => {
     expect(() => loadConfig(env)).toThrow(field);
   });

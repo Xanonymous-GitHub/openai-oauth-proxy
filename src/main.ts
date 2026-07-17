@@ -205,6 +205,7 @@ export async function start(
     allowedOrigins: new Set([
       `http://127.0.0.1:${config.adminPort}`,
       `http://localhost:${config.adminPort}`,
+      ...(config.adminOrigin === undefined ? [] : [config.adminOrigin]),
     ]),
     assetRoot: fileURLToPath(new URL("./admin-ui/", import.meta.url)),
   });

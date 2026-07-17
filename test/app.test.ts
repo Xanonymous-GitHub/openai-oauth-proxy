@@ -134,6 +134,7 @@ it("serves the admin app, not the data app, on the admin listener", async () => 
       dataPort: 0,
       adminHost: "127.0.0.1",
       adminPort,
+      adminOrigin: "https://openai-proxy-admin.example.ts.net",
       dataDir: testDataDir,
       codexHome: join(testDataDir, "codex"),
       codexBin: "codex",
@@ -177,6 +178,9 @@ it("serves the admin app, not the data app, on the admin listener", async () => 
     expect((await refresh(`http://0.0.0.0:${adminPort}`)).status).toBe(403);
     expect((await refresh(`http://127.0.0.1:${adminPort}`)).status).toBe(200);
     expect((await refresh(`http://localhost:${adminPort}`)).status).toBe(200);
+    expect(
+      (await refresh("https://openai-proxy-admin.example.ts.net")).status,
+    ).toBe(200);
   } finally {
     await service.close();
   }
