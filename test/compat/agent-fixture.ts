@@ -148,18 +148,12 @@ export async function runAgentSmoke(agent: "opencode" | "hermes") {
     );
     let exitCode: number;
     if (agent === "opencode") {
-      const pluginDirectory = join(directory, ".opencode", "plugins");
-      mkdirSync(pluginDirectory, { recursive: true });
-      writeFileSync(
-        join(pluginDirectory, "strict-proxy.js"),
-        'export const StrictProxy = async () => ({ "chat.params": async (_input, output) => { output.maxOutputTokens = undefined; delete output.options.verbosity; delete output.options.textVerbosity; } });\n',
-      );
       writeFileSync(
         join(directory, "opencode.json"),
         JSON.stringify({
           provider: {
             fixture: {
-              npm: "@ai-sdk/openai-compatible",
+              npm: "@ai-sdk/openai",
               name: "Task 15 Fixture",
               options: {
                 baseURL: `http://127.0.0.1:${port}/v1`,
@@ -170,6 +164,12 @@ export async function runAgentSmoke(agent: "opencode" | "hermes") {
                 "fixture-model": {
                   id: "openai/gpt-5.4",
                   name: "Task 15 Fixture Model",
+                  reasoning: true,
+                  tool_call: true,
+                  options: {
+                    reasoningSummary: "auto",
+                    include: ["reasoning.encrypted_content"],
+                  },
                 },
               },
             },
@@ -202,7 +202,7 @@ export async function runAgentSmoke(agent: "opencode" | "hermes") {
         );
       } catch (error) {
         throw new Error(
-          `${error instanceof Error ? error.message : "OpenCode failed"}; proxy paths=${proxy.requestedPaths.join(",")}; proxy errors=${JSON.stringify(proxy.requestErrors)}`,
+          `${error instanceof Error ? error.message : "OpenCode failed"}; proxy paths=${proxy.requestedPaths.join(",")}; proxy errors=${JSON.stringify(proxy.requestErrors)}; request summaries=${JSON.stringify(proxy.requestSummaries)}`,
         );
       }
     } else {

@@ -8,11 +8,13 @@ const dataImageUrlSchema = z
   .string()
   .regex(/^data:image\/(?:png|jpeg|webp);base64,/);
 const reasoningEffortSchema = z.enum([
+  "none",
   "minimal",
   "low",
   "medium",
   "high",
   "xhigh",
+  "max",
 ]);
 const reasoningSummarySchema = z.enum(["auto", "concise", "detailed"]);
 const ignoredOutputTokenLimitSchema = z.number().int().positive().nullable();
@@ -230,47 +232,47 @@ export const responseInputItemSchema = z.union([
   responseFunctionCallOutputSchema,
 ]);
 
-const responsesRequestSchema = z
-  .strictObject({
-    model: nonEmptyString,
-    input: z.union([z.string(), z.array(responseInputItemSchema)]),
-    instructions: z.string().optional(),
-    stream: z.boolean().optional(),
-    previous_response_id: nonEmptyString.optional(),
-    store: z.boolean().optional(),
-    tools: z.array(responsesFunctionToolSchema).optional(),
-    tool_choice: z.enum(["auto", "none"]).optional(),
-    parallel_tool_calls: z.literal(true).optional(),
-    // Compatibility no-op: Codex App Server cannot enforce this limit, but Responses clients send it by default.
-    max_output_tokens: ignoredOutputTokenLimitSchema.optional(),
-    reasoning: z
-      .strictObject({
-        effort: reasoningEffortSchema.optional(),
-        summary: reasoningSummarySchema.nullable().optional(),
-      })
-      .optional(),
-    text: z
-      .strictObject({
-        format: z.strictObject({
-          type: z.literal("json_schema"),
-          name: nonEmptyString,
-          description: z.string().optional(),
-          schema: jsonObjectSchema,
-          strict: z.boolean().optional(),
-        }),
-      })
-      .optional(),
-  })
-  .superRefine((request, context) => {
-    if (request.store === false && request.tools && request.tools.length > 0) {
-      context.addIssue({
-        code: "custom",
-        message: "Function tools require stored Responses",
-        path: ["store"],
-        params: { proxyCode: "store_required_for_tools" },
-      });
-    }
-  });
+const responsesRequestSchema = z.strictObject({
+  model: nonEmptyString,
+  input: z.union([z.string(), z.array(responseInputItemSchema)]),
+  instructions: z.string().optional(),
+  stream: z.boolean().optional(),
+  previous_response_id: nonEmptyString.optional(),
+  store: z.boolean().optional(),
+  tools: z.array(responsesFunctionToolSchema).optional(),
+  tool_choice: z.enum(["auto", "none"]).optional(),
+  parallel_tool_calls: z.literal(true).optional(),
+  // Compatibility no-op: Codex App Server cannot enforce this limit, but Responses clients send it by default.
+  max_output_tokens: ignoredOutputTokenLimitSchema.optional(),
+  // Compatibility no-op: continuations stay server-side, so encrypted reasoning is neither needed nor exposed.
+  include: z.array(z.literal("reasoning.encrypted_content")).optional(),
+  // Compatibility no-op: Codex App Server owns upstream prompt-cache routing.
+  prompt_cache_key: nonEmptyString.optional(),
+  reasoning: z
+    .strictObject({
+      effort: reasoningEffortSchema.optional(),
+      summary: reasoningSummarySchema.nullable().optional(),
+    })
+    .optional(),
+  text: z
+    .strictObject({
+      // Compatibility no-op: Codex App Server has no per-turn verbosity override.
+      verbosity: z.enum(["low", "medium", "high"]).nullable().optional(),
+      format: z
+        .discriminatedUnion("type", [
+          z.strictObject({ type: z.literal("text") }),
+          z.strictObject({
+            type: z.literal("json_schema"),
+            name: nonEmptyString,
+            description: z.string().optional(),
+            schema: jsonObjectSchema,
+            strict: z.boolean().optional(),
+          }),
+        ])
+        .optional(),
+    })
+    .optional(),
+});
 
 export type ChatMessage = z.infer<typeof chatMessageSchema>;
 export type ChatRequest = z.infer<typeof chatRequestSchema>;

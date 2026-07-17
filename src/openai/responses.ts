@@ -762,10 +762,14 @@ export function createResponsesHandler(
     const toolFingerprint = toolConfiguration.fingerprint;
     const outputs = functionOutputs(request);
     if (outputs.length > 0) {
+      const statelessContinuation =
+        request.previous_response_id === undefined && request.store === false;
       if (
-        request.previous_response_id === undefined ||
         !Array.isArray(request.input) ||
-        request.input.length !== outputs.length
+        (request.previous_response_id === undefined &&
+          !statelessContinuation) ||
+        (request.previous_response_id !== undefined &&
+          request.input.length !== outputs.length)
       ) {
         throw ProxyError.public(
           400,
@@ -776,21 +780,25 @@ export function createResponsesHandler(
       }
       const model = await validatedModel(deps, request, context.req.raw.signal);
       deps.observe?.(context.req.raw, { model: model.id });
-      const mapping = deps.store.lookup(request.previous_response_id);
-      if (!mapping) throw decisionError("not_found");
-      if (mapping.state === "lost") throw decisionError("lost");
-      if (mapping.state !== "pending") {
-        throw ProxyError.public(
-          400,
-          "unknown_tool_call",
-          "Response has no pending function calls",
-          "previous_response_id",
-        );
+      if (request.previous_response_id !== undefined) {
+        const mapping = deps.store.lookup(request.previous_response_id);
+        if (!mapping) throw decisionError("not_found");
+        if (mapping.state === "lost") throw decisionError("lost");
+        if (mapping.state !== "pending") {
+          throw ProxyError.public(
+            400,
+            "unknown_tool_call",
+            "Response has no pending function calls",
+            "previous_response_id",
+          );
+        }
       }
       deps.observe?.(context.req.raw, { leaseOutcome: "acquired" });
       const continuation = await deps.runner.tools.continue({
         kind: "responses",
-        responseId: request.previous_response_id,
+        ...(request.previous_response_id === undefined
+          ? {}
+          : { responseId: request.previous_response_id }),
         toolFingerprint,
         ...(request.reasoning !== undefined && "summary" in request.reasoning
           ? { reasoningSummary: request.reasoning.summary ?? null }
@@ -806,6 +814,13 @@ export function createResponsesHandler(
           `Missing tool outputs: ${continuation.missingCallIds.join(", ")}`,
           "input",
         );
+      }
+      if (continuation.responseId === undefined) throw decisionError("lost");
+      const pendingOperation = deps.store.lookupOperation(
+        continuation.responseId,
+      );
+      if (pendingOperation?.state !== "active") {
+        throw decisionError("lost");
       }
       const cleanupSignal = continuation.signal
         ? AbortSignal.any([context.req.raw.signal, continuation.signal])
@@ -824,7 +839,7 @@ export function createResponsesHandler(
       };
       let durablyCommitted = false;
       const identity: ResponseIdentity = {
-        responseId: request.previous_response_id,
+        responseId: continuation.responseId,
         messageId: opaqueId("msg"),
         createdAt: Math.floor(deps.clock.now() / 1_000),
         model: model.id,
@@ -834,6 +849,9 @@ export function createResponsesHandler(
       ): Promise<void> => {
         if (result.finishReason !== "stop") return;
         try {
+          if (!pendingOperation.stored) {
+            await deps.deleteThread(result.threadId, cleanupSignal);
+          }
           const operationCwd = deps.store.completeOperation(
             identity.responseId,
           );
@@ -862,7 +880,7 @@ export function createResponsesHandler(
           try {
             await loseResponseOperation(
               deps,
-              request.previous_response_id,
+              identity.responseId,
               cleanupSignal,
             );
             observeLeaseReleased();
@@ -1269,7 +1287,7 @@ export function createResponsesHandler(
       ...(request.reasoning?.summary == null
         ? {}
         : { summary: request.reasoning.summary }),
-      ...(request.text === undefined
+      ...(request.text?.format?.type !== "json_schema"
         ? {}
         : { outputSchema: request.text.format.schema }),
       ...(dynamicTools.length === 0 ? {} : { dynamicTools }),

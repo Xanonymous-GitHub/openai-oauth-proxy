@@ -30,6 +30,7 @@ const signatures = {
 interface PendingTools {
   calls: ExternalToolCall[];
   fingerprint: string;
+  responseId?: string;
 }
 
 class FixtureTools {
@@ -38,7 +39,10 @@ class FixtureTools {
   constructor(
     private readonly completed: string[],
     private readonly completedRoundWidths: number[],
-    private readonly nextRound: (fingerprint: string) => TurnResult | undefined,
+    private readonly nextRound: (
+      fingerprint: string,
+      responseId?: string,
+    ) => TurnResult | undefined,
   ) {}
 
   toDynamicTools(tools: Array<Record<string, unknown>>) {
@@ -92,7 +96,7 @@ class FixtureTools {
     }
     this.completedRoundWidths.push(pending.calls.length);
     this.pending = undefined;
-    const next = this.nextRound(request.toolFingerprint);
+    const next = this.nextRound(request.toolFingerprint, pending.responseId);
     const result = next ?? {
       threadId: "thread-tools",
       turnId: "turn-tools",
@@ -102,6 +106,9 @@ class FixtureTools {
     };
     return {
       type: "continued" as const,
+      ...(pending.responseId === undefined
+        ? {}
+        : { responseId: pending.responseId }),
       threadId: "thread-tools",
       turnId: "turn-tools",
       result: Promise.resolve(result),
@@ -144,6 +151,12 @@ export interface ListeningProxyFixture {
   readonly internalToolEvents: number;
   readonly abortedTurns: number;
   readonly requestedPaths: string[];
+  readonly requestSummaries: Array<{
+    store?: boolean;
+    previousResponseId?: string;
+    inputTypes: string[];
+    functionOutputCount: number;
+  }>;
   readonly requestErrors: Array<{
     status: number;
     code?: string;
@@ -177,6 +190,12 @@ export async function startListeningProxyFixture(): Promise<ListeningProxyFixtur
   const completedToolCalls: string[] = [];
   const completedToolRoundWidths: number[] = [];
   const requestedPaths: string[] = [];
+  const requestSummaries: Array<{
+    store?: boolean;
+    previousResponseId?: string;
+    inputTypes: string[];
+    functionOutputCount: number;
+  }> = [];
   const requestErrors: Array<{
     status: number;
     code?: string;
@@ -190,7 +209,10 @@ export async function startListeningProxyFixture(): Promise<ListeningProxyFixtur
       arguments: Record<string, JsonValue>;
     }>
   > = [];
-  const nextToolResult = (fingerprint: string): TurnResult | undefined => {
+  const nextToolResult = (
+    fingerprint: string,
+    responseId?: string,
+  ): TurnResult | undefined => {
     const round = nextToolRounds.shift();
     if (!round) return undefined;
     toolSequence += 1;
@@ -199,7 +221,11 @@ export async function startListeningProxyFixture(): Promise<ListeningProxyFixtur
       name: call.name,
       arguments: call.arguments,
     }));
-    tools.pending = { calls, fingerprint };
+    tools.pending = {
+      calls,
+      fingerprint,
+      ...(responseId === undefined ? {} : { responseId }),
+    };
     return {
       threadId: "thread-tools",
       turnId: `turn-tools-${toolSequence}`,
@@ -263,7 +289,10 @@ export async function startListeningProxyFixture(): Promise<ListeningProxyFixtur
         ),
       )
     ) {
-      const result = nextToolResult(lifecycle?.tool?.toolFingerprint ?? "");
+      const result = nextToolResult(
+        lifecycle?.tool?.toolFingerprint ?? "",
+        lifecycle?.tool?.responseId,
+      );
       if (!result) throw new Error("Fixture tool round missing");
       await lifecycle?.tool?.suspended?.(threadId, turnId);
       await lifecycle?.release?.();
@@ -332,9 +361,13 @@ export async function startListeningProxyFixture(): Promise<ListeningProxyFixtur
             model: "gpt-5.4",
             inputModalities: ["text", "image"],
             supportedReasoningEfforts: [
+              { reasoningEffort: "none", description: "None" },
+              { reasoningEffort: "minimal", description: "Minimal" },
               { reasoningEffort: "low", description: "Low" },
               { reasoningEffort: "medium", description: "Medium" },
               { reasoningEffort: "high", description: "High" },
+              { reasoningEffort: "xhigh", description: "Extra high" },
+              { reasoningEffort: "max", description: "Maximum" },
             ],
           }),
         ],
@@ -360,7 +393,34 @@ export async function startListeningProxyFixture(): Promise<ListeningProxyFixtur
   });
   const server = serve({
     async fetch(request) {
-      requestedPaths.push(new URL(request.url).pathname);
+      const path = new URL(request.url).pathname;
+      requestedPaths.push(path);
+      if (path === "/v1/responses") {
+        const body = (await request
+          .clone()
+          .json()
+          .catch(() => ({}))) as Record<string, unknown>;
+        const input = Array.isArray(body.input) ? body.input : [];
+        const inputTypes = input.map((item) => {
+          if (typeof item !== "object" || item === null) return typeof item;
+          const value = item as Record<string, unknown>;
+          return typeof value.type === "string"
+            ? value.type
+            : typeof value.role === "string"
+              ? `message:${value.role}`
+              : "object";
+        });
+        requestSummaries.push({
+          ...(typeof body.store === "boolean" ? { store: body.store } : {}),
+          ...(typeof body.previous_response_id === "string"
+            ? { previousResponseId: body.previous_response_id }
+            : {}),
+          inputTypes,
+          functionOutputCount: inputTypes.filter(
+            (type) => type === "function_call_output",
+          ).length,
+        });
+      }
       const response = await app.fetch(request);
       if (!response.ok) {
         const body = (await response
@@ -398,6 +458,7 @@ export async function startListeningProxyFixture(): Promise<ListeningProxyFixtur
     dockerBaseURL: `http://host.docker.internal:${port}/v1`,
     commands,
     requestedPaths,
+    requestSummaries,
     requestErrors,
     images: {
       png: `data:image/png;base64,${signatures.png.toString("base64")}`,

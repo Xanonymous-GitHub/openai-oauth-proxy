@@ -250,7 +250,7 @@ describe("parseChatRequest", () => {
     },
   );
 
-  it.each(["minimal", "low", "medium", "high", "xhigh"])(
+  it.each(["none", "minimal", "low", "medium", "high", "xhigh", "max"])(
     "accepts syntactic reasoning effort %s",
     (reasoning_effort) => {
       expect(
@@ -355,6 +355,8 @@ describe("parseResponsesRequest", () => {
       store: true,
       previous_response_id: "resp_previous",
       max_output_tokens: 128,
+      include: ["reasoning.encrypted_content"],
+      prompt_cache_key: "session_fixture",
       reasoning: { effort: "minimal", summary: "concise" },
       text: {
         format: {
@@ -387,6 +389,16 @@ describe("parseResponsesRequest", () => {
       input: "hello",
       max_output_tokens: null,
     };
+
+    expect(parseResponsesRequest(request)).toEqual(request);
+  });
+
+  it.each([
+    ["default text", {}],
+    ["explicit text", { format: { type: "text" } }],
+    ["ignored verbosity", { verbosity: "medium" }],
+  ])("accepts %s output configuration", (_name, text) => {
+    const request = { model: "gpt-5.4", input: "hello", text };
 
     expect(parseResponsesRequest(request)).toEqual(request);
   });
@@ -488,27 +500,21 @@ describe("parseResponsesRequest", () => {
     );
   });
 
-  it("rejects store=false with tools", () => {
-    expect(() =>
-      parseResponsesRequest({
-        model: "gpt-5.4",
-        input: "hi",
-        store: false,
-        tools: [
-          {
-            type: "function",
-            name: "lookup",
-            parameters: { type: "object" },
-          },
-        ],
-      }),
-    ).toThrowError(
-      expect.objectContaining({
-        code: "store_required_for_tools",
-        param: "store",
-        status: 400,
-      }),
-    );
+  it("accepts store=false with tools", () => {
+    const request = {
+      model: "gpt-5.4",
+      input: "hi",
+      store: false,
+      tools: [
+        {
+          type: "function" as const,
+          name: "lookup",
+          parameters: { type: "object" },
+        },
+      ],
+    };
+
+    expect(parseResponsesRequest(request)).toEqual(request);
   });
 
   it.each(["system", "developer", "user", "assistant"] as const)(

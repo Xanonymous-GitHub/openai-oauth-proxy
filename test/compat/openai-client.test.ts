@@ -320,8 +320,8 @@ const rejectionCases: RejectionCase[] = [
       input: "reject",
       include: ["message.output_text.logprobs"],
     }),
-    code: "unsupported_field",
-    param: "include",
+    code: "invalid_request",
+    param: "include.0",
   },
   {
     concept: "Responses metadata",
@@ -764,21 +764,15 @@ describe("official OpenAI JavaScript client compatibility", () => {
     expect(fixture.commands).toHaveLength(commandCount);
   });
 
-  it("rejects store false with function tools before thread work", async () => {
-    const commandCount = fixture.commands.length;
-    await expect(
-      client.responses.create({
-        model: "gpt-5.4",
-        input: "invalid transient tools",
-        store: false,
-        tools: [responseTool],
-      }),
-    ).rejects.toMatchObject({
-      status: 400,
-      code: "store_required_for_tools",
-      param: "store",
+  it("accepts store false with function tools", async () => {
+    const response = await client.responses.create({
+      model: "gpt-5.4",
+      input: "transient tools",
+      store: false,
+      tools: [responseTool],
     });
-    expect(fixture.commands).toHaveLength(commandCount);
+
+    expect(response.output_text).toBe("fixture answer");
   });
 
   it("honors Chat stream_options include_usage false", async () => {

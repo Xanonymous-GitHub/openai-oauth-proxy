@@ -952,6 +952,75 @@ describe("POST /v1/responses", () => {
     expect(fixture.host.toolCalls).toHaveBeenCalledOnce();
   });
 
+  it("continues store=false tool calls by call ID and deletes the thread", async () => {
+    const fixture = createToolFixture();
+    const respond = vi.fn(() => fixture.complete("stateless complete"));
+    vi.mocked(fixture.host.turnStart).mockImplementationOnce(async () => {
+      fixture.tools.push({
+        generation: 1,
+        id: "rpc-stateless",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          callId: "internal-stateless",
+          namespace: null,
+          tool: "lookup",
+          arguments: {},
+        },
+        respond,
+        reject: vi.fn(),
+      });
+      return { turn: fakeTurn() };
+    });
+    const tools = [
+      { type: "function" as const, name: "lookup", parameters: {} },
+    ];
+    const first = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      input: "lookup",
+      store: false,
+      tools,
+    });
+    const firstBody = (await first.json()) as {
+      id: string;
+      output: Array<{ call_id: string }>;
+    };
+    const callId = firstBody.output[0]?.call_id ?? "missing";
+
+    const completed = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      store: false,
+      tools,
+      input: [
+        { role: "user", content: "lookup" },
+        {
+          type: "function_call",
+          call_id: callId,
+          name: "lookup",
+          arguments: "{}",
+        },
+        { type: "function_call_output", call_id: callId, output: "found" },
+      ],
+    });
+
+    expect(completed.status).toBe(200);
+    expect(await completed.json()).toMatchObject({
+      id: firstBody.id,
+      output: [
+        {
+          type: "message",
+          content: [{ type: "output_text", text: "stateless complete" }],
+        },
+      ],
+    });
+    expect(respond).toHaveBeenCalledOnce();
+    expect(fixture.deleteThread).toHaveBeenCalledWith(
+      "thread-1",
+      expect.any(AbortSignal),
+    );
+    expect(fixture.store.lookup(firstBody.id)).toBeUndefined();
+  });
+
   it("forwards a resumed Responses delta before the continuation result resolves", async () => {
     const fixture = createToolFixture();
     const respond = vi.fn(() => {
@@ -1787,44 +1856,27 @@ describe("POST /v1/responses", () => {
     ).toBeUndefined();
   });
 
-  it.each([
-    [
-      "disposable tools",
-      {
-        model: "gpt-5.4",
-        input: "tool",
-        store: false,
-        tools: [{ type: "function", name: "lookup", parameters: {} }],
-      },
-      "store_required_for_tools",
-    ],
-    [
-      "function call input",
-      {
-        model: "gpt-5.4",
-        input: [
-          {
-            type: "function_call",
-            call_id: "call-1",
-            name: "lookup",
-            arguments: "{}",
-          },
-        ],
-      },
-      "unknown_tool_call",
-    ],
-  ])(
-    "rejects %s before model lookup or thread start",
-    async (_name, request, code) => {
-      const { app, host, invocations } = createFixture();
-      const response = await postResponse(app, request);
+  it("rejects function call input before model lookup or thread start", async () => {
+    const { app, host, invocations } = createFixture();
+    const response = await postResponse(app, {
+      model: "gpt-5.4",
+      input: [
+        {
+          type: "function_call",
+          call_id: "call-1",
+          name: "lookup",
+          arguments: "{}",
+        },
+      ],
+    });
 
-      expect(response.status).toBe(400);
-      expect(await response.json()).toMatchObject({ error: { code } });
-      expect(host.modelList).not.toHaveBeenCalled();
-      expect(invocations).toEqual([]);
-    },
-  );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: { code: "unknown_tool_call" },
+    });
+    expect(host.modelList).not.toHaveBeenCalled();
+    expect(invocations).toEqual([]);
+  });
 
   it("validates reasoning before acquiring a continuation lease", async () => {
     const { app, invocations } = createFixture();

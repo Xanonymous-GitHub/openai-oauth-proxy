@@ -283,6 +283,25 @@ describe("ToolBridge", () => {
     expect(second.respond).toHaveBeenCalledAfter(vi.mocked(turn.resume));
   });
 
+  it("finds a Responses continuation by call ID", async () => {
+    const { bridge } = createBridge();
+    const turn = context({ kind: "responses", responseId: "resp-1" });
+    const call = serverCall("rpc-1", "lookup");
+    const external = bridge.register(call, turn);
+
+    await expect(
+      bridge.continue({
+        kind: "responses",
+        toolFingerprint: "tools-v1",
+        results: [{ callId: external.id, output: "found" }],
+      }),
+    ).resolves.toMatchObject({
+      type: "continued",
+      responseId: "resp-1",
+    });
+    expect(call.respond).toHaveBeenCalledOnce();
+  });
+
   it.each([
     ["undeclared tool", { tool: "filesystem", namespace: null }],
     ["namespaced tool", { tool: "weather", namespace: "internal" }],

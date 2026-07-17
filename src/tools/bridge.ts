@@ -73,6 +73,7 @@ export interface ToolContinuationRequest {
 export type ToolContinuation =
   | {
       type: "continued";
+      responseId?: string;
       threadId: string;
       turnId: string;
       result: Promise<TurnResult>;
@@ -407,6 +408,9 @@ export class ToolBridge {
     }
     return {
       type: "continued",
+      ...(turn.context.responseId === undefined
+        ? {}
+        : { responseId: turn.context.responseId }),
       threadId: turn.context.threadId,
       turnId: turn.context.turnId,
       result: nextStage.result,
@@ -515,10 +519,8 @@ export class ToolBridge {
   }
 
   private findTurn(request: ToolContinuationRequest): PendingTurn | undefined {
-    if (request.kind === "responses") {
-      return request.responseId === undefined
-        ? undefined
-        : this.#responses.get(request.responseId);
+    if (request.kind === "responses" && request.responseId !== undefined) {
+      return this.#responses.get(request.responseId);
     }
     const turns = new Set(
       request.results

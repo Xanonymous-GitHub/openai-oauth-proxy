@@ -1,3 +1,4 @@
+import type { ReasoningEffort } from "../codex/generated/ReasoningEffort.js";
 import type { ReasoningSummary } from "../codex/generated/ReasoningSummary.js";
 import type { ResponseItem } from "../codex/generated/ResponseItem.js";
 import type { JsonValue } from "../codex/generated/serde_json/JsonValue.js";
@@ -26,7 +27,7 @@ export interface TurnCommand {
   history: ResponseItem[];
   input: UserInput[];
   instructions?: string;
-  effort?: "minimal" | "low" | "medium" | "high" | "xhigh";
+  effort?: ReasoningEffort;
   summary?: ReasoningSummary;
   outputSchema?: JsonValue;
   dynamicTools?: DynamicToolSpec[];
