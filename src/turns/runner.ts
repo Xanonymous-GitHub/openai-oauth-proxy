@@ -16,8 +16,14 @@ import {
   type TokenUsage,
   type TurnCommand,
   type TurnEventSubscription,
+  type TurnOutputItem,
   type TurnResult,
 } from "./events.js";
+
+type PendingReasoningEvent = Extract<
+  ProxyStreamEvent,
+  { type: "reasoning.summary_part.added" | "reasoning.summary_text.delta" }
+>;
 
 const DEFAULT_TIMEOUT_MS = 600_000;
 const DEFAULT_INTERRUPT_WAIT_MS = 5_000;
@@ -249,6 +255,23 @@ function completedText(turn: Turn, current: string): string {
   return text;
 }
 
+function completedReasoning(
+  turn: Turn,
+  current: Map<string, string[]>,
+  priorStageIds: ReadonlySet<string>,
+): Map<string, string[]> {
+  const reasoning = new Map(current);
+  for (const item of turn.items) {
+    if (
+      item.type === "reasoning" &&
+      (!priorStageIds.has(item.id) || current.has(item.id))
+    ) {
+      reasoning.set(item.id, item.summary);
+    }
+  }
+  return reasoning;
+}
+
 export class TurnRunner {
   readonly #host: CodexHost;
   readonly #emptyWorkingDirectory: string;
@@ -333,6 +356,11 @@ export class TurnRunner {
       ? AbortSignal.any([signal, drainController.signal])
       : drainController.signal;
     let text = "";
+    let reasoning = new Map<string, string[]>();
+    let observedReasoningIds = new Set<string>();
+    let pendingReasoningEvents = new Map<string, PendingReasoningEvent[]>();
+    const priorStageReasoningIds = new Set<string>();
+    let outputOrder: TurnOutputItem[] = [];
     let usage: TokenUsage | undefined;
     const release = lifecycle?.release ?? this.#release;
     const cleanup = lifecycle?.cleanup ?? this.#cleanup;
@@ -410,6 +438,31 @@ export class TurnRunner {
         this.#timeoutMs,
       );
       timeout.unref?.();
+    };
+    const observeMessage = (): void => {
+      if (!outputOrder.some((item) => item.type === "message")) {
+        outputOrder.push({ type: "message" });
+      }
+    };
+    const observeReasoning = (id: string): void => {
+      observedReasoningIds.add(id);
+      if (
+        !outputOrder.some((item) => item.type === "reasoning" && item.id === id)
+      ) {
+        outputOrder.push({ type: "reasoning", id });
+      }
+    };
+    const queueReasoning = (id: string, event: PendingReasoningEvent): void => {
+      observedReasoningIds.add(id);
+      const pending = pendingReasoningEvents.get(id) ?? [];
+      pending.push(event);
+      pendingReasoningEvents.set(id, pending);
+    };
+    const flushReasoning = (id: string): void => {
+      for (const event of pendingReasoningEvents.get(id) ?? []) {
+        accumulator.emit(event);
+      }
+      pendingReasoningEvents.delete(id);
     };
     let finalization: Promise<unknown | undefined> | undefined;
     const finalize = (): Promise<unknown | undefined> => {
@@ -517,6 +570,9 @@ export class TurnRunner {
             input: command.input,
             model: command.model,
             ...(command.effort === undefined ? {} : { effort: command.effort }),
+            ...(command.summary === undefined
+              ? {}
+              : { summary: command.summary }),
             ...(command.outputSchema === undefined
               ? {}
               : { outputSchema: command.outputSchema }),
@@ -597,6 +653,15 @@ export class TurnRunner {
             text,
             finishReason: "tool_calls",
             toolCalls: calls,
+            ...(reasoning.size === 0
+              ? {}
+              : {
+                  reasoning: [...reasoning].map(([id, summary]) => ({
+                    id,
+                    summary,
+                  })),
+                }),
+            ...(outputOrder.length === 0 ? {} : { outputOrder }),
             ...(usage === undefined ? {} : { usage }),
           });
         };
@@ -611,6 +676,9 @@ export class TurnRunner {
           generation,
           toolFingerprint: toolLifecycle.toolFingerprint,
           toolDefinitions: command.dynamicTools,
+          ...(command.summary === undefined
+            ? {}
+            : { reasoningSummary: command.summary }),
           ...(toolLifecycle.signal === undefined
             ? {}
             : { signal: toolLifecycle.signal }),
@@ -619,6 +687,14 @@ export class TurnRunner {
             : { finish: toolLifecycle.finish }),
           resume: (nextSignal) => {
             const stage = accumulator.resume();
+            text = "";
+            for (const id of observedReasoningIds) {
+              priorStageReasoningIds.add(id);
+            }
+            reasoning = new Map();
+            observedReasoningIds = new Set();
+            pendingReasoningEvents = new Map();
+            outputOrder = [];
             const resumedSignal = toolLifecycle.signal
               ? nextSignal
                 ? AbortSignal.any([toolLifecycle.signal, nextSignal])
@@ -649,11 +725,54 @@ export class TurnRunner {
         this.assertGeneration(generation);
         switch (event.method) {
           case "item/agentMessage/delta":
+            observeMessage();
+            text += event.params.delta;
             accumulator.emit({ type: "text.delta", delta: event.params.delta });
+            break;
+          case "item/reasoning/summaryPartAdded":
+            if (
+              command.summary !== undefined &&
+              !priorStageReasoningIds.has(event.params.itemId)
+            ) {
+              queueReasoning(event.params.itemId, {
+                type: "reasoning.summary_part.added",
+                itemId: event.params.itemId,
+                summaryIndex: event.params.summaryIndex,
+              });
+            }
+            break;
+          case "item/reasoning/summaryTextDelta":
+            if (
+              command.summary !== undefined &&
+              !priorStageReasoningIds.has(event.params.itemId)
+            ) {
+              queueReasoning(event.params.itemId, {
+                type: "reasoning.summary_text.delta",
+                itemId: event.params.itemId,
+                summaryIndex: event.params.summaryIndex,
+                delta: event.params.delta,
+              });
+            }
             break;
           case "item/completed":
             if (event.params.item.type === "agentMessage") {
+              observeMessage();
               text = event.params.item.text;
+            } else if (
+              command.summary !== undefined &&
+              event.params.item.type === "reasoning"
+            ) {
+              if (priorStageReasoningIds.has(event.params.item.id)) {
+                break;
+              }
+              const item = {
+                id: event.params.item.id,
+                summary: event.params.item.summary,
+              };
+              observeReasoning(item.id);
+              flushReasoning(item.id);
+              reasoning.set(item.id, item.summary);
+              accumulator.emit({ type: "reasoning.completed", item });
             }
             break;
           case "thread/tokenUsage/updated":
@@ -663,6 +782,24 @@ export class TurnRunner {
           case "turn/completed": {
             terminal = true;
             text = completedText(event.params.turn, text);
+            if (command.summary !== undefined) {
+              const completed = completedReasoning(
+                event.params.turn,
+                reasoning,
+                priorStageReasoningIds,
+              );
+              for (const [id, summary] of completed) {
+                if (!reasoning.has(id)) {
+                  observeReasoning(id);
+                  flushReasoning(id);
+                  accumulator.emit({
+                    type: "reasoning.completed",
+                    item: { id, summary },
+                  });
+                }
+              }
+              reasoning = completed;
+            }
             const error = cancellationCause
               ? cancellationError(cancellationCause)
               : completedTurnError(event.params.turn);
@@ -687,6 +824,15 @@ export class TurnRunner {
               turnId,
               text,
               finishReason: "stop",
+              ...(reasoning.size === 0
+                ? {}
+                : {
+                    reasoning: [...reasoning].map(([id, summary]) => ({
+                      id,
+                      summary,
+                    })),
+                  }),
+              ...(outputOrder.length === 0 ? {} : { outputOrder }),
               ...(usage === undefined ? {} : { usage }),
             };
             accumulator.complete(result);

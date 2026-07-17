@@ -144,6 +144,16 @@ function createFixture(
         turnId,
         text: `answer-${call}`,
         finishReason: "stop",
+        ...(command.summary === undefined
+          ? {}
+          : {
+              reasoning: [
+                {
+                  id: `reasoning-${call}`,
+                  summary: [`summary-${call}`],
+                },
+              ],
+            }),
         usage: { inputTokens: 7, outputTokens: 5, totalTokens: 12 },
       };
     } finally {
@@ -705,7 +715,8 @@ describe("POST /v1/responses", () => {
         { role: "user", content: "question" },
       ],
       instructions: "newest developer instruction",
-      reasoning: { effort: "high" },
+      max_output_tokens: 128,
+      reasoning: { effort: "high", summary: "concise" },
       text: {
         format: {
           type: "json_schema",
@@ -726,6 +737,12 @@ describe("POST /v1/responses", () => {
       model: "gpt-5.4",
       output: [
         {
+          id: "rs_reasoning-1",
+          type: "reasoning",
+          status: "completed",
+          summary: [{ type: "summary_text", text: "summary-1" }],
+        },
+        {
           type: "message",
           status: "completed",
           role: "assistant",
@@ -737,6 +754,7 @@ describe("POST /v1/responses", () => {
     expect(invocations[0]?.command).toMatchObject({
       instructions: "newest developer instruction",
       effort: "high",
+      summary: "concise",
       outputSchema: {
         type: "object",
         properties: { answer: { type: "string" } },
@@ -1183,9 +1201,102 @@ describe("POST /v1/responses", () => {
     expect(completed.status).toBe(200);
   });
 
+  it("rejects a changed reasoning summary before resuming a tool turn", async () => {
+    const fixture = createToolFixture();
+    const respond = vi.fn(() => fixture.complete("summary complete"));
+    vi.mocked(fixture.host.turnStart).mockImplementationOnce(async () => {
+      fixture.tools.push({
+        generation: 1,
+        id: "rpc-summary-change",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          callId: "internal-summary-change",
+          namespace: null,
+          tool: "lookup",
+          arguments: {},
+        },
+        respond,
+        reject: vi.fn(),
+      });
+      return { turn: fakeTurn() };
+    });
+    const tools = [
+      { type: "function" as const, name: "lookup", parameters: {} },
+    ];
+    const suspended = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      input: "lookup",
+      tools,
+      reasoning: { summary: "concise" },
+    });
+    const body = (await suspended.json()) as {
+      id: string;
+      output: Array<{ call_id: string }>;
+    };
+
+    const changed = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      previous_response_id: body.id,
+      tools,
+      reasoning: { summary: "detailed" },
+      input: [
+        {
+          type: "function_call_output",
+          call_id: body.output[0]?.call_id,
+          output: "found",
+        },
+      ],
+    });
+
+    expect(changed.status).toBe(400);
+    expect(await changed.json()).toMatchObject({
+      error: {
+        code: "reasoning_summary_changed",
+        param: "reasoning.summary",
+      },
+    });
+    expect(respond).not.toHaveBeenCalled();
+    expect(fixture.store.lookup(body.id)).toMatchObject({ state: "pending" });
+
+    const disabled = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      previous_response_id: body.id,
+      tools,
+      reasoning: { summary: null },
+      input: [
+        {
+          type: "function_call_output",
+          call_id: body.output[0]?.call_id,
+          output: "found",
+        },
+      ],
+    });
+    expect(disabled.status).toBe(400);
+    expect(await disabled.json()).toMatchObject({
+      error: { code: "reasoning_summary_changed" },
+    });
+    expect(respond).not.toHaveBeenCalled();
+
+    const completed = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      previous_response_id: body.id,
+      tools,
+      reasoning: { summary: "concise" },
+      input: [
+        {
+          type: "function_call_output",
+          call_id: body.output[0]?.call_id,
+          output: "found",
+        },
+      ],
+    });
+    expect(completed.status).toBe(200);
+  });
+
   it.each([
-    ["output_text.done", 2, "lost", 1],
-    ["response.completed", 3, "complete", 0],
+    ["output_text.done", 4, "lost", 1],
+    ["response.completed", 7, "complete", 0],
   ] as const)(
     "settles owned continuation state when %s cannot be written",
     async (_event, streamWriteFailureAt, expectedState, expectedDeletes) => {
@@ -1825,29 +1936,144 @@ describe("POST /v1/responses", () => {
 
     expect(events.map(({ event }) => event)).toEqual([
       "response.created",
+      "response.output_item.added",
+      "response.content_part.added",
       "response.output_text.delta",
       "response.output_text.done",
+      "response.content_part.done",
+      "response.output_item.done",
       "response.completed",
     ]);
     expect(events.map(({ data }) => data.sequence_number)).toEqual([
-      0, 1, 2, 3,
+      0, 1, 2, 3, 4, 5, 6, 7,
     ]);
-    expect(events[1]?.data).toMatchObject({
+    expect(events[3]?.data).toMatchObject({
       item_id: expect.stringMatching(/^msg_/),
       logprobs: [],
     });
-    expect(events[1]?.data).not.toHaveProperty("response_id");
-    expect(events[2]?.data).toMatchObject({
-      item_id: events[1]?.data.item_id,
+    expect(events[3]?.data).not.toHaveProperty("response_id");
+    expect(events[4]?.data).toMatchObject({
+      item_id: events[3]?.data.item_id,
       logprobs: [],
     });
-    expect(events[2]?.data).not.toHaveProperty("response_id");
-    expect(events[3]?.data.response.id).toBe(responseId);
-    expect(events[3]?.data.response.output[0].id).toBe(events[1]?.data.item_id);
+    expect(events[4]?.data).not.toHaveProperty("response_id");
+    expect(events[7]?.data.response.id).toBe(responseId);
+    expect(events[7]?.data.response.output[0].id).toBe(events[3]?.data.item_id);
     expect(store.lookup(responseId)).toMatchObject({
       state: "complete",
       turnId: "turn-1",
     });
+  });
+
+  it("streams requested reasoning summaries without exposing reasoning content", async () => {
+    const fixture = createToolFixture({ testStream: true });
+    const response = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      input: "summarize your reasoning",
+      reasoning: { summary: "detailed" },
+      stream: true,
+    });
+    await vi.waitFor(() =>
+      expect(fixture.host.turnStart).toHaveBeenCalledOnce(),
+    );
+    expect(fixture.host.turnStart).toHaveBeenCalledWith(
+      expect.objectContaining({ summary: "detailed" }),
+      expect.any(AbortSignal),
+    );
+    fixture.events.push({
+      generation: fixture.host.generation,
+      method: "item/reasoning/summaryPartAdded",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "reasoning-1",
+        summaryIndex: 0,
+      },
+    });
+    fixture.events.push({
+      generation: fixture.host.generation,
+      method: "item/reasoning/summaryTextDelta",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "reasoning-1",
+        summaryIndex: 0,
+        delta: "Checked the request.",
+      },
+    });
+    fixture.events.push({
+      generation: fixture.host.generation,
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        completedAtMs: now,
+        item: {
+          type: "reasoning",
+          id: "reasoning-1",
+          summary: ["Authoritative summary."],
+          content: ["private reasoning"],
+        },
+      },
+    });
+    fixture.complete("answer");
+
+    const frames = (await response.text()).trim().split("\n\n");
+    const projected = frames.map((frame) => {
+      const lines = frame.split("\n");
+      return {
+        event: lines[0]?.replace("event: ", ""),
+        data: JSON.parse(lines[1]?.replace("data: ", "") ?? "null"),
+      };
+    });
+
+    expect(projected.map(({ event }) => event)).toEqual([
+      "response.created",
+      "response.output_item.added",
+      "response.reasoning_summary_part.added",
+      "response.reasoning_summary_text.delta",
+      "response.reasoning_summary_text.done",
+      "response.reasoning_summary_part.done",
+      "response.output_item.done",
+      "response.output_item.added",
+      "response.content_part.added",
+      "response.output_text.done",
+      "response.content_part.done",
+      "response.output_item.done",
+      "response.completed",
+    ]);
+    expect(projected.map(({ data }) => data.sequence_number)).toEqual([
+      0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+    ]);
+    expect(projected[1]?.data).toMatchObject({
+      output_index: 0,
+      item: {
+        id: "rs_reasoning-1",
+        type: "reasoning",
+        status: "in_progress",
+        summary: [],
+      },
+    });
+    expect(projected[3]?.data).toMatchObject({
+      item_id: "rs_reasoning-1",
+      output_index: 0,
+      summary_index: 0,
+      delta: "Checked the request.",
+    });
+    expect(projected[4]?.data.text).toBe("Authoritative summary.");
+    expect(projected[9]?.data.output_index).toBe(1);
+    expect(projected[12]?.data.response.output).toMatchObject([
+      {
+        id: "rs_reasoning-1",
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "Authoritative summary." }],
+      },
+      {
+        type: "message",
+        content: [{ type: "output_text", text: "answer" }],
+      },
+    ]);
+    expect(JSON.stringify(projected)).not.toContain("private reasoning");
   });
 
   it("records the released Responses lease at actual stream completion", async () => {
@@ -1918,6 +2144,32 @@ describe("POST /v1/responses", () => {
     const fixture = createToolFixture();
     const respond = vi.fn(() => fixture.complete("stream complete"));
     vi.mocked(fixture.host.turnStart).mockImplementationOnce(async () => {
+      fixture.events.push({
+        generation: fixture.host.generation,
+        method: "item/agentMessage/delta",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "message-before-tool",
+          delta: "Calling lookup.",
+        },
+      });
+      fixture.events.push({
+        generation: fixture.host.generation,
+        method: "item/completed",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          completedAtMs: now,
+          item: {
+            type: "agentMessage",
+            id: "message-before-tool",
+            text: "Calling lookup.",
+            phase: null,
+            memoryCitation: null,
+          },
+        },
+      });
       fixture.tools.push({
         generation: 1,
         id: "rpc-stream",
@@ -1956,22 +2208,34 @@ describe("POST /v1/responses", () => {
       };
     });
     const completed = projected.at(-1)?.data.response;
-    const callId = completed?.output[0]?.call_id as string;
+    const callId = completed?.output[1]?.call_id as string;
 
     expect(projected.map(({ event }) => event)).toEqual([
       "response.created",
       "response.output_item.added",
+      "response.content_part.added",
+      "response.output_text.delta",
+      "response.output_item.added",
       "response.function_call_arguments.delta",
       "response.function_call_arguments.done",
+      "response.output_item.done",
+      "response.output_text.done",
+      "response.content_part.done",
       "response.output_item.done",
       "response.completed",
     ]);
     expect(projected.map(({ data }) => data.sequence_number)).toEqual([
-      0, 1, 2, 3, 4, 5,
+      0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
     ]);
+    expect(projected[4]?.data.item.arguments).toBe("");
+    expect(projected[7]?.data.item.arguments).toBe('{"id":1}');
     expect(completed).toMatchObject({
       id: expect.stringMatching(/^resp_/),
       output: [
+        {
+          type: "message",
+          content: [{ type: "output_text", text: "Calling lookup." }],
+        },
         {
           type: "function_call",
           call_id: expect.stringMatching(/^call_g1_/),
@@ -2017,7 +2281,7 @@ describe("POST /v1/responses", () => {
   });
 
   it("preserves the complete mapping when the response.completed write fails", async () => {
-    const fixture = createFixture({ streamWriteFailureAt: 4 });
+    const fixture = createFixture({ streamWriteFailureAt: 8 });
     const reserve = vi.spyOn(fixture.store, "reserveOperation");
     const response = await postResponse(fixture.app, {
       model: "gpt-5.4",
@@ -2025,7 +2289,7 @@ describe("POST /v1/responses", () => {
       stream: true,
     });
 
-    await expect(response.text()).rejects.toThrow("stream write 4 failed");
+    await expect(response.text()).rejects.toThrow("stream write 8 failed");
     const responseId = reserve.mock.calls[0]?.[0].responseId ?? "missing";
     expect(fixture.store.lookup(responseId)).toMatchObject({
       state: "complete",
@@ -2072,7 +2336,7 @@ describe("POST /v1/responses", () => {
       code: "internal_error",
       message: "Internal server error",
       param: null,
-      sequence_number: 2,
+      sequence_number: 4,
     });
     expect(error).not.toHaveProperty("error");
   });

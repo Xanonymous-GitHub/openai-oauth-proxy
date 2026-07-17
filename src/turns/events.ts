@@ -1,3 +1,4 @@
+import type { ReasoningSummary } from "../codex/generated/ReasoningSummary.js";
 import type { ResponseItem } from "../codex/generated/ResponseItem.js";
 import type { JsonValue } from "../codex/generated/serde_json/JsonValue.js";
 import type { DynamicToolSpec } from "../codex/generated/v2/DynamicToolSpec.js";
@@ -26,9 +27,19 @@ export interface TurnCommand {
   input: UserInput[];
   instructions?: string;
   effort?: "minimal" | "low" | "medium" | "high" | "xhigh";
+  summary?: ReasoningSummary;
   outputSchema?: JsonValue;
   dynamicTools?: DynamicToolSpec[];
 }
+
+export interface ReasoningSummaryItem {
+  id: string;
+  summary: string[];
+}
+
+export type TurnOutputItem =
+  | { type: "reasoning"; id: string }
+  | { type: "message" };
 
 export interface TurnResult {
   threadId: string;
@@ -36,11 +47,25 @@ export interface TurnResult {
   text: string;
   finishReason: "stop" | "tool_calls";
   toolCalls?: ExternalToolCall[];
+  reasoning?: ReasoningSummaryItem[];
+  outputOrder?: TurnOutputItem[];
   usage?: TokenUsage;
 }
 
 export type ProxyStreamEvent =
   | { type: "text.delta"; delta: string }
+  | {
+      type: "reasoning.summary_part.added";
+      itemId: string;
+      summaryIndex: number;
+    }
+  | {
+      type: "reasoning.summary_text.delta";
+      itemId: string;
+      summaryIndex: number;
+      delta: string;
+    }
+  | { type: "reasoning.completed"; item: ReasoningSummaryItem }
   | { type: "usage"; usage: TokenUsage }
   | { type: "tool.call"; call: ExternalToolCall }
   | { type: "completed"; result: TurnResult }
@@ -150,6 +175,8 @@ function eventIdentity(
 ): { threadId: string; turnId: string } | undefined {
   switch (event.method) {
     case "item/agentMessage/delta":
+    case "item/reasoning/summaryPartAdded":
+    case "item/reasoning/summaryTextDelta":
     case "item/completed":
     case "thread/tokenUsage/updated":
       return {

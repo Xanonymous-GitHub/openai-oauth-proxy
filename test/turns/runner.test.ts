@@ -4,6 +4,7 @@ import {
   fakeThreadStartResponse,
   fakeTurn,
 } from "../../src/codex/fake.js";
+import type { ThreadItem } from "../../src/codex/generated/v2/ThreadItem.js";
 import type {
   CodexHost,
   HostNotification,
@@ -170,6 +171,7 @@ function emitCompletedTurn(
   turnId: string,
   text: string,
   usage = true,
+  turnItems: ThreadItem[] = [],
 ): void {
   events.push({
     method: "item/agentMessage/delta",
@@ -255,6 +257,7 @@ function emitCompletedTurn(
         id: turnId,
         status: "completed",
         completedAt: 2,
+        items: turnItems,
       }),
     },
   });
@@ -284,12 +287,217 @@ describe("TurnRunner", () => {
           turnId: "turn-1",
           text: "authoritative final",
           finishReason: "stop",
+          outputOrder: [{ type: "message" }],
           usage: { inputTokens: 7, outputTokens: 5, totalTokens: 12 },
         },
       },
     ]);
     expect(host.events).toHaveBeenCalledTimes(1);
     expect(host.turnInterrupt).not.toHaveBeenCalled();
+  });
+
+  it("forwards and projects requested reasoning summaries", async () => {
+    const { events, host } = createHost();
+    vi.mocked(host.turnStart).mockImplementation(async () => {
+      events.push({
+        method: "item/reasoning/textDelta",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "reasoning-1",
+          contentIndex: 0,
+          delta: "private raw delta",
+        },
+      });
+      events.push({
+        method: "rawResponseItem/completed",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            type: "reasoning",
+            id: "raw-reasoning",
+            summary: [{ type: "summary_text", text: "raw summary" }],
+            content: [{ type: "reasoning_text", text: "private raw item" }],
+            encrypted_content: null,
+          },
+        },
+      });
+      events.push({
+        method: "item/reasoning/summaryPartAdded",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "reasoning-1",
+          summaryIndex: 0,
+        },
+      });
+      events.push({
+        method: "item/reasoning/summaryTextDelta",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "reasoning-1",
+          summaryIndex: 0,
+          delta: "Checked the request.",
+        },
+      });
+      events.push({
+        method: "item/completed",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          completedAtMs: 1,
+          item: {
+            type: "reasoning",
+            id: "reasoning-1",
+            summary: ["Authoritative summary."],
+            content: ["private reasoning"],
+          },
+        },
+      });
+      events.push({
+        method: "item/completed",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          completedAtMs: 2,
+          item: {
+            type: "agentMessage",
+            id: "message-1",
+            text: "answer",
+            phase: null,
+            memoryCitation: null,
+          },
+        },
+      });
+      events.push({
+        method: "turn/completed",
+        params: {
+          threadId: "thread-1",
+          turn: fakeTurn({ id: "turn-1", status: "completed" }),
+        },
+      });
+      return { turn: fakeTurn() };
+    });
+
+    const projected = await collect(
+      createRunner(host).stream(command({ summary: "concise" })),
+    );
+
+    expect(host.turnStart).toHaveBeenCalledWith(
+      expect.objectContaining({ summary: "concise" }),
+      expect.any(AbortSignal),
+    );
+    expect(projected).toEqual([
+      {
+        type: "reasoning.summary_part.added",
+        itemId: "reasoning-1",
+        summaryIndex: 0,
+      },
+      {
+        type: "reasoning.summary_text.delta",
+        itemId: "reasoning-1",
+        summaryIndex: 0,
+        delta: "Checked the request.",
+      },
+      {
+        type: "reasoning.completed",
+        item: {
+          id: "reasoning-1",
+          summary: ["Authoritative summary."],
+        },
+      },
+      {
+        type: "completed",
+        result: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          text: "answer",
+          finishReason: "stop",
+          outputOrder: [
+            { type: "reasoning", id: "reasoning-1" },
+            { type: "message" },
+          ],
+          reasoning: [
+            {
+              id: "reasoning-1",
+              summary: ["Authoritative summary."],
+            },
+          ],
+        },
+      },
+    ]);
+    expect(JSON.stringify(projected)).not.toContain("private reasoning");
+    expect(JSON.stringify(projected)).not.toContain("private raw");
+    expect(JSON.stringify(projected)).not.toContain("raw summary");
+  });
+
+  it("preserves output order for a reasoning summary recovered at completion", async () => {
+    const { events, host } = createHost();
+    vi.mocked(host.turnStart).mockImplementation(async () => {
+      events.push({
+        method: "item/agentMessage/delta",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "message-1",
+          delta: "answer",
+        },
+      });
+      events.push({
+        method: "turn/completed",
+        params: {
+          threadId: "thread-1",
+          turn: fakeTurn({
+            id: "turn-1",
+            status: "completed",
+            items: [
+              {
+                type: "reasoning",
+                id: "reasoning-1",
+                summary: ["Recovered summary."],
+                content: [],
+              },
+              {
+                type: "agentMessage",
+                id: "message-1",
+                text: "answer",
+                phase: null,
+                memoryCitation: null,
+              },
+            ],
+          }),
+        },
+      });
+      return { turn: fakeTurn() };
+    });
+
+    const projected = await collect(
+      createRunner(host).stream(command({ summary: "auto" })),
+    );
+
+    expect(projected).toEqual([
+      { type: "text.delta", delta: "answer" },
+      {
+        type: "reasoning.completed",
+        item: { id: "reasoning-1", summary: ["Recovered summary."] },
+      },
+      {
+        type: "completed",
+        result: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          text: "answer",
+          finishReason: "stop",
+          reasoning: [{ id: "reasoning-1", summary: ["Recovered summary."] }],
+          outputOrder: [
+            { type: "message" },
+            { type: "reasoning", id: "reasoning-1" },
+          ],
+        },
+      },
+    ]);
   });
 
   it("omits usage when Codex supplies no token event", async () => {
@@ -304,6 +512,7 @@ describe("TurnRunner", () => {
       turnId: "turn-1",
       text: "final",
       finishReason: "stop",
+      outputOrder: [{ type: "message" }],
     });
   });
 
@@ -404,6 +613,34 @@ describe("TurnRunner", () => {
     const fingerprint = runner.tools.fingerprint(dynamicTools);
     const respond = vi.fn();
     vi.mocked(host.turnStart).mockImplementation(async () => {
+      events.push({
+        method: "item/reasoning/summaryPartAdded",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "reasoning-before-tool",
+          summaryIndex: 0,
+        },
+      });
+      events.push({
+        method: "item/reasoning/summaryTextDelta",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "reasoning-before-tool",
+          summaryIndex: 0,
+          delta: "Before tool.",
+        },
+      });
+      events.push({
+        method: "item/agentMessage/delta",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "message-before-tool",
+          delta: "Calling tool.",
+        },
+      });
       tools.push({
         generation: 1,
         id: "rpc-secret",
@@ -421,19 +658,25 @@ describe("TurnRunner", () => {
       return { turn: fakeTurn() };
     });
 
-    const suspended = await runner.run(command({ dynamicTools }), undefined, {
-      release,
-      cleanup,
-      tool: {
-        kind: "chat",
-        leaseOwner: "request-1",
-        toolFingerprint: fingerprint,
+    const suspended = await runner.run(
+      command({ dynamicTools, summary: "concise" }),
+      undefined,
+      {
+        release,
+        cleanup,
+        tool: {
+          kind: "responses",
+          responseId: "resp-test",
+          leaseOwner: "request-1",
+          toolFingerprint: fingerprint,
+        },
       },
-    });
+    );
 
     expect(suspended).toMatchObject({
       threadId: "thread-1",
       turnId: "turn-1",
+      text: "Calling tool.",
       finishReason: "tool_calls",
       toolCalls: [
         {
@@ -443,18 +686,44 @@ describe("TurnRunner", () => {
         },
       ],
     });
+    expect(suspended.reasoning).toBeUndefined();
     expect(release).not.toHaveBeenCalled();
     expect(cleanup).not.toHaveBeenCalled();
 
     const callId = suspended.toolCalls?.[0]?.id ?? "missing";
     const continuation = await runner.tools.continue({
-      kind: "chat",
+      kind: "responses",
+      responseId: "resp-test",
       toolFingerprint: fingerprint,
       results: [{ callId, output: "sunny" }],
     });
     expect(continuation.type).toBe("continued");
     if (continuation.type !== "continued") throw new Error("not continued");
     const nextEvent = continuation.events[Symbol.asyncIterator]().next();
+    events.push({
+      method: "item/reasoning/summaryTextDelta",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "reasoning-before-tool",
+        summaryIndex: 0,
+        delta: "stale delta",
+      },
+    });
+    events.push({
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        completedAtMs: 2,
+        item: {
+          type: "reasoning",
+          id: "reasoning-before-tool",
+          summary: ["Before tool."],
+          content: [],
+        },
+      },
+    });
     events.push({
       method: "item/agentMessage/delta",
       params: {
@@ -468,10 +737,29 @@ describe("TurnRunner", () => {
       done: false,
       value: { type: "text.delta", delta: "live " },
     });
-    emitCompletedTurn(events, "thread-1", "turn-1", "sunny", false);
+    emitCompletedTurn(events, "thread-1", "turn-1", "sunny", false, [
+      {
+        type: "reasoning",
+        id: "reasoning-before-tool",
+        summary: ["Before tool."],
+        content: [],
+      },
+      {
+        type: "reasoning",
+        id: "internal-reasoning",
+        summary: ["hidden"],
+        content: ["hidden"],
+      },
+    ]);
     await expect(continuation.result).resolves.toMatchObject({
       text: "sunny",
       finishReason: "stop",
+      reasoning: [{ id: "internal-reasoning", summary: ["hidden"] }],
+    });
+    await expect(continuation.result).resolves.not.toMatchObject({
+      reasoning: expect.arrayContaining([
+        expect.objectContaining({ id: "reasoning-before-tool" }),
+      ]),
     });
     expect(host.toolCalls).toHaveBeenCalledOnce();
     expect(host.turnStart).toHaveBeenCalledOnce();

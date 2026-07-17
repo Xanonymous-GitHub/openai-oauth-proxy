@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import type { ReasoningSummary } from "../codex/generated/ReasoningSummary.js";
 import type { JsonValue } from "../codex/generated/serde_json/JsonValue.js";
 import type { DynamicToolSpec } from "../codex/generated/v2/DynamicToolSpec.js";
 import type { CodexHost, PendingServerToolCall } from "../codex/host.js";
@@ -42,6 +43,7 @@ export interface ToolBridgeContext {
   generation: number;
   toolFingerprint: string;
   toolDefinitions: readonly DynamicToolSpec[];
+  reasoningSummary?: ReasoningSummary;
   signal?: AbortSignal;
   finish?(): void;
   resume(signal?: AbortSignal): ResumedToolStage;
@@ -63,6 +65,7 @@ export interface ToolContinuationRequest {
   kind: "chat" | "responses";
   responseId?: string;
   toolFingerprint: string;
+  reasoningSummary?: ReasoningSummary | null;
   results: ToolResultInput[];
   signal?: AbortSignal;
 }
@@ -339,6 +342,17 @@ export class ToolBridge {
         "tool_definitions_changed",
         "Tool definitions must exactly match the suspended request",
         "tools",
+      );
+    }
+    if (
+      "reasoningSummary" in request &&
+      request.reasoningSummary !== (turn.context.reasoningSummary ?? null)
+    ) {
+      throw ProxyError.public(
+        400,
+        "reasoning_summary_changed",
+        "Reasoning summary must match the suspended request",
+        "reasoning.summary",
       );
     }
 

@@ -14,6 +14,8 @@ const reasoningEffortSchema = z.enum([
   "high",
   "xhigh",
 ]);
+const reasoningSummarySchema = z.enum(["auto", "concise", "detailed"]);
+const ignoredOutputTokenLimitSchema = z.number().int().positive().nullable();
 
 const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   z.union([
@@ -145,6 +147,8 @@ const chatRequestSchema = z
     tool_choice: z.enum(["auto", "none"]).optional(),
     parallel_tool_calls: z.literal(true).optional(),
     reasoning_effort: reasoningEffortSchema.optional(),
+    // Compatibility no-op: Codex App Server cannot enforce this limit, but agent clients send it by default.
+    max_completion_tokens: ignoredOutputTokenLimitSchema.optional(),
     response_format: chatResponseFormatSchema.optional(),
   })
   .superRefine((request, context) => {
@@ -237,8 +241,13 @@ const responsesRequestSchema = z
     tools: z.array(responsesFunctionToolSchema).optional(),
     tool_choice: z.enum(["auto", "none"]).optional(),
     parallel_tool_calls: z.literal(true).optional(),
+    // Compatibility no-op: Codex App Server cannot enforce this limit, but Responses clients send it by default.
+    max_output_tokens: ignoredOutputTokenLimitSchema.optional(),
     reasoning: z
-      .strictObject({ effort: reasoningEffortSchema.optional() })
+      .strictObject({
+        effort: reasoningEffortSchema.optional(),
+        summary: reasoningSummarySchema.nullable().optional(),
+      })
       .optional(),
     text: z
       .strictObject({

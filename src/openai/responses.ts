@@ -16,7 +16,13 @@ import { writeSSEWithSignal } from "../http/sse.js";
 import type { Permit, TurnCapacity } from "../operations/capacity.js";
 import type { AdmittedTurn, TurnDrainRegistry } from "../operations/drain.js";
 import type { ObserveRequest } from "../operations/telemetry.js";
-import type { TokenUsage, TurnCommand, TurnResult } from "../turns/events.js";
+import type {
+  ProxyStreamEvent,
+  ReasoningSummaryItem,
+  TokenUsage,
+  TurnCommand,
+  TurnResult,
+} from "../turns/events.js";
 import type { TurnLifecycleCallbacks, TurnRunner } from "../turns/runner.js";
 import { decodeImages } from "./images.js";
 import type { ModelCapabilities, ModelCatalog } from "./models.js";
@@ -71,7 +77,7 @@ export interface ProxyResponse {
     | {
         id: string;
         type: "message";
-        status: "completed";
+        status: "in_progress" | "completed";
         role: "assistant";
         content: Array<{ type: "output_text"; text: string; annotations: [] }>;
       }
@@ -82,6 +88,12 @@ export interface ProxyResponse {
         call_id: string;
         name: string;
         arguments: string;
+      }
+    | {
+        id: string;
+        type: "reasoning";
+        status: "in_progress" | "completed";
+        summary: Array<{ type: "summary_text"; text: string }>;
       }
   >;
   usage?: { input_tokens: number; output_tokens: number; total_tokens: number };
@@ -291,6 +303,224 @@ function opaqueId(prefix: "resp" | "msg"): string {
   return `${prefix}_${randomBytes(24).toString("base64url")}`;
 }
 
+function reasoningId(itemId: string): string {
+  return `rs_${itemId}`;
+}
+
+function reasoningResponseItem(
+  item: ReasoningSummaryItem,
+  status: "in_progress" | "completed",
+): Extract<ProxyResponse["output"][number], { type: "reasoning" }> {
+  return {
+    id: reasoningId(item.id),
+    type: "reasoning",
+    status,
+    summary: item.summary.map((text) => ({ type: "summary_text", text })),
+  };
+}
+
+function messageResponseItem(
+  identity: ResponseIdentity,
+  text: string,
+  status: "in_progress" | "completed",
+): Extract<ProxyResponse["output"][number], { type: "message" }> {
+  return {
+    id: identity.messageId,
+    type: "message",
+    status,
+    role: "assistant",
+    content:
+      status === "in_progress"
+        ? []
+        : [{ type: "output_text", text, annotations: [] }],
+  };
+}
+
+interface OutputStreamState {
+  nextOutputIndex: number;
+  messageOutputIndex?: number;
+  reasoning: Map<string, { outputIndex: number; parts: Set<number> }>;
+}
+
+interface ProjectedStreamEvent {
+  type: string;
+  [key: string]: unknown;
+}
+
+function createOutputStreamState(): OutputStreamState {
+  return { nextOutputIndex: 0, reasoning: new Map() };
+}
+
+function messageOutputIndex(state: OutputStreamState): number {
+  state.messageOutputIndex ??= state.nextOutputIndex++;
+  return state.messageOutputIndex;
+}
+
+function messageStartEvents(
+  identity: ResponseIdentity,
+  state: OutputStreamState,
+): ProjectedStreamEvent[] {
+  if (state.messageOutputIndex !== undefined) return [];
+  const outputIndex = messageOutputIndex(state);
+  return [
+    {
+      type: "response.output_item.added",
+      output_index: outputIndex,
+      item: messageResponseItem(identity, "", "in_progress"),
+    },
+    {
+      type: "response.content_part.added",
+      item_id: identity.messageId,
+      output_index: outputIndex,
+      content_index: 0,
+      part: { type: "output_text", text: "", annotations: [], logprobs: [] },
+    },
+  ];
+}
+
+function messageDoneEvents(
+  identity: ResponseIdentity,
+  text: string,
+  state: OutputStreamState,
+): ProjectedStreamEvent[] {
+  const outputIndex = messageOutputIndex(state);
+  return [
+    {
+      type: "response.content_part.done",
+      item_id: identity.messageId,
+      output_index: outputIndex,
+      content_index: 0,
+      part: { type: "output_text", text, annotations: [], logprobs: [] },
+    },
+    {
+      type: "response.output_item.done",
+      output_index: outputIndex,
+      item: messageResponseItem(identity, text, "completed"),
+    },
+  ];
+}
+
+function messageCompletionEvents(
+  identity: ResponseIdentity,
+  text: string,
+  state: OutputStreamState,
+): ProjectedStreamEvent[] {
+  const outputIndex = messageOutputIndex(state);
+  return [
+    {
+      type: "response.output_text.done",
+      item_id: identity.messageId,
+      output_index: outputIndex,
+      content_index: 0,
+      text,
+      logprobs: [],
+    },
+    ...messageDoneEvents(identity, text, state),
+  ];
+}
+
+async function writeProjectedStreamEvents(
+  writeSSE: (event: { event?: string; data: string }) => Promise<void>,
+  events: ProjectedStreamEvent[],
+  sequenceNumber: number,
+): Promise<number> {
+  let nextSequenceNumber = sequenceNumber;
+  for (const event of events) {
+    await writeSSE({
+      event: event.type,
+      data: JSON.stringify({
+        ...event,
+        sequence_number: nextSequenceNumber,
+      }),
+    });
+    nextSequenceNumber += 1;
+  }
+  return nextSequenceNumber;
+}
+
+function reasoningStreamEvents(
+  event: ProxyStreamEvent,
+  state: OutputStreamState,
+): ProjectedStreamEvent[] {
+  if (
+    event.type !== "reasoning.summary_part.added" &&
+    event.type !== "reasoning.summary_text.delta" &&
+    event.type !== "reasoning.completed"
+  ) {
+    return [];
+  }
+  const itemId = reasoningId(
+    event.type === "reasoning.completed" ? event.item.id : event.itemId,
+  );
+  let itemState = state.reasoning.get(itemId);
+  const projected: ProjectedStreamEvent[] = [];
+  if (itemState === undefined) {
+    itemState = { outputIndex: state.nextOutputIndex++, parts: new Set() };
+    state.reasoning.set(itemId, itemState);
+    projected.push({
+      type: "response.output_item.added",
+      output_index: itemState.outputIndex,
+      item: {
+        id: itemId,
+        type: "reasoning",
+        status: "in_progress",
+        summary: [],
+      },
+    });
+  }
+
+  const addPart = (summaryIndex: number): void => {
+    if (itemState.parts.has(summaryIndex)) return;
+    itemState.parts.add(summaryIndex);
+    projected.push({
+      type: "response.reasoning_summary_part.added",
+      item_id: itemId,
+      output_index: itemState.outputIndex,
+      summary_index: summaryIndex,
+      part: { type: "summary_text", text: "" },
+    });
+  };
+
+  if (event.type === "reasoning.summary_part.added") {
+    addPart(event.summaryIndex);
+  } else if (event.type === "reasoning.summary_text.delta") {
+    addPart(event.summaryIndex);
+    projected.push({
+      type: "response.reasoning_summary_text.delta",
+      item_id: itemId,
+      output_index: itemState.outputIndex,
+      summary_index: event.summaryIndex,
+      delta: event.delta,
+    });
+  } else if (event.type === "reasoning.completed") {
+    for (const [summaryIndex, text] of event.item.summary.entries()) {
+      addPart(summaryIndex);
+      projected.push(
+        {
+          type: "response.reasoning_summary_text.done",
+          item_id: itemId,
+          output_index: itemState.outputIndex,
+          summary_index: summaryIndex,
+          text,
+        },
+        {
+          type: "response.reasoning_summary_part.done",
+          item_id: itemId,
+          output_index: itemState.outputIndex,
+          summary_index: summaryIndex,
+          part: { type: "summary_text", text },
+        },
+      );
+    }
+    projected.push({
+      type: "response.output_item.done",
+      output_index: itemState.outputIndex,
+      item: reasoningResponseItem(event.item, "completed"),
+    });
+  }
+  return projected;
+}
+
 async function requestBody(request: Request): Promise<unknown> {
   try {
     return await readJsonBody(request);
@@ -418,14 +648,39 @@ function responseBody(
   identity: ResponseIdentity,
   result: TurnResult,
 ): ProxyResponse {
+  const reasoning = new Map(
+    (result.reasoning ?? []).map((item) => [
+      item.id,
+      reasoningResponseItem(item, "completed"),
+    ]),
+  );
+  const output: ProxyResponse["output"] = [];
+  const projectedReasoning = new Set<string>();
+  let projectedMessage = false;
+  for (const item of result.outputOrder ?? []) {
+    if (item.type === "reasoning") {
+      const projected = reasoning.get(item.id);
+      if (projected !== undefined) {
+        output.push(projected);
+        projectedReasoning.add(item.id);
+      }
+    } else if (
+      !projectedMessage &&
+      (result.finishReason === "stop" || result.text !== "")
+    ) {
+      output.push(messageResponseItem(identity, result.text, "completed"));
+      projectedMessage = true;
+    }
+  }
+  for (const [id, item] of reasoning) {
+    if (!projectedReasoning.has(id)) output.push(item);
+  }
   if (result.finishReason === "tool_calls") {
-    return {
-      id: identity.responseId,
-      object: "response",
-      created_at: identity.createdAt,
-      status: "completed",
-      model: identity.model,
-      output: (result.toolCalls ?? []).map((call) => ({
+    if (!projectedMessage && result.text !== "") {
+      output.push(messageResponseItem(identity, result.text, "completed"));
+    }
+    output.push(
+      ...(result.toolCalls ?? []).map((call) => ({
         id: `fc_${call.id.slice("call_".length)}`,
         type: "function_call" as const,
         status: "completed" as const,
@@ -433,8 +688,19 @@ function responseBody(
         name: call.name,
         arguments: JSON.stringify(call.arguments),
       })),
+    );
+    return {
+      id: identity.responseId,
+      object: "response",
+      created_at: identity.createdAt,
+      status: "completed",
+      model: identity.model,
+      output,
       ...(result.usage === undefined ? {} : { usage: usageBody(result.usage) }),
     };
+  }
+  if (!projectedMessage) {
+    output.push(messageResponseItem(identity, result.text, "completed"));
   }
   return {
     id: identity.responseId,
@@ -442,15 +708,7 @@ function responseBody(
     created_at: identity.createdAt,
     status: "completed",
     model: identity.model,
-    output: [
-      {
-        id: identity.messageId,
-        type: "message",
-        status: "completed",
-        role: "assistant",
-        content: [{ type: "output_text", text: result.text, annotations: [] }],
-      },
-    ],
+    output,
     ...(result.usage === undefined ? {} : { usage: usageBody(result.usage) }),
   };
 }
@@ -534,6 +792,9 @@ export function createResponsesHandler(
         kind: "responses",
         responseId: request.previous_response_id,
         toolFingerprint,
+        ...(request.reasoning !== undefined && "summary" in request.reasoning
+          ? { reasoningSummary: request.reasoning.summary ?? null }
+          : {}),
         results: outputs,
         signal: context.req.raw.signal,
       });
@@ -679,7 +940,7 @@ export function createResponsesHandler(
           await writeSSEWithSignal(stream, event, signal);
         };
         let sequenceNumber = 0;
-        let toolOutputIndex = 0;
+        const outputState = createOutputStreamState();
         try {
           await writeSSE({
             event: "response.created",
@@ -698,14 +959,27 @@ export function createResponsesHandler(
           });
           sequenceNumber += 1;
           for await (const event of continuation.events) {
-            if (event.type === "text.delta") {
+            const reasoningEvents = reasoningStreamEvents(event, outputState);
+            if (reasoningEvents.length > 0) {
+              sequenceNumber = await writeProjectedStreamEvents(
+                writeSSE,
+                reasoningEvents,
+                sequenceNumber,
+              );
+            } else if (event.type === "text.delta") {
+              sequenceNumber = await writeProjectedStreamEvents(
+                writeSSE,
+                messageStartEvents(identity, outputState),
+                sequenceNumber,
+              );
+              const outputIndex = messageOutputIndex(outputState);
               await writeSSE({
                 event: "response.output_text.delta",
                 data: JSON.stringify({
                   type: "response.output_text.delta",
                   sequence_number: sequenceNumber,
                   item_id: identity.messageId,
-                  output_index: 0,
+                  output_index: outputIndex,
                   content_index: 0,
                   delta: event.delta,
                   logprobs: [],
@@ -713,6 +987,7 @@ export function createResponsesHandler(
               });
               sequenceNumber += 1;
             } else if (event.type === "tool.call") {
+              const outputIndex = outputState.nextOutputIndex++;
               const item = responseBody(identity, {
                 threadId: continuation.threadId,
                 turnId: continuation.turnId,
@@ -720,13 +995,17 @@ export function createResponsesHandler(
                 finishReason: "tool_calls",
                 toolCalls: [event.call],
               }).output[0];
+              const addedItem =
+                item?.type === "function_call"
+                  ? { ...item, arguments: "" }
+                  : item;
               await writeSSE({
                 event: "response.output_item.added",
                 data: JSON.stringify({
                   type: "response.output_item.added",
                   sequence_number: sequenceNumber,
-                  output_index: toolOutputIndex,
-                  item,
+                  output_index: outputIndex,
+                  item: addedItem,
                 }),
               });
               sequenceNumber += 1;
@@ -736,7 +1015,7 @@ export function createResponsesHandler(
                   type: "response.function_call_arguments.delta",
                   sequence_number: sequenceNumber,
                   item_id: item?.id,
-                  output_index: toolOutputIndex,
+                  output_index: outputIndex,
                   delta: JSON.stringify(event.call.arguments),
                 }),
               });
@@ -747,7 +1026,7 @@ export function createResponsesHandler(
                   type: "response.function_call_arguments.done",
                   sequence_number: sequenceNumber,
                   item_id: item?.id,
-                  output_index: toolOutputIndex,
+                  output_index: outputIndex,
                   arguments: JSON.stringify(event.call.arguments),
                 }),
               });
@@ -757,27 +1036,34 @@ export function createResponsesHandler(
                 data: JSON.stringify({
                   type: "response.output_item.done",
                   sequence_number: sequenceNumber,
-                  output_index: toolOutputIndex,
+                  output_index: outputIndex,
                   item,
                 }),
               });
               sequenceNumber += 1;
-              toolOutputIndex += 1;
             } else if (event.type === "completed") {
+              if (
+                event.result.finishReason === "stop" ||
+                outputState.messageOutputIndex !== undefined
+              ) {
+                if (event.result.finishReason === "stop") {
+                  sequenceNumber = await writeProjectedStreamEvents(
+                    writeSSE,
+                    messageStartEvents(identity, outputState),
+                    sequenceNumber,
+                  );
+                }
+                sequenceNumber = await writeProjectedStreamEvents(
+                  writeSSE,
+                  messageCompletionEvents(
+                    identity,
+                    event.result.text,
+                    outputState,
+                  ),
+                  sequenceNumber,
+                );
+              }
               if (event.result.finishReason === "stop") {
-                await writeSSE({
-                  event: "response.output_text.done",
-                  data: JSON.stringify({
-                    type: "response.output_text.done",
-                    sequence_number: sequenceNumber,
-                    item_id: identity.messageId,
-                    output_index: 0,
-                    content_index: 0,
-                    text: event.result.text,
-                    logprobs: [],
-                  }),
-                });
-                sequenceNumber += 1;
                 await completeContinuation(event.result);
               }
               await writeSSE({
@@ -980,6 +1266,9 @@ export function createResponsesHandler(
       ...(request.reasoning?.effort === undefined
         ? {}
         : { effort: request.reasoning.effort }),
+      ...(request.reasoning?.summary == null
+        ? {}
+        : { summary: request.reasoning.summary }),
       ...(request.text === undefined
         ? {}
         : { outputSchema: request.text.format.schema }),
@@ -1133,7 +1422,7 @@ export function createResponsesHandler(
         controller.abort();
       });
       let sequenceNumber = 0;
-      let toolOutputIndex = 0;
+      const outputState = createOutputStreamState();
       const writeSSE = (
         event: Parameters<typeof stream.writeSSE>[0],
       ): Promise<void> => writeSSEWithSignal(stream, event, signal);
@@ -1162,14 +1451,27 @@ export function createResponsesHandler(
           signal,
           lifecycle,
         )) {
-          if (event.type === "text.delta") {
+          const reasoningEvents = reasoningStreamEvents(event, outputState);
+          if (reasoningEvents.length > 0) {
+            sequenceNumber = await writeProjectedStreamEvents(
+              writeSSE,
+              reasoningEvents,
+              sequenceNumber,
+            );
+          } else if (event.type === "text.delta") {
+            sequenceNumber = await writeProjectedStreamEvents(
+              writeSSE,
+              messageStartEvents(identity, outputState),
+              sequenceNumber,
+            );
+            const outputIndex = messageOutputIndex(outputState);
             await writeSSE({
               event: "response.output_text.delta",
               data: JSON.stringify({
                 type: "response.output_text.delta",
                 sequence_number: sequenceNumber,
                 item_id: identity.messageId,
-                output_index: 0,
+                output_index: outputIndex,
                 content_index: 0,
                 delta: event.delta,
                 logprobs: [],
@@ -1177,6 +1479,7 @@ export function createResponsesHandler(
             });
             sequenceNumber += 1;
           } else if (event.type === "tool.call") {
+            const outputIndex = outputState.nextOutputIndex++;
             const item = responseBody(identity, {
               threadId: "",
               turnId: "",
@@ -1184,13 +1487,17 @@ export function createResponsesHandler(
               finishReason: "tool_calls",
               toolCalls: [event.call],
             }).output[0];
+            const addedItem =
+              item?.type === "function_call"
+                ? { ...item, arguments: "" }
+                : item;
             await writeSSE({
               event: "response.output_item.added",
               data: JSON.stringify({
                 type: "response.output_item.added",
                 sequence_number: sequenceNumber,
-                output_index: toolOutputIndex,
-                item,
+                output_index: outputIndex,
+                item: addedItem,
               }),
             });
             sequenceNumber += 1;
@@ -1200,7 +1507,7 @@ export function createResponsesHandler(
                 type: "response.function_call_arguments.delta",
                 sequence_number: sequenceNumber,
                 item_id: item?.id,
-                output_index: toolOutputIndex,
+                output_index: outputIndex,
                 delta: JSON.stringify(event.call.arguments),
               }),
             });
@@ -1211,7 +1518,7 @@ export function createResponsesHandler(
                 type: "response.function_call_arguments.done",
                 sequence_number: sequenceNumber,
                 item_id: item?.id,
-                output_index: toolOutputIndex,
+                output_index: outputIndex,
                 arguments: JSON.stringify(event.call.arguments),
               }),
             });
@@ -1221,14 +1528,24 @@ export function createResponsesHandler(
               data: JSON.stringify({
                 type: "response.output_item.done",
                 sequence_number: sequenceNumber,
-                output_index: toolOutputIndex,
+                output_index: outputIndex,
                 item,
               }),
             });
             sequenceNumber += 1;
-            toolOutputIndex += 1;
           } else if (event.type === "completed") {
             if (event.result.finishReason === "tool_calls") {
+              if (outputState.messageOutputIndex !== undefined) {
+                sequenceNumber = await writeProjectedStreamEvents(
+                  writeSSE,
+                  messageCompletionEvents(
+                    identity,
+                    event.result.text,
+                    outputState,
+                  ),
+                  sequenceNumber,
+                );
+              }
               await writeSSE({
                 event: "response.completed",
                 data: JSON.stringify({
@@ -1266,19 +1583,16 @@ export function createResponsesHandler(
               }
             }
             const body = responseBody(identity, event.result);
-            await writeSSE({
-              event: "response.output_text.done",
-              data: JSON.stringify({
-                type: "response.output_text.done",
-                sequence_number: sequenceNumber,
-                item_id: identity.messageId,
-                output_index: 0,
-                content_index: 0,
-                text: event.result.text,
-                logprobs: [],
-              }),
-            });
-            sequenceNumber += 1;
+            sequenceNumber = await writeProjectedStreamEvents(
+              writeSSE,
+              messageStartEvents(identity, outputState),
+              sequenceNumber,
+            );
+            sequenceNumber = await writeProjectedStreamEvents(
+              writeSSE,
+              messageCompletionEvents(identity, event.result.text, outputState),
+              sequenceNumber,
+            );
             await complete(event.result);
             await writeSSE({
               event: "response.completed",

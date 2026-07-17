@@ -341,6 +341,7 @@ describe("POST /v1/chat/completions", () => {
         { role: "user", content: "final question" },
       ],
       reasoning_effort: "high",
+      max_completion_tokens: 128,
       response_format: {
         type: "json_schema",
         json_schema: {

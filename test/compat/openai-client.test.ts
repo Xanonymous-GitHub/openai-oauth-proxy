@@ -141,17 +141,6 @@ const rejectionCases: RejectionCase[] = [
     param: "parallel_tool_calls",
   },
   {
-    concept: "Chat exact token limit",
-    endpoint: "chat",
-    body: () => ({
-      model: "gpt-5.4",
-      messages: [{ role: "user", content: "reject" }],
-      max_completion_tokens: 128,
-    }),
-    code: "unsupported_field",
-    param: "max_completion_tokens",
-  },
-  {
     concept: "Chat verbosity",
     endpoint: "chat",
     body: () => ({
@@ -299,13 +288,6 @@ const rejectionCases: RejectionCase[] = [
     param: "parallel_tool_calls",
   },
   {
-    concept: "Responses exact token limit",
-    endpoint: "responses",
-    body: () => ({ model: "gpt-5.4", input: "reject", max_output_tokens: 128 }),
-    code: "unsupported_field",
-    param: "max_output_tokens",
-  },
-  {
     concept: "Responses background mode",
     endpoint: "responses",
     body: () => ({ model: "gpt-5.4", input: "reject", background: true }),
@@ -431,6 +413,24 @@ describe("official OpenAI JavaScript client compatibility", () => {
       },
     },
     {
+      concept: "stream accumulator",
+      run: async () => {
+        const stream = client.responses.stream({
+          model: "gpt-5.4",
+          input: "stream",
+        });
+
+        await expect(stream.finalResponse()).resolves.toMatchObject({
+          output: [
+            {
+              type: "message",
+              content: [{ type: "output_text", text: "fixture answer" }],
+            },
+          ],
+        });
+      },
+    },
+    {
       concept: "stream usage",
       run: async () => {
         const stream = await client.chat.completions.create({
@@ -481,6 +481,18 @@ describe("official OpenAI JavaScript client compatibility", () => {
           reasoning_effort: "low",
         });
         expect(fixture.commands.at(-1)?.effort).toBe("low");
+      },
+    },
+    {
+      concept: "ignored completion token limit",
+      run: async () => {
+        const result = await client.chat.completions.create({
+          model: "gpt-5.4",
+          messages: [{ role: "user", content: "token limit compatibility" }],
+          max_completion_tokens: 128,
+        });
+
+        expect(result.choices[0]?.finish_reason).toBe("stop");
       },
     },
     {
@@ -647,6 +659,43 @@ describe("official OpenAI JavaScript client compatibility", () => {
           reasoning: { effort: "low" },
         });
         expect(fixture.commands.at(-1)?.effort).toBe("low");
+      },
+    },
+    {
+      concept: "reasoning summary stream accumulator",
+      run: async () => {
+        const stream = client.responses.stream({
+          model: "gpt-5.4",
+          input: "summarize reasoning",
+          reasoning: { summary: "concise" },
+        });
+
+        await expect(stream.finalResponse()).resolves.toMatchObject({
+          output: [
+            {
+              type: "reasoning",
+              summary: [
+                { type: "summary_text", text: "Fixture reasoning summary." },
+              ],
+            },
+            {
+              type: "message",
+              content: [{ type: "output_text", text: "fixture answer" }],
+            },
+          ],
+        });
+      },
+    },
+    {
+      concept: "ignored output token limit",
+      run: async () => {
+        const result = await client.responses.create({
+          model: "gpt-5.4",
+          input: "token limit compatibility",
+          max_output_tokens: 128,
+        });
+
+        expect(result.status).toBe("completed");
       },
     },
     {
@@ -1021,7 +1070,6 @@ describe("official OpenAI JavaScript client compatibility", () => {
 
   it("rejects every unsupported Chat field through the official client", async () => {
     for (const [field, value] of [
-      ["max_completion_tokens", 128],
       ["verbosity", "low"],
       ["unknown_fixture_field", true],
     ] as const) {

@@ -275,6 +275,20 @@ export async function startListeningProxyFixture(): Promise<ListeningProxyFixtur
       turnId,
       text: command.outputSchema ? '{"answer":"fixture"}' : "fixture answer",
       finishReason: "stop",
+      ...(command.summary === undefined
+        ? {}
+        : {
+            reasoning: [
+              {
+                id: `reasoning-${sequence}`,
+                summary: ["Fixture reasoning summary."],
+              },
+            ],
+            outputOrder: [
+              { type: "reasoning" as const, id: `reasoning-${sequence}` },
+              { type: "message" as const },
+            ],
+          }),
       usage: { inputTokens: 7, outputTokens: 5, totalTokens: 12 },
     };
   };
@@ -287,6 +301,20 @@ export async function startListeningProxyFixture(): Promise<ListeningProxyFixtur
       lifecycle?: TurnLifecycleCallbacks,
     ): AsyncIterable<ProxyStreamEvent> {
       const result = await execute(command, signal, lifecycle);
+      for (const item of result.reasoning ?? []) {
+        yield {
+          type: "reasoning.summary_part.added",
+          itemId: item.id,
+          summaryIndex: 0,
+        };
+        yield {
+          type: "reasoning.summary_text.delta",
+          itemId: item.id,
+          summaryIndex: 0,
+          delta: item.summary[0] ?? "",
+        };
+        yield { type: "reasoning.completed", item };
+      }
       if (result.text !== "") yield { type: "text.delta", delta: result.text };
       for (const call of result.toolCalls ?? [])
         yield { type: "tool.call", call };

@@ -84,6 +84,7 @@ describe("parseChatRequest", () => {
       tool_choice: "auto",
       parallel_tool_calls: true,
       reasoning_effort: "high",
+      max_completion_tokens: 128,
       response_format: {
         type: "json_schema",
         json_schema: {
@@ -96,6 +97,26 @@ describe("parseChatRequest", () => {
 
     expect(parseChatRequest(request)).toEqual(request);
   });
+
+  it("accepts a null ignored completion token limit", () => {
+    const request = { ...chatRequest, max_completion_tokens: null };
+
+    expect(parseChatRequest(request)).toEqual(request);
+  });
+
+  it.each([0, -1, 1.5])(
+    "rejects invalid completion token limit %s",
+    (max_completion_tokens) => {
+      expect(() =>
+        parseChatRequest({ ...chatRequest, max_completion_tokens }),
+      ).toThrowError(
+        expect.objectContaining({
+          code: "invalid_request",
+          param: "max_completion_tokens",
+        }),
+      );
+    },
+  );
 
   it("maps an unsupported top-level field to its exact parameter", () => {
     expect(() =>
@@ -170,11 +191,6 @@ describe("parseChatRequest", () => {
       "messages.0.content.0.image_url.url",
     ],
     ["sampling fields", { ...chatRequest, top_p: 0.9 }, "top_p"],
-    [
-      "exact output token limits",
-      { ...chatRequest, max_completion_tokens: 128 },
-      "max_completion_tokens",
-    ],
     [
       "non-streaming stream options",
       { ...chatRequest, stream_options: { include_usage: true } },
@@ -338,7 +354,8 @@ describe("parseResponsesRequest", () => {
       stream: false,
       store: true,
       previous_response_id: "resp_previous",
-      reasoning: { effort: "minimal" },
+      max_output_tokens: 128,
+      reasoning: { effort: "minimal", summary: "concise" },
       text: {
         format: {
           type: "json_schema",
@@ -359,6 +376,59 @@ describe("parseResponsesRequest", () => {
       ],
       tool_choice: "none",
       parallel_tool_calls: true,
+    };
+
+    expect(parseResponsesRequest(request)).toEqual(request);
+  });
+
+  it("accepts a null ignored output token limit", () => {
+    const request = {
+      model: "gpt-5.4",
+      input: "hello",
+      max_output_tokens: null,
+    };
+
+    expect(parseResponsesRequest(request)).toEqual(request);
+  });
+
+  it.each([0, -1, 1.5])(
+    "rejects invalid output token limit %s",
+    (max_output_tokens) => {
+      expect(() =>
+        parseResponsesRequest({
+          model: "gpt-5.4",
+          input: "hello",
+          max_output_tokens,
+        }),
+      ).toThrowError(
+        expect.objectContaining({
+          code: "invalid_request",
+          param: "max_output_tokens",
+        }),
+      );
+    },
+  );
+
+  it("rejects an unknown reasoning summary mode", () => {
+    expect(() =>
+      parseResponsesRequest({
+        model: "gpt-5.4",
+        input: "hello",
+        reasoning: { summary: "full" },
+      }),
+    ).toThrowError(
+      expect.objectContaining({
+        code: "invalid_request",
+        param: "reasoning.summary",
+      }),
+    );
+  });
+
+  it("accepts a null reasoning summary mode", () => {
+    const request = {
+      model: "gpt-5.4",
+      input: "hello",
+      reasoning: { summary: null },
     };
 
     expect(parseResponsesRequest(request)).toEqual(request);
