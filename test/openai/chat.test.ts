@@ -456,6 +456,20 @@ describe("POST /v1/chat/completions", () => {
     expect(host.toolCalls).not.toHaveBeenCalled();
   });
 
+  it("treats reasoning effort none as no override", async () => {
+    const { app, host } = createFixture();
+    const response = await post(app, {
+      ...ordinaryRequest,
+      reasoning_effort: "none",
+    });
+
+    expect(response.status).toBe(200);
+    expect(host.turnStart).toHaveBeenCalledWith(
+      expect.not.objectContaining({ effort: expect.anything() }),
+      expect.any(AbortSignal),
+    );
+  });
+
   it("accepts completed tool calls in replayed Chat history", async () => {
     const { app, host } = createFixture();
     const response = await post(app, {

@@ -664,6 +664,7 @@ async function validatedModel(
   const effort = request.reasoning?.effort;
   if (
     effort !== undefined &&
+    effort !== "none" &&
     !model.supportedReasoningEfforts.includes(effort)
   ) {
     throw ProxyError.public(
@@ -1313,7 +1314,8 @@ export function createResponsesHandler(
       ...(request.instructions === undefined
         ? {}
         : { instructions: request.instructions }),
-      ...(request.reasoning?.effort === undefined
+      ...(request.reasoning?.effort === undefined ||
+      request.reasoning.effort === "none"
         ? {}
         : { effort: request.reasoning.effort }),
       ...(request.reasoning?.summary == null

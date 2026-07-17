@@ -230,6 +230,7 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
     }
     if (
       request.reasoning_effort !== undefined &&
+      request.reasoning_effort !== "none" &&
       !model.supportedReasoningEfforts.includes(request.reasoning_effort)
     ) {
       throw ProxyError.public(
@@ -304,7 +305,8 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
         lastMessage?.role === "user"
           ? translateTurnInput(lastMessage.content)
           : [],
-      ...(request.reasoning_effort === undefined
+      ...(request.reasoning_effort === undefined ||
+      request.reasoning_effort === "none"
         ? {}
         : { effort: request.reasoning_effort }),
       ...(request.response_format === undefined

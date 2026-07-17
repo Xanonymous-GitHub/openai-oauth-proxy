@@ -466,6 +466,17 @@ describe("official OpenAI JavaScript client compatibility", () => {
       },
     },
     {
+      concept: "no reasoning effort",
+      run: async () => {
+        await client.chat.completions.create({
+          model: "gpt-5.4",
+          messages: [{ role: "user", content: "no reasoning" }],
+          reasoning_effort: "none",
+        });
+        expect(fixture.commands.at(-1)).not.toHaveProperty("effort");
+      },
+    },
+    {
       concept: "ignored completion token limit",
       run: async () => {
         const result = await client.chat.completions.create({
@@ -653,6 +664,17 @@ describe("official OpenAI JavaScript client compatibility", () => {
           reasoning: { effort: "low" },
         });
         expect(fixture.commands.at(-1)?.effort).toBe("low");
+      },
+    },
+    {
+      concept: "no reasoning effort",
+      run: async () => {
+        await client.responses.create({
+          model: "gpt-5.4",
+          input: "no reasoning",
+          reasoning: { effort: "none" },
+        });
+        expect(fixture.commands.at(-1)).not.toHaveProperty("effort");
       },
     },
     {

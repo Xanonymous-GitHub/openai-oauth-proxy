@@ -2007,6 +2007,21 @@ describe("POST /v1/responses", () => {
     expect(invocations).toHaveLength(2);
   });
 
+  it.each([
+    ["none", { reasoning: { effort: "none" } }],
+    ["omitted", {}],
+  ])("treats %s reasoning effort as no override", async (_name, options) => {
+    const { app, invocations } = createFixture();
+    const response = await postResponse(app, {
+      model: "gpt-5.4",
+      input: "reason",
+      ...options,
+    });
+
+    expect(response.status).toBe(200);
+    expect(invocations[0]?.command).not.toHaveProperty("effort");
+  });
+
   it("validates model and image support before acquiring a continuation lease", async () => {
     const png = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
     const { app, invocations } = createFixture();
