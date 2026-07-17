@@ -309,7 +309,8 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
       request.reasoning_effort === "none"
         ? {}
         : { effort: request.reasoning_effort }),
-      ...(request.response_format === undefined
+      // Codex only exposes schema-constrained output; text and legacy JSON object mode remain unconstrained.
+      ...(request.response_format?.type !== "json_schema"
         ? {}
         : { outputSchema: request.response_format.json_schema.schema }),
       ...(dynamicTools.length === 0 ? {} : { dynamicTools }),

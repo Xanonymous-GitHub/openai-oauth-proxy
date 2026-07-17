@@ -104,6 +104,15 @@ describe("parseChatRequest", () => {
     expect(parseChatRequest(request)).toEqual(request);
   });
 
+  it.each(["text", "json_object"] as const)(
+    "accepts Chat response format %s",
+    (type) => {
+      const request = { ...chatRequest, response_format: { type } };
+
+      expect(parseChatRequest(request)).toEqual(request);
+    },
+  );
+
   it.each([0, -1, 1.5])(
     "rejects invalid completion token limit %s",
     (max_completion_tokens) => {

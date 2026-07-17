@@ -470,6 +470,20 @@ describe("POST /v1/chat/completions", () => {
     );
   });
 
+  it("accepts JSON object mode without an unsupported schema", async () => {
+    const { app, host } = createFixture();
+    const response = await post(app, {
+      ...ordinaryRequest,
+      response_format: { type: "json_object" },
+    });
+
+    expect(response.status).toBe(200);
+    expect(host.turnStart).toHaveBeenCalledWith(
+      expect.not.objectContaining({ outputSchema: expect.anything() }),
+      expect.any(AbortSignal),
+    );
+  });
+
   it("accepts completed tool calls in replayed Chat history", async () => {
     const { app, host } = createFixture();
     const response = await post(app, {

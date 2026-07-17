@@ -135,10 +135,14 @@ const jsonSchemaDefinition = z.strictObject({
   strict: z.boolean().optional(),
 });
 
-const chatResponseFormatSchema = z.strictObject({
-  type: z.literal("json_schema"),
-  json_schema: jsonSchemaDefinition,
-});
+const chatResponseFormatSchema = z.discriminatedUnion("type", [
+  z.strictObject({ type: z.literal("text") }),
+  z.strictObject({ type: z.literal("json_object") }),
+  z.strictObject({
+    type: z.literal("json_schema"),
+    json_schema: jsonSchemaDefinition,
+  }),
+]);
 
 const chatRequestSchema = z
   .strictObject({

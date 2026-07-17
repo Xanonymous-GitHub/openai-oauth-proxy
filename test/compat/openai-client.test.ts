@@ -517,6 +517,19 @@ describe("official OpenAI JavaScript client compatibility", () => {
         expect(result.choices[0]?.message.content).toBe('{"answer":"fixture"}');
       },
     },
+    {
+      concept: "JSON object mode",
+      run: async () => {
+        const result = await client.chat.completions.create({
+          model: "gpt-5.4",
+          messages: [{ role: "user", content: "Return a JSON object" }],
+          response_format: { type: "json_object" },
+        });
+
+        expect(result.choices[0]?.message.content).toBe("fixture answer");
+        expect(fixture.commands.at(-1)).not.toHaveProperty("outputSchema");
+      },
+    },
   ])("accepts documented Chat concept: $concept", async ({ run }) => run());
 
   it.each([
