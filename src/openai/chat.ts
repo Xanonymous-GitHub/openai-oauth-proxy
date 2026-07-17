@@ -54,11 +54,16 @@ function usageBody(usage: TokenUsage): {
   };
 }
 
-function assertInitialMessages(
-  messages: readonly ChatMessage[],
-): asserts messages is readonly Exclude<ChatMessage, { role: "tool" }>[] {
+function assertCompleteToolHistory(messages: readonly ChatMessage[]): void {
+  const pendingCallIds = new Set<string>();
+  let pendingAssistantIndex: number | undefined;
+
   for (const [index, message] of messages.entries()) {
     if (message.role === "tool") {
+      if (pendingCallIds.delete(message.tool_call_id)) {
+        if (pendingCallIds.size === 0) pendingAssistantIndex = undefined;
+        continue;
+      }
       throw ProxyError.public(
         400,
         "unknown_tool_call",
@@ -66,14 +71,37 @@ function assertInitialMessages(
         `messages.${index}`,
       );
     }
-    if (message.role === "assistant" && message.tool_calls !== undefined) {
+    if (pendingCallIds.size > 0) {
       throw ProxyError.public(
         400,
         "unknown_tool_call",
         "Assistant tool calls require pending tool outputs",
-        `messages.${index}.tool_calls`,
+        `messages.${pendingAssistantIndex}.tool_calls`,
       );
     }
+    if (message.role !== "assistant" || message.tool_calls === undefined)
+      continue;
+
+    pendingAssistantIndex = index;
+    for (const [callIndex, call] of message.tool_calls.entries()) {
+      if (pendingCallIds.has(call.id)) {
+        throw ProxyError.public(
+          400,
+          "invalid_chat_history",
+          "Assistant tool call IDs must be unique",
+          `messages.${index}.tool_calls.${callIndex}.id`,
+        );
+      }
+      pendingCallIds.add(call.id);
+    }
+  }
+  if (pendingCallIds.size > 0) {
+    throw ProxyError.public(
+      400,
+      "unknown_tool_call",
+      "Assistant tool calls require pending tool outputs",
+      `messages.${pendingAssistantIndex}.tool_calls`,
+    );
   }
 }
 
@@ -258,7 +286,7 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
 
     const lastMessage = request.messages.at(-1);
     if (continuationStage === undefined && lastMessage?.role !== "user") {
-      assertInitialMessages(request.messages);
+      assertCompleteToolHistory(request.messages);
       throw ProxyError.public(
         400,
         "invalid_chat_history",
@@ -267,7 +295,7 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
       );
     }
     if (continuationStage === undefined)
-      assertInitialMessages(request.messages);
+      assertCompleteToolHistory(request.messages);
     const command: TurnCommand = {
       action: { type: "start" },
       model: model.id,

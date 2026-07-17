@@ -456,6 +456,36 @@ describe("POST /v1/chat/completions", () => {
     expect(host.toolCalls).not.toHaveBeenCalled();
   });
 
+  it("accepts completed tool calls in replayed Chat history", async () => {
+    const { app, host } = createFixture();
+    const response = await post(app, {
+      model: "gpt-5.4",
+      messages: [
+        { role: "user", content: "look up one" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call-history-1",
+              type: "function",
+              function: { name: "lookup", arguments: '{"id":1}' },
+            },
+          ],
+        },
+        {
+          role: "tool",
+          tool_call_id: "call-history-1",
+          content: "found",
+        },
+        { role: "user", content: "summarize" },
+      ],
+    });
+
+    expect(response.status).toBe(200);
+    expect(host.threadStart).toHaveBeenCalledOnce();
+  });
+
   it("returns lost rather than unknown for an old-generation Chat call ID", async () => {
     const { app, host } = createFixture();
     (host as { generation: number }).generation = 2;
