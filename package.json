@@ -42,7 +42,7 @@
     "clsx": "2.1.1",
     "jsdom": "29.1.1",
     "npm-check-updates": "22.2.9",
-    "openai": "6.47.0",
+    "openai": "6.48.0",
     "radix-ui": "1.6.2",
     "react": "19.2.7",
     "react-dom": "19.2.7",
