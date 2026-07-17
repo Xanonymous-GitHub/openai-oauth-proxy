@@ -535,32 +535,64 @@ async function requestBody(request: Request): Promise<unknown> {
 }
 
 function assertOrdinaryRequest(request: ResponsesRequest): void {
-  if (Array.isArray(request.input)) {
-    for (const [index, item] of request.input.entries()) {
-      if (!("role" in item)) {
+  if (!Array.isArray(request.input)) return;
+  const pendingCallIds = new Set<string>();
+  let pendingCallIndex: number | undefined;
+
+  for (const [index, item] of request.input.entries()) {
+    if ("role" in item) {
+      if (pendingCallIds.size > 0) {
         throw ProxyError.public(
           400,
           "unknown_tool_call",
-          "Function call input did not match a pending response",
-          `input.${index}`,
+          "Function calls require matching outputs",
+          `input.${pendingCallIndex}`,
         );
       }
+      continue;
     }
+    if (item.type === "function_call") {
+      pendingCallIndex ??= index;
+      if (pendingCallIds.has(item.call_id)) {
+        throw ProxyError.public(
+          400,
+          "invalid_response_input",
+          "Function call IDs must be unique within a pending group",
+          `input.${index}.call_id`,
+        );
+      }
+      pendingCallIds.add(item.call_id);
+      continue;
+    }
+    if (!pendingCallIds.delete(item.call_id)) {
+      throw ProxyError.public(
+        400,
+        "unknown_tool_call",
+        "Function output did not match a historical call",
+        `input.${index}.call_id`,
+      );
+    }
+    if (pendingCallIds.size === 0) pendingCallIndex = undefined;
+  }
+  if (pendingCallIds.size > 0) {
+    throw ProxyError.public(
+      400,
+      "unknown_tool_call",
+      "Function calls require matching outputs",
+      `input.${pendingCallIndex}`,
+    );
   }
 }
 
 function functionOutputs(request: ResponsesRequest) {
   if (!Array.isArray(request.input)) return [];
-  return request.input
-    .filter(
-      (
-        item,
-      ): item is Extract<
-        ResponsesInputItem,
-        { type: "function_call_output" }
-      > => "type" in item && item.type === "function_call_output",
-    )
-    .map((item) => ({ callId: item.call_id, output: item.output }));
+  const outputs: Array<{ callId: string; output: string }> = [];
+  for (let index = request.input.length - 1; index >= 0; index -= 1) {
+    const item = request.input[index];
+    if (!item || "role" in item || item.type !== "function_call_output") break;
+    outputs.unshift({ callId: item.call_id, output: item.output });
+  }
+  return outputs;
 }
 
 function splitInput(request: ResponsesRequest): {

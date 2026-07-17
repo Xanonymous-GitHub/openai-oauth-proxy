@@ -178,7 +178,16 @@ export async function runAgentSmoke(agent: "opencode" | "hermes") {
         }),
       );
       try {
-        exitCode = await run(
+        const options = {
+          cwd: directory,
+          env: {
+            ...process.env,
+            HOME: directory,
+            XDG_CONFIG_HOME: join(directory, "xdg"),
+          },
+          timeoutMs: 60_000,
+        };
+        await run(
           binary,
           [
             "run",
@@ -190,15 +199,22 @@ export async function runAgentSmoke(agent: "opencode" | "hermes") {
             directory,
             "Execute every requested bash tool call until the model says the multi-round smoke is complete.",
           ],
-          {
-            cwd: directory,
-            env: {
-              ...process.env,
-              HOME: directory,
-              XDG_CONFIG_HOME: join(directory, "xdg"),
-            },
-            timeoutMs: 60_000,
-          },
+          options,
+        );
+        exitCode = await run(
+          binary,
+          [
+            "run",
+            "--continue",
+            "--format",
+            "json",
+            "--model",
+            "fixture/fixture-model",
+            "--dir",
+            directory,
+            "Reply with a brief summary of the completed tool work without calling another tool.",
+          ],
+          options,
         );
       } catch (error) {
         throw new Error(

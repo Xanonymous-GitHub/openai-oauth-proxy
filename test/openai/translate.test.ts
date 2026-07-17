@@ -105,7 +105,7 @@ describe("OpenAI input translation", () => {
         {
           type: "message",
           role: "assistant",
-          content: [{ type: "input_text", text: "calling" }],
+          content: [{ type: "output_text", text: "calling" }],
         },
         {
           type: "function_call",

@@ -5,10 +5,11 @@ import type {
   ChatUserContent,
   ResponsesInputItem,
   ResponsesMessageContent,
+  ResponsesUserContent,
 } from "./schemas.js";
 
 type HistoryItem = ChatMessage | ResponsesInputItem;
-type TurnInput = ChatUserContent | ResponsesMessageContent;
+type TurnInput = ChatUserContent | ResponsesUserContent;
 type ResponseContent = Extract<
   ResponseItem,
   { type: "message" }
@@ -30,7 +31,11 @@ function messageContent(
   if (content == null) return [];
 
   return content.map((part): ResponseContent => {
-    if (part.type === "text" || part.type === "input_text") {
+    if (
+      part.type === "text" ||
+      part.type === "input_text" ||
+      part.type === "output_text"
+    ) {
       return role === "assistant"
         ? { type: "output_text", text: part.text }
         : { type: "input_text", text: part.text };

@@ -517,7 +517,22 @@ describe("parseResponsesRequest", () => {
     expect(parseResponsesRequest(request)).toEqual(request);
   });
 
-  it.each(["system", "developer", "user", "assistant"] as const)(
+  it("accepts output_text in assistant request messages", () => {
+    const request = {
+      model: "gpt-5.4",
+      input: [
+        {
+          type: "message" as const,
+          role: "assistant" as const,
+          content: [{ type: "output_text" as const, text: "prior answer" }],
+        },
+      ],
+    };
+
+    expect(parseResponsesRequest(request)).toEqual(request);
+  });
+
+  it.each(["system", "developer", "user"] as const)(
     "rejects output_text in %s request messages",
     (role) => {
       expect(() =>

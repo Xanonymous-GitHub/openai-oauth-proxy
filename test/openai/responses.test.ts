@@ -762,6 +762,54 @@ describe("POST /v1/responses", () => {
     });
   });
 
+  it("replays completed function calls and assistant output as history", async () => {
+    const { app, invocations } = createFixture();
+    const response = await postResponse(app, {
+      model: "gpt-5.4",
+      store: false,
+      input: [
+        {
+          type: "function_call",
+          call_id: "call-history",
+          name: "lookup",
+          arguments: '{"id":1}',
+        },
+        {
+          type: "function_call_output",
+          call_id: "call-history",
+          output: "found",
+        },
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "The item was found." }],
+        },
+        { type: "message", role: "user", content: "Summarize it." },
+      ],
+    });
+
+    expect(response.status).toBe(200);
+    expect(invocations).toHaveLength(1);
+    expect(invocations[0]?.command.history).toEqual([
+      {
+        type: "function_call",
+        call_id: "call-history",
+        name: "lookup",
+        arguments: '{"id":1}',
+      },
+      {
+        type: "function_call_output",
+        call_id: "call-history",
+        output: "found",
+      },
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "The item was found." }],
+      },
+    ]);
+  });
+
   it("durably suspends and completes a function call on the original response turn", async () => {
     const fixture = createToolFixture();
     const respond = vi.fn(() => fixture.complete("weather complete"));
@@ -952,9 +1000,25 @@ describe("POST /v1/responses", () => {
     expect(fixture.host.toolCalls).toHaveBeenCalledOnce();
   });
 
-  it("continues store=false tool calls by call ID and deletes the thread", async () => {
+  it("continues multi-round store=false tool calls by trailing call IDs", async () => {
     const fixture = createToolFixture();
-    const respond = vi.fn(() => fixture.complete("stateless complete"));
+    const secondRespond = vi.fn(() => fixture.complete("stateless complete"));
+    const firstRespond = vi.fn(() => {
+      fixture.tools.push({
+        generation: 1,
+        id: "rpc-stateless-second",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          callId: "internal-stateless-second",
+          namespace: null,
+          tool: "lookup",
+          arguments: { round: 2 },
+        },
+        respond: secondRespond,
+        reject: vi.fn(),
+      });
+    });
     vi.mocked(fixture.host.turnStart).mockImplementationOnce(async () => {
       fixture.tools.push({
         generation: 1,
@@ -967,7 +1031,7 @@ describe("POST /v1/responses", () => {
           tool: "lookup",
           arguments: {},
         },
-        respond,
+        respond: firstRespond,
         reject: vi.fn(),
       });
       return { turn: fakeTurn() };
@@ -985,7 +1049,31 @@ describe("POST /v1/responses", () => {
       id: string;
       output: Array<{ call_id: string }>;
     };
-    const callId = firstBody.output[0]?.call_id ?? "missing";
+    const firstCallId = firstBody.output[0]?.call_id ?? "missing";
+
+    const second = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      store: false,
+      tools,
+      input: [
+        { role: "user", content: "lookup" },
+        {
+          type: "function_call",
+          call_id: firstCallId,
+          name: "lookup",
+          arguments: "{}",
+        },
+        {
+          type: "function_call_output",
+          call_id: firstCallId,
+          output: "first",
+        },
+      ],
+    });
+    const secondBody = (await second.json()) as {
+      output: Array<{ call_id: string }>;
+    };
+    const secondCallId = secondBody.output[0]?.call_id ?? "missing";
 
     const completed = await postResponse(fixture.app, {
       model: "gpt-5.4",
@@ -995,14 +1083,30 @@ describe("POST /v1/responses", () => {
         { role: "user", content: "lookup" },
         {
           type: "function_call",
-          call_id: callId,
+          call_id: firstCallId,
           name: "lookup",
           arguments: "{}",
         },
-        { type: "function_call_output", call_id: callId, output: "found" },
+        {
+          type: "function_call_output",
+          call_id: firstCallId,
+          output: "first",
+        },
+        {
+          type: "function_call",
+          call_id: secondCallId,
+          name: "lookup",
+          arguments: '{"round":2}',
+        },
+        {
+          type: "function_call_output",
+          call_id: secondCallId,
+          output: "second",
+        },
       ],
     });
 
+    expect(second.status).toBe(200);
     expect(completed.status).toBe(200);
     expect(await completed.json()).toMatchObject({
       id: firstBody.id,
@@ -1013,7 +1117,8 @@ describe("POST /v1/responses", () => {
         },
       ],
     });
-    expect(respond).toHaveBeenCalledOnce();
+    expect(firstRespond).toHaveBeenCalledOnce();
+    expect(secondRespond).toHaveBeenCalledOnce();
     expect(fixture.deleteThread).toHaveBeenCalledWith(
       "thread-1",
       expect.any(AbortSignal),

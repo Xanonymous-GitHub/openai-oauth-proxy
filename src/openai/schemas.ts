@@ -167,6 +167,10 @@ const responseInputTextSchema = z.strictObject({
   type: z.literal("input_text"),
   text: z.string(),
 });
+const responseOutputTextSchema = z.strictObject({
+  type: z.literal("output_text"),
+  text: z.string(),
+});
 const responseInputImageSchema = z.strictObject({
   type: z.literal("input_image"),
   file_id: z.never().optional(),
@@ -204,7 +208,15 @@ const responseUserMessageSchema = z.strictObject({
 const responseAssistantMessageSchema = z.strictObject({
   type: z.literal("message").optional(),
   role: z.literal("assistant"),
-  content: responseTextContentSchema,
+  content: z.union([
+    z.string(),
+    z.array(
+      z.discriminatedUnion("type", [
+        responseInputTextSchema,
+        responseOutputTextSchema,
+      ]),
+    ),
+  ]),
 });
 const responseMessageSchema = z.discriminatedUnion("role", [
   responseSystemMessageSchema,
@@ -282,6 +294,7 @@ export type ChatUserContent = z.infer<typeof chatUserContentSchema>;
 export type ResponsesMessageContent = z.infer<
   typeof responseMessageSchema
 >["content"];
+export type ResponsesUserContent = z.infer<typeof responseUserContentSchema>;
 
 type ZodIssue = z.core.$ZodIssue;
 
