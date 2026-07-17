@@ -40,17 +40,6 @@ interface RejectionCase {
 
 const rejectionCases: RejectionCase[] = [
   {
-    concept: "Chat sampling",
-    endpoint: "chat",
-    body: () => ({
-      model: "gpt-5.4",
-      messages: [{ role: "user", content: "reject" }],
-      temperature: 0.2,
-    }),
-    code: "unsupported_field",
-    param: "temperature",
-  },
-  {
     concept: "Chat log probabilities",
     endpoint: "chat",
     body: () => ({
@@ -184,13 +173,6 @@ const rejectionCases: RejectionCase[] = [
     }),
     code: "unsupported_field",
     param: "unknown_fixture_field",
-  },
-  {
-    concept: "Responses sampling",
-    endpoint: "responses",
-    body: () => ({ model: "gpt-5.4", input: "reject", temperature: 0.2 }),
-    code: "unsupported_field",
-    param: "temperature",
   },
   {
     concept: "Responses log probabilities",
@@ -496,6 +478,18 @@ describe("official OpenAI JavaScript client compatibility", () => {
       },
     },
     {
+      concept: "ignored temperature",
+      run: async () => {
+        await client.chat.completions.create({
+          model: "gpt-5.4",
+          messages: [{ role: "user", content: "temperature compatibility" }],
+          temperature: 0.2,
+        });
+
+        expect(fixture.commands.at(-1)).not.toHaveProperty("temperature");
+      },
+    },
+    {
       concept: "JSON Schema",
       run: async () => {
         const result = await client.chat.completions.create({
@@ -696,6 +690,18 @@ describe("official OpenAI JavaScript client compatibility", () => {
         });
 
         expect(result.status).toBe("completed");
+      },
+    },
+    {
+      concept: "ignored temperature",
+      run: async () => {
+        await client.responses.create({
+          model: "gpt-5.4",
+          input: "temperature compatibility",
+          temperature: 0.2,
+        });
+
+        expect(fixture.commands.at(-1)).not.toHaveProperty("temperature");
       },
     },
     {

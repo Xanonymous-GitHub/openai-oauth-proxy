@@ -118,13 +118,37 @@ describe("parseChatRequest", () => {
     },
   );
 
+  it.each([null, 0, 0.2, 2])(
+    "accepts ignored Chat temperature %s",
+    (temperature) => {
+      const request = { ...chatRequest, temperature };
+
+      expect(parseChatRequest(request)).toEqual(request);
+    },
+  );
+
+  it.each([-0.1, 2.1, Number.NaN])(
+    "rejects invalid Chat temperature %s",
+    (temperature) => {
+      expect(() =>
+        parseChatRequest({ ...chatRequest, temperature }),
+      ).toThrowError(
+        expect.objectContaining({
+          code: "invalid_request",
+          param: "temperature",
+          status: 400,
+        }),
+      );
+    },
+  );
+
   it("maps an unsupported top-level field to its exact parameter", () => {
     expect(() =>
-      parseChatRequest({ ...chatRequest, temperature: 0.2 }),
+      parseChatRequest({ ...chatRequest, unknown_fixture_field: true }),
     ).toThrowError(
       expect.objectContaining({
         code: "unsupported_field",
-        param: "temperature",
+        param: "unknown_fixture_field",
         status: 400,
       }),
     );
@@ -392,6 +416,33 @@ describe("parseResponsesRequest", () => {
 
     expect(parseResponsesRequest(request)).toEqual(request);
   });
+
+  it.each([null, 0, 0.2, 2])(
+    "accepts ignored Responses temperature %s",
+    (temperature) => {
+      const request = { model: "gpt-5.4", input: "hello", temperature };
+
+      expect(parseResponsesRequest(request)).toEqual(request);
+    },
+  );
+
+  it.each([-0.1, 2.1, Number.NaN])(
+    "rejects invalid Responses temperature %s",
+    (temperature) => {
+      expect(() =>
+        parseResponsesRequest({
+          model: "gpt-5.4",
+          input: "hello",
+          temperature,
+        }),
+      ).toThrowError(
+        expect.objectContaining({
+          code: "invalid_request",
+          param: "temperature",
+        }),
+      );
+    },
+  );
 
   it.each([
     ["default text", {}],

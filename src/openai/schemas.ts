@@ -18,6 +18,7 @@ const reasoningEffortSchema = z.enum([
 ]);
 const reasoningSummarySchema = z.enum(["auto", "concise", "detailed"]);
 const ignoredOutputTokenLimitSchema = z.number().int().positive().nullable();
+const ignoredTemperatureSchema = z.number().min(0).max(2).nullable();
 
 const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   z.union([
@@ -149,6 +150,8 @@ const chatRequestSchema = z
     tool_choice: z.enum(["auto", "none"]).optional(),
     parallel_tool_calls: z.literal(true).optional(),
     reasoning_effort: reasoningEffortSchema.optional(),
+    // Compatibility no-op: Codex App Server has no per-turn sampling temperature override.
+    temperature: ignoredTemperatureSchema.optional(),
     // Compatibility no-op: Codex App Server cannot enforce this limit, but agent clients send it by default.
     max_completion_tokens: ignoredOutputTokenLimitSchema.optional(),
     response_format: chatResponseFormatSchema.optional(),
@@ -254,6 +257,8 @@ const responsesRequestSchema = z.strictObject({
   tools: z.array(responsesFunctionToolSchema).optional(),
   tool_choice: z.enum(["auto", "none"]).optional(),
   parallel_tool_calls: z.literal(true).optional(),
+  // Compatibility no-op: Codex App Server has no per-turn sampling temperature override.
+  temperature: ignoredTemperatureSchema.optional(),
   // Compatibility no-op: Codex App Server cannot enforce this limit, but Responses clients send it by default.
   max_output_tokens: ignoredOutputTokenLimitSchema.optional(),
   // Compatibility no-op: continuations stay server-side, so encrypted reasoning is neither needed nor exposed.
