@@ -424,6 +424,12 @@ export async function runRealAppServerContract(): Promise<ContractResult> {
   } finally {
     await supervisor.stop();
     await fake.close();
-    rmSync(directory, { recursive: true, force: true });
+    // Codex can finish late state-file writes as its process tree exits.
+    rmSync(directory, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
   }
 }
