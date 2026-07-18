@@ -663,7 +663,7 @@ async function validatedModel(
   }
   const effort = request.reasoning?.effort;
   if (
-    effort !== undefined &&
+    effort != null &&
     effort !== "none" &&
     !model.supportedReasoningEfforts.includes(effort)
   ) {
@@ -784,24 +784,24 @@ export function createResponsesHandler(
 ): Handler {
   return async (context) => {
     const request = parseResponsesRequest(await requestBody(context.req.raw));
+    const toolChoice = request.tool_choice === "none" ? "none" : "auto";
     const validatedTools = deps.runner.tools.toDynamicTools(
       request.tools ?? [],
     );
-    const dynamicTools = request.tool_choice === "none" ? [] : validatedTools;
+    const dynamicTools = toolChoice === "none" ? [] : validatedTools;
     const toolConfiguration = deps.runner.tools.configuration(
       request.tools ?? [],
-      request.tool_choice ?? "auto",
+      toolChoice,
     );
     const toolFingerprint = toolConfiguration.fingerprint;
     const outputs = functionOutputs(request);
     if (outputs.length > 0) {
       const statelessContinuation =
-        request.previous_response_id === undefined && request.store === false;
+        request.previous_response_id == null && request.store === false;
       if (
         !Array.isArray(request.input) ||
-        (request.previous_response_id === undefined &&
-          !statelessContinuation) ||
-        (request.previous_response_id !== undefined &&
+        (request.previous_response_id == null && !statelessContinuation) ||
+        (request.previous_response_id != null &&
           request.input.length !== outputs.length)
       ) {
         throw ProxyError.public(
@@ -813,7 +813,7 @@ export function createResponsesHandler(
       }
       const model = await validatedModel(deps, request, context.req.raw.signal);
       deps.observe?.(context.req.raw, { model: model.id });
-      if (request.previous_response_id !== undefined) {
+      if (request.previous_response_id != null) {
         const mapping = deps.store.lookup(request.previous_response_id);
         if (!mapping) throw decisionError("not_found");
         if (mapping.state === "lost") throw decisionError("lost");
@@ -829,12 +829,15 @@ export function createResponsesHandler(
       deps.observe?.(context.req.raw, { leaseOutcome: "acquired" });
       const continuation = await deps.runner.tools.continue({
         kind: "responses",
-        ...(request.previous_response_id === undefined
+        ...(request.previous_response_id == null
           ? {}
           : { responseId: request.previous_response_id }),
         toolFingerprint,
-        ...(request.reasoning !== undefined && "summary" in request.reasoning
+        ...(request.reasoning != null && "summary" in request.reasoning
           ? { reasoningSummary: request.reasoning.summary ?? null }
+          : {}),
+        ...("service_tier" in request
+          ? { serviceTier: request.service_tier ?? "auto" }
           : {}),
         results: outputs,
         signal: context.req.raw.signal,
@@ -1180,7 +1183,7 @@ export function createResponsesHandler(
       }
     }
     assertOrdinaryRequest(request);
-    if (request.previous_response_id !== undefined) {
+    if (request.previous_response_id != null) {
       const configuration = deps.store.continuationToolConfiguration(
         request.previous_response_id,
         toolConfiguration,
@@ -1256,7 +1259,7 @@ export function createResponsesHandler(
     try {
       decision = deps.store.reserveOperation({
         responseId: identity.responseId,
-        ...(request.previous_response_id === undefined
+        ...(request.previous_response_id == null
           ? {}
           : { previousResponseId: request.previous_response_id }),
         ownerRequestId: requestId,
@@ -1311,13 +1314,16 @@ export function createResponsesHandler(
       model: model.id,
       history,
       input,
-      ...(request.instructions === undefined
+      ...(request.instructions == null
         ? {}
         : { instructions: request.instructions }),
-      ...(request.reasoning?.effort === undefined ||
+      ...(request.reasoning?.effort == null ||
       request.reasoning.effort === "none"
         ? {}
         : { effort: request.reasoning.effort }),
+      ...(request.service_tier == null
+        ? {}
+        : { serviceTier: request.service_tier }),
       ...(request.reasoning?.summary == null
         ? {}
         : { summary: request.reasoning.summary }),

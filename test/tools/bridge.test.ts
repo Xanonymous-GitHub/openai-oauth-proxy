@@ -57,6 +57,7 @@ function context(
     generation: 7,
     toolFingerprint: "tools-v1",
     toolDefinitions: allowedTools,
+    serviceTier: "auto",
     resume: vi.fn(() => ({
       result: Promise.resolve(result()),
       events: (async function* () {
@@ -429,6 +430,36 @@ describe("ToolBridge", () => {
       }),
     ).resolves.toEqual({ type: "lost" });
     expect(nextTurn.invalidate).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a changed service tier without consuming the pending call", async () => {
+    const { bridge } = createBridge();
+    const turn = context({ serviceTier: "priority" });
+    const call = serverCall("rpc-1", "lookup");
+    const external = bridge.register(call, turn);
+
+    await expect(
+      bridge.continue({
+        kind: "chat",
+        serviceTier: "default",
+        toolFingerprint: "tools-v1",
+        results: [{ callId: external.id, output: "found" }],
+      }),
+    ).rejects.toMatchObject({
+      status: 400,
+      code: "service_tier_changed",
+      param: "service_tier",
+    });
+    expect(call.respond).not.toHaveBeenCalled();
+
+    await expect(
+      bridge.continue({
+        kind: "chat",
+        serviceTier: "priority",
+        toolFingerprint: "tools-v1",
+        results: [{ callId: external.id, output: "found" }],
+      }),
+    ).resolves.toMatchObject({ type: "continued" });
   });
 
   it("expires a suspended turn once after fifteen minutes", () => {

@@ -500,6 +500,25 @@ describe("TurnRunner", () => {
     ]);
   });
 
+  it("forwards service tier to thread and turn start", async () => {
+    const { events, host } = createHost();
+    vi.mocked(host.turnStart).mockImplementation(async () => {
+      emitCompletedTurn(events, "thread-1", "turn-1", "done");
+      return { turn: fakeTurn() };
+    });
+
+    await createRunner(host).run(command({ serviceTier: "priority" }));
+
+    expect(host.threadStart).toHaveBeenCalledWith(
+      expect.objectContaining({ serviceTier: "priority" }),
+      expect.any(AbortSignal),
+    );
+    expect(host.turnStart).toHaveBeenCalledWith(
+      expect.objectContaining({ serviceTier: "priority" }),
+      expect.any(AbortSignal),
+    );
+  });
+
   it("omits usage when Codex supplies no token event", async () => {
     const { events, host } = createHost();
     vi.mocked(host.turnStart).mockImplementation(async () => {

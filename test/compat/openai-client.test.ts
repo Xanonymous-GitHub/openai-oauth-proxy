@@ -40,28 +40,6 @@ interface RejectionCase {
 
 const rejectionCases: RejectionCase[] = [
   {
-    concept: "Chat log probabilities",
-    endpoint: "chat",
-    body: () => ({
-      model: "gpt-5.4",
-      messages: [{ role: "user", content: "reject" }],
-      logprobs: true,
-    }),
-    code: "unsupported_field",
-    param: "logprobs",
-  },
-  {
-    concept: "Chat audio",
-    endpoint: "chat",
-    body: () => ({
-      model: "gpt-5.4",
-      messages: [{ role: "user", content: "reject" }],
-      modalities: ["text", "audio"],
-    }),
-    code: "unsupported_field",
-    param: "modalities",
-  },
-  {
     concept: "Chat remote image",
     endpoint: "chat",
     body: () => ({
@@ -108,39 +86,6 @@ const rejectionCases: RejectionCase[] = [
     param: "tools.0.type",
   },
   {
-    concept: "Chat forced tool choice",
-    endpoint: "chat",
-    body: () => ({
-      model: "gpt-5.4",
-      messages: [{ role: "user", content: "reject" }],
-      tool_choice: { type: "function", function: { name: "fixture_tool" } },
-    }),
-    code: "invalid_request",
-    param: "tool_choice",
-  },
-  {
-    concept: "Chat disabled parallel tools",
-    endpoint: "chat",
-    body: () => ({
-      model: "gpt-5.4",
-      messages: [{ role: "user", content: "reject" }],
-      parallel_tool_calls: false,
-    }),
-    code: "invalid_request",
-    param: "parallel_tool_calls",
-  },
-  {
-    concept: "Chat verbosity",
-    endpoint: "chat",
-    body: () => ({
-      model: "gpt-5.4",
-      messages: [{ role: "user", content: "reject" }],
-      verbosity: "low",
-    }),
-    code: "unsupported_field",
-    param: "verbosity",
-  },
-  {
     concept: "Chat non-streaming stream options",
     endpoint: "chat",
     body: () => ({
@@ -173,13 +118,6 @@ const rejectionCases: RejectionCase[] = [
     }),
     code: "unsupported_field",
     param: "unknown_fixture_field",
-  },
-  {
-    concept: "Responses log probabilities",
-    endpoint: "responses",
-    body: () => ({ model: "gpt-5.4", input: "reject", top_logprobs: 2 }),
-    code: "unsupported_field",
-    param: "top_logprobs",
   },
   {
     concept: "Responses remote image",
@@ -248,73 +186,11 @@ const rejectionCases: RejectionCase[] = [
     param: "tools.0.type",
   },
   {
-    concept: "Responses forced tool choice",
-    endpoint: "responses",
-    body: () => ({
-      model: "gpt-5.4",
-      input: "reject",
-      tool_choice: { type: "function", name: "fixture_tool" },
-    }),
-    code: "invalid_request",
-    param: "tool_choice",
-  },
-  {
-    concept: "Responses disabled parallel tools",
-    endpoint: "responses",
-    body: () => ({
-      model: "gpt-5.4",
-      input: "reject",
-      parallel_tool_calls: false,
-    }),
-    code: "invalid_request",
-    param: "parallel_tool_calls",
-  },
-  {
-    concept: "Responses background mode",
-    endpoint: "responses",
-    body: () => ({ model: "gpt-5.4", input: "reject", background: true }),
-    code: "unsupported_field",
-    param: "background",
-  },
-  {
-    concept: "Responses conversation resource",
-    endpoint: "responses",
-    body: () => ({
-      model: "gpt-5.4",
-      input: "reject",
-      conversation: "conv_fixture",
-    }),
-    code: "unsupported_field",
-    param: "conversation",
-  },
-  {
     concept: "Responses audio",
     endpoint: "responses",
     body: () => ({ model: "gpt-5.4", input: "reject", modalities: ["audio"] }),
     code: "unsupported_field",
     param: "modalities",
-  },
-  {
-    concept: "Responses include controls",
-    endpoint: "responses",
-    body: () => ({
-      model: "gpt-5.4",
-      input: "reject",
-      include: ["message.output_text.logprobs"],
-    }),
-    code: "invalid_request",
-    param: "include.0",
-  },
-  {
-    concept: "Responses metadata",
-    endpoint: "responses",
-    body: () => ({
-      model: "gpt-5.4",
-      input: "reject",
-      metadata: { fixture: "private" },
-    }),
-    code: "unsupported_field",
-    param: "metadata",
   },
   {
     concept: "Responses unknown field",
@@ -498,6 +374,30 @@ describe("official OpenAI JavaScript client compatibility", () => {
         });
 
         expect(fixture.commands.at(-1)).not.toHaveProperty("temperature");
+      },
+    },
+    {
+      concept: "documented compatibility controls",
+      run: async () => {
+        await client.chat.completions.create({
+          model: "gpt-5.4",
+          messages: [{ role: "user", content: "compatibility controls" }],
+          frequency_penalty: 0.5,
+          logprobs: true,
+          n: 2,
+          presence_penalty: -0.5,
+          seed: 42,
+          service_tier: "priority",
+          stop: ["stop"],
+          top_logprobs: 2,
+          top_p: 0.9,
+          verbosity: "low",
+        });
+
+        expect(fixture.commands.at(-1)).toMatchObject({
+          serviceTier: "priority",
+        });
+        expect(fixture.commands.at(-1)).not.toHaveProperty("topP");
       },
     },
     {
@@ -737,6 +637,28 @@ describe("official OpenAI JavaScript client compatibility", () => {
         });
 
         expect(fixture.commands.at(-1)).not.toHaveProperty("temperature");
+      },
+    },
+    {
+      concept: "documented compatibility controls",
+      run: async () => {
+        await client.responses.create({
+          model: "gpt-5.4",
+          input: "compatibility controls",
+          background: true,
+          include: ["message.output_text.logprobs"],
+          metadata: { purpose: "fixture" },
+          parallel_tool_calls: false,
+          service_tier: "priority",
+          top_logprobs: 2,
+          top_p: 0.9,
+          truncation: "auto",
+        });
+
+        expect(fixture.commands.at(-1)).toMatchObject({
+          serviceTier: "priority",
+        });
+        expect(fixture.commands.at(-1)).not.toHaveProperty("topP");
       },
     },
     {
@@ -1103,23 +1025,18 @@ describe("official OpenAI JavaScript client compatibility", () => {
     expect(fixture.internalToolEvents).toBe(0);
   });
 
-  it("rejects every unsupported Chat field through the official client", async () => {
-    for (const [field, value] of [
-      ["verbosity", "low"],
-      ["unknown_fixture_field", true],
-    ] as const) {
-      await expect(
-        client.chat.completions.create({
-          model: "gpt-5.4",
-          messages: [{ role: "user", content: "reject unsupported field" }],
-          [field]: value,
-        }),
-      ).rejects.toMatchObject({
-        status: 400,
-        code: "unsupported_field",
-        param: field,
-      });
-    }
+  it("rejects unknown Chat fields through the official client", async () => {
+    await expect(
+      client.chat.completions.create({
+        model: "gpt-5.4",
+        messages: [{ role: "user", content: "reject unknown field" }],
+        unknown_fixture_field: true,
+      } as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming),
+    ).rejects.toMatchObject({
+      status: 400,
+      code: "unsupported_field",
+      param: "unknown_fixture_field",
+    });
   });
 
   it("propagates cancellation and stable OpenAI errors", async () => {

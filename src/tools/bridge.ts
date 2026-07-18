@@ -44,6 +44,7 @@ export interface ToolBridgeContext {
   toolFingerprint: string;
   toolDefinitions: readonly DynamicToolSpec[];
   reasoningSummary?: ReasoningSummary;
+  serviceTier?: string;
   signal?: AbortSignal;
   finish?(): void;
   resume(signal?: AbortSignal): ResumedToolStage;
@@ -66,6 +67,7 @@ export interface ToolContinuationRequest {
   responseId?: string;
   toolFingerprint: string;
   reasoningSummary?: ReasoningSummary | null;
+  serviceTier?: string;
   results: ToolResultInput[];
   signal?: AbortSignal;
 }
@@ -354,6 +356,17 @@ export class ToolBridge {
         "reasoning_summary_changed",
         "Reasoning summary must match the suspended request",
         "reasoning.summary",
+      );
+    }
+    if (
+      "serviceTier" in request &&
+      request.serviceTier !== turn.context.serviceTier
+    ) {
+      throw ProxyError.public(
+        400,
+        "service_tier_changed",
+        "Service tier must match the suspended request",
+        "service_tier",
       );
     }
 

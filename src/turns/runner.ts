@@ -569,6 +569,9 @@ export class TurnRunner {
             threadId,
             input: command.input,
             model: command.model,
+            ...(command.serviceTier === undefined
+              ? {}
+              : { serviceTier: command.serviceTier }),
             ...(command.effort === undefined ? {} : { effort: command.effort }),
             ...(command.summary === undefined
               ? {}
@@ -679,6 +682,7 @@ export class TurnRunner {
           ...(command.summary === undefined
             ? {}
             : { reasoningSummary: command.summary }),
+          serviceTier: command.serviceTier ?? "auto",
           ...(toolLifecycle.signal === undefined
             ? {}
             : { signal: toolLifecycle.signal }),
@@ -875,6 +879,9 @@ export class TurnRunner {
         const response = await this.#host.threadStart(
           {
             model: command.model,
+            ...(command.serviceTier === undefined
+              ? {}
+              : { serviceTier: command.serviceTier }),
             cwd: command.cwd ?? this.#emptyWorkingDirectory,
             approvalPolicy: "never",
             sandbox: "read-only",

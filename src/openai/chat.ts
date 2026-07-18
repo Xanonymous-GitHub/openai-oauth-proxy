@@ -188,13 +188,28 @@ async function requestBody(request: Request): Promise<unknown> {
 export function createChatHandler(deps: ChatHandlerDependencies): Handler {
   return async (context) => {
     const request = parseChatRequest(await requestBody(context.req.raw));
-    const validatedTools = deps.runner.tools.toDynamicTools(
-      request.tools ?? [],
-    );
-    const dynamicTools = request.tool_choice === "none" ? [] : validatedTools;
+    const requestedToolDefinitions =
+      request.tools ??
+      request.functions?.map((definition) => ({
+        type: "function" as const,
+        function: definition,
+      })) ??
+      [];
+    const toolDefinitions = requestedToolDefinitions.map((tool) => ({
+      ...tool,
+      function: {
+        ...tool.function,
+        parameters: tool.function.parameters ?? {},
+      },
+    }));
+    const requestedToolChoice =
+      request.tool_choice ?? request.function_call ?? "auto";
+    const toolChoice = requestedToolChoice === "none" ? "none" : "auto";
+    const validatedTools = deps.runner.tools.toDynamicTools(toolDefinitions);
+    const dynamicTools = toolChoice === "none" ? [] : validatedTools;
     const toolFingerprint = deps.runner.tools.configuration(
-      request.tools ?? [],
-      request.tool_choice ?? "auto",
+      toolDefinitions,
+      toolChoice,
     ).fingerprint;
     const outputs = toolOutputs(request.messages);
 
@@ -229,7 +244,7 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
       );
     }
     if (
-      request.reasoning_effort !== undefined &&
+      request.reasoning_effort != null &&
       request.reasoning_effort !== "none" &&
       !model.supportedReasoningEfforts.includes(request.reasoning_effort)
     ) {
@@ -260,6 +275,9 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
       const continuation = await deps.runner.tools.continue({
         kind: "chat",
         toolFingerprint,
+        ...("service_tier" in request
+          ? { serviceTier: request.service_tier ?? "auto" }
+          : {}),
         results: outputs,
         signal: turnSignal,
       });
@@ -305,10 +323,13 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
         lastMessage?.role === "user"
           ? translateTurnInput(lastMessage.content)
           : [],
-      ...(request.reasoning_effort === undefined ||
+      ...(request.reasoning_effort == null ||
       request.reasoning_effort === "none"
         ? {}
         : { effort: request.reasoning_effort }),
+      ...(request.service_tier == null
+        ? {}
+        : { serviceTier: request.service_tier }),
       // Codex only exposes schema-constrained output; text and legacy JSON object mode remain unconstrained.
       ...(request.response_format?.type !== "json_schema"
         ? {}
@@ -479,7 +500,7 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
                     delta: {},
                     finish_reason: event.result.finishReason,
                   },
-                  request.stream_options === undefined
+                  request.stream_options == null
                     ? (event.result.usage ?? usage)
                     : includeUsage
                       ? null

@@ -28,6 +28,7 @@ export interface TurnCommand {
   input: UserInput[];
   instructions?: string;
   effort?: ReasoningEffort;
+  serviceTier?: string;
   summary?: ReasoningSummary;
   outputSchema?: JsonValue;
   dynamicTools?: DynamicToolSpec[];

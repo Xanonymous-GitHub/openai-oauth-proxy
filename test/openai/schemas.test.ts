@@ -151,6 +151,16 @@ describe("parseChatRequest", () => {
     },
   );
 
+  it.each([-0.1, 1.1, Number.NaN])("rejects invalid Chat top_p %s", (top_p) => {
+    expect(() => parseChatRequest({ ...chatRequest, top_p })).toThrowError(
+      expect.objectContaining({
+        code: "invalid_request",
+        param: "top_p",
+        status: 400,
+      }),
+    );
+  });
+
   it("maps an unsupported top-level field to its exact parameter", () => {
     expect(() =>
       parseChatRequest({ ...chatRequest, unknown_fixture_field: true }),
@@ -223,7 +233,6 @@ describe("parseChatRequest", () => {
       },
       "messages.0.content.0.image_url.url",
     ],
-    ["sampling fields", { ...chatRequest, top_p: 0.9 }, "top_p"],
     [
       "non-streaming stream options",
       { ...chatRequest, stream_options: { include_usage: true } },
@@ -238,15 +247,6 @@ describe("parseChatRequest", () => {
       },
       "stream_options.extra",
     ],
-    ["verbosity", { ...chatRequest, verbosity: "low" }, "verbosity"],
-    [
-      "forced function selection",
-      {
-        ...chatRequest,
-        tool_choice: { type: "function", function: { name: "lookup" } },
-      },
-      "tool_choice",
-    ],
     [
       "Platform built-in tools",
       {
@@ -255,19 +255,61 @@ describe("parseChatRequest", () => {
       },
       "tools.0.type",
     ],
-    ["audio", { ...chatRequest, modalities: ["text", "audio"] }, "modalities"],
-    [
-      "disabled parallel calls",
-      {
-        ...chatRequest,
-        parallel_tool_calls: false,
-      },
-      "parallel_tool_calls",
-    ],
   ])("rejects %s", (_name, request, param) => {
     expect(() => parseChatRequest(request)).toThrowError(
       expect.objectContaining({ status: 400, param }),
     );
+  });
+
+  it("accepts documented Chat compatibility controls", () => {
+    const request = {
+      ...chatRequest,
+      audio: { format: "mp3" as const, voice: "alloy" },
+      frequency_penalty: -0.5,
+      function_call: { name: "lookup" },
+      functions: [{ name: "lookup", parameters: { type: "object" } }],
+      logit_bias: { "42": 1.5 },
+      logprobs: true,
+      max_tokens: 256,
+      metadata: { purpose: "fixture" },
+      modalities: ["text" as const, "audio" as const],
+      moderation: { model: "omni-moderation-latest" },
+      n: 2,
+      parallel_tool_calls: false,
+      prediction: { type: "content" as const, content: "predicted" },
+      presence_penalty: 0.5,
+      prompt_cache_key: "cache-fixture",
+      prompt_cache_options: { mode: "explicit" as const, ttl: "30m" as const },
+      prompt_cache_retention: "24h" as const,
+      safety_identifier: "safe-fixture",
+      seed: 42,
+      service_tier: "priority" as const,
+      stop: ["stop"],
+      store: true,
+      top_logprobs: 20,
+      top_p: 0.9,
+      tool_choice: { type: "function" as const, function: { name: "lookup" } },
+      user: "user-fixture",
+      verbosity: "low" as const,
+      web_search_options: { search_context_size: "low" as const },
+    };
+
+    expect(parseChatRequest(request)).toEqual(request);
+  });
+
+  it("accepts Chat allowed_tools choice", () => {
+    const request = {
+      ...chatRequest,
+      tool_choice: {
+        type: "allowed_tools" as const,
+        allowed_tools: {
+          mode: "required" as const,
+          tools: [{ type: "function", function: { name: "lookup" } }],
+        },
+      },
+    };
+
+    expect(parseChatRequest(request)).toEqual(request);
   });
 
   it.each([true, false])(
@@ -453,6 +495,20 @@ describe("parseResponsesRequest", () => {
     },
   );
 
+  it.each([-0.1, 1.1, Number.NaN])(
+    "rejects invalid Responses top_p %s",
+    (top_p) => {
+      expect(() =>
+        parseResponsesRequest({ model: "gpt-5.4", input: "hello", top_p }),
+      ).toThrowError(
+        expect.objectContaining({
+          code: "invalid_request",
+          param: "top_p",
+        }),
+      );
+    },
+  );
+
   it.each([
     ["default text", {}],
     ["explicit text", { format: { type: "text" } }],
@@ -508,11 +564,6 @@ describe("parseResponsesRequest", () => {
 
   it.each([
     [
-      "background mode",
-      { model: "gpt-5.4", input: "hi", background: true },
-      "background",
-    ],
-    [
       "remote image",
       {
         model: "gpt-5.4",
@@ -558,6 +609,50 @@ describe("parseResponsesRequest", () => {
     expect(() => parseResponsesRequest(request)).toThrowError(
       expect.objectContaining({ status: 400, param }),
     );
+  });
+
+  it("accepts documented Responses compatibility controls", () => {
+    const request = {
+      model: "gpt-5.4",
+      input: "hi",
+      background: true,
+      context_management: [
+        { type: "compaction" as const, compact_threshold: 1 },
+      ],
+      conversation: { id: "conv_fixture" },
+      include: ["message.output_text.logprobs" as const],
+      max_tool_calls: 3,
+      metadata: { purpose: "fixture" },
+      moderation: { model: "omni-moderation-latest" },
+      parallel_tool_calls: false,
+      prompt: { id: "pmpt_fixture", version: "1", variables: { name: "Ada" } },
+      prompt_cache_options: { mode: "explicit" as const, ttl: "30m" as const },
+      prompt_cache_retention: "24h" as const,
+      safety_identifier: "safe-fixture",
+      service_tier: "priority" as const,
+      stream: true,
+      stream_options: { include_obfuscation: false },
+      top_logprobs: 20,
+      top_p: 0.9,
+      truncation: "auto" as const,
+      user: "user-fixture",
+    };
+
+    expect(parseResponsesRequest(request)).toEqual(request);
+  });
+
+  it("accepts Responses allowed_tools choice", () => {
+    const request = {
+      model: "gpt-5.4",
+      input: "hi",
+      tool_choice: {
+        type: "allowed_tools" as const,
+        mode: "required" as const,
+        tools: [{ type: "function", name: "lookup" }],
+      },
+    };
+
+    expect(parseResponsesRequest(request)).toEqual(request);
   });
 
   it("accepts store=false with tools", () => {
