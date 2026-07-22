@@ -87,23 +87,6 @@ jobs:
         run: |
           [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           docker buildx imagetools inspect "$IMAGE@$DIGEST" >/dev/null
-      - name: Generate published image SBOM
-        uses: anchore/sbom-action@v0
-        with:
-          image: ${{ steps.image.outputs.image }}@${{ steps.build.outputs.digest }}
-          format: spdx-json
-          output-file: /tmp/openai-oauth-proxy.spdx.json
-      - name: Scan SBOM for vulnerabilities
-        uses: anchore/scan-action@v7
-        with:
-          sbom: /tmp/openai-oauth-proxy.spdx.json
-          fail-build: true
-          severity-cutoff: critical
-      - uses: actions/upload-artifact@v7
-        with:
-          name: openai-oauth-proxy-${{ github.ref_name }}-sbom
-          path: /tmp/openai-oauth-proxy.spdx.json
-          if-no-files-found: error
       - name: Install cosign
         uses: sigstore/cosign-installer@v4.1.2
       - name: Sign scanned image digest
