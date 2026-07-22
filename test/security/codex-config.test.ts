@@ -29,7 +29,7 @@ const instructions = read("config/codex/neutral-instructions.md");
 const runtimeSecuritySource = read("src/runtime-security.ts");
 
 describe("Codex hardening baseline", () => {
-  it("pins every Codex 0.144.1 hardening setting", () => {
+  it("pins every Codex 0.145.0 hardening setting", () => {
     for (const entry of [
       'cli_auth_credentials_store = "file"',
       'forced_login_method = "chatgpt"',

@@ -19,13 +19,16 @@ jobs:
         with:
           node-version: "26"
           cache: ""
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
       - name: Install pinned external agent clients
         run: |
-          bun i -g opencode-ai@1.17.18
-          python3 -m pip install hermes-agent==0.15.2
+          bun i -g opencode-ai@1.18.4
+          python -m pip install hermes-agent==0.19.0
       - run: bun install --frozen-lockfile
       - run: bun run protocol:check
       - run: bun run deps:check

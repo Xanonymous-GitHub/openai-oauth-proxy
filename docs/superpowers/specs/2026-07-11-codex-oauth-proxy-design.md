@@ -49,7 +49,7 @@ The proxy will not depend on `@openai/codex-sdk`.
 
 ### Codex App Server
 
-The proxy will run a pinned, tested stable `@openai/codex` release, initially `0.144.1`, and spawn one long-lived `codex app-server` child process over stdio. App Server is the official product-integration interface for:
+The proxy runs the pinned, tested stable `@openai/codex` release `0.145.0` and spawns one long-lived `codex app-server` child process over stdio. App Server is the official product-integration interface for:
 
 - device-code ChatGPT login;
 - account state and logout;
@@ -319,7 +319,7 @@ When `store` is omitted or `true`, mappings and Codex history use a seven-day sl
 
 Tool calls use the same suspended-turn bridge as Chat Completions.
 
-Codex 0.144.1 accepts `dynamicTools` only on `thread/start`; `thread/resume` and `thread/fork` inherit but cannot replace that configuration. Each completed stored response therefore persists the effective canonical function definitions, `tool_choice`, and fingerprint. A continuation must match all three exactly before a lease or App Server call; add, remove, change, and `none` mismatches fail with `tool_definitions_changed`. New lineages may define tools normally.
+Codex 0.145.0 accepts `dynamicTools` only on `thread/start`; `thread/resume` and `thread/fork` inherit but cannot replace that configuration. Each completed stored response therefore persists the effective canonical function definitions, `tool_choice`, and fingerprint. A continuation must match all three exactly before a lease or App Server call; add, remove, change, and `none` mismatches fail with `tool_definitions_changed`. New lineages may define tools normally.
 
 A Responses result containing pending function calls may be used only to submit results for those calls. It cannot be used as a branch point until the suspended turn completes. The pending-tool lease remains exclusive across the two HTTP requests; matching tool results take over that lease, while unrelated continuation attempts receive `thread_busy`. Timeout interrupts the turn and releases the lease.
 
@@ -570,13 +570,13 @@ Metrics include request counts and latency, errors by stable code, active turns,
 
 ## Technology Baseline
 
-Verified on 2026-07-11:
+Initial baseline verified on 2026-07-11; the current Codex pin is verified by the generated protocol contract:
 
 - Node.js 26.5.0 Current;
 - Hono 4.12.30;
 - `@hono/node-server` 2.0.8;
 - Zod 4.4.3;
-- `@openai/codex` 0.144.1;
+- `@openai/codex` 0.145.0;
 - TypeScript 7.0.2;
 - Biome 2.5.3;
 - Vitest 4.1.10;

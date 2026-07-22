@@ -6,7 +6,7 @@
 
 **Architecture:** A Hono data plane translates strict OpenAI request shapes into a small `CodexHost` interface backed by a long-lived stdio JSON-RPC child. SQLite persists Responses lineage and leases; an in-memory tool bridge owns generation-bound suspended dynamic-tool calls. A loopback-only admin plane delegates device authentication and refresh to App Server.
 
-**Tech Stack:** Node.js 26.5.0, TypeScript 7.0.2, Hono 4.12.29, `@hono/node-server` 2.0.8, Zod 4.4.3, `@openai/codex` 0.144.1, built-in `node:sqlite`, Vitest 4.1.10, Biome 2.5.3, Bun 1.3.14, OpenAI JavaScript client 6.46.0, YAML 2.9.0 for manifest tests, Kubernetes.
+**Tech Stack:** Node.js 26.5.0, TypeScript 7.0.2, Hono 4.12.29, `@hono/node-server` 2.0.8, Zod 4.4.3, `@openai/codex` 0.145.0, built-in `node:sqlite`, Vitest 4.1.10, Biome 2.5.3, Bun 1.3.14, OpenAI JavaScript client 6.46.0, YAML 2.9.0 for manifest tests, Kubernetes.
 
 ## Global Constraints
 
@@ -94,7 +94,7 @@ Run:
 ```bash
 git init
 bun init -y
-bun add hono@4.12.29 @hono/node-server@2.0.8 zod@4.4.3 @openai/codex@0.144.1
+bun add hono@4.12.29 @hono/node-server@2.0.8 zod@4.4.3 @openai/codex@0.145.0
 bun add --dev typescript@7.0.2 @types/node@26.1.1 vitest@4.1.10 @biomejs/biome@2.5.3 npm-check-updates@22.2.9 openai@6.46.0
 ```
 
@@ -641,7 +641,7 @@ Expected: FAIL because schemas and translators do not exist.
 
 - [ ] **Step 5: Implement strict schemas and stable errors**
 
-Use `z.strictObject` for every request and nested object. Model supported tool choice as `z.enum(["auto", "none"])`; model only `{ type: "function", function: { name, description?, parameters } }` tools. Because Codex 0.144.1 generates `ReasoningEffort` as `string`, validate explicitly with `z.enum(["minimal", "low", "medium", "high", "xhigh"])`, then reject values absent from the selected model's `supportedReasoningEfforts`. Keep the internal request types inferred from the schemas.
+Use `z.strictObject` for every request and nested object. Model supported tool choice as `z.enum(["auto", "none"])`; model only `{ type: "function", function: { name, description?, parameters } }` tools. Because Codex 0.145.0 generates `ReasoningEffort` as `string`, validate explicitly with `z.enum(["minimal", "low", "medium", "high", "xhigh"])`, then reject values absent from the selected model's `supportedReasoningEfforts`. Keep the internal request types inferred from the schemas.
 
 Define the error envelope exactly:
 
@@ -1566,4 +1566,4 @@ git commit -m "test: add proxy release gate"
 - [ ] Child crash, pod restart, timeout, disconnect, lost continuation, queue saturation, and auth failure match stable error contracts.
 - [ ] Logs contain no prompts, images, tool payloads, auth headers, OAuth tokens, raw App Server events, or credential paths.
 - [ ] Container and Kubernetes checks prove non-root, read-only, capability-free, one-replica operation with protected storage.
-- [ ] Generated experimental App Server bindings match `@openai/codex` 0.144.1 and dependency drift is zero at release time.
+- [ ] Generated experimental App Server bindings match `@openai/codex` 0.145.0 and dependency drift is zero at release time.

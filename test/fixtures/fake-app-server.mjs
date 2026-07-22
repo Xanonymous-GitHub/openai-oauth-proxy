@@ -37,7 +37,7 @@ function thread(id, forkedFromId = null) {
     status: { type: "idle" },
     path: null,
     cwd: "/workspace",
-    cliVersion: "0.144.1",
+    cliVersion: "0.145.0",
     source: "appServer",
     threadSource: null,
     agentNickname: null,
@@ -130,7 +130,7 @@ function handleRequest({ id, method, params }) {
   if (method === "initialize") {
     initializeReceived = true;
     respond(id, {
-      userAgent: "fake-codex-app-server/0.144.1",
+      userAgent: "fake-codex-app-server/0.145.0",
       codexHome: "/tmp/fake-codex-home",
       platformFamily: "unix",
       platformOs: process.platform,

@@ -46,7 +46,7 @@ The example Secret is intentionally invalid and excluded from Kustomize. Never c
 ## Operations
 
 - Upgrade: publish and inspect an amd64/arm64 image, replace the immutable overlay digest, validate the rendered Kustomize overlay, then apply it.
-- Codex 0.144.1 continuation limitation: `dynamicTools` are set only by `thread/start`; `thread/resume` and `thread/fork` cannot replace them. A stored Responses continuation must therefore send the exact inherited effective function definitions and `tool_choice`. Adding, removing, changing, or switching to/from `none` is rejected before App Server work. New response lineages may define a new configuration.
+- Codex 0.145.0 continuation limitation: `dynamicTools` are set only by `thread/start`; `thread/resume` and `thread/fork` cannot replace them. A stored Responses continuation must therefore send the exact inherited effective function definitions and `tool_choice`. Adding, removing, changing, or switching to/from `none` is rejected before App Server work. New response lineages may define a new configuration.
 - Rollback: restore the previous immutable image digest and apply it. Database migrations must remain compatible with the restored release.
 - Logout: use the loopback admin page. Device login, refresh, and logout are delegated to App Server; the proxy does not parse credential files.
 - Probes: `/healthz` reports terminal supervisor health; `/readyz` additionally requires App Server and account readiness and is removed during drain/recovery.
@@ -57,7 +57,7 @@ The example Secret is intentionally invalid and excluded from Kustomize. Never c
 
 ## Verification
 
-The offline gate uses Node 26.5.0, Bun 1.3.14, Codex 0.144.1, the official OpenAI JavaScript client, a real fixture-provider App Server, real pinned Bifrost when Docker is available, and representative OpenCode/Hermes clients. External agent tests are explicitly skipped only when the corresponding binary is absent; CI installs pinned OpenCode 1.17.18 and Hermes Agent 0.15.2 so both are required there.
+The offline gate uses Node 26.5.0, Bun 1.3.14, Codex 0.145.0, the official OpenAI JavaScript client, a real fixture-provider App Server, real pinned Bifrost when Docker is available, and representative OpenCode/Hermes clients. External agent tests are explicitly skipped only when the corresponding binary is absent; CI installs pinned OpenCode 1.18.4 and Hermes Agent 0.19.0 on Python 3.13 so both are required there.
 
 Run `bun install --frozen-lockfile`, `bun run protocol:check`, `bun run deps:check`, and `bun run check`. Docker and Kubernetes release checks must be reported as passed or unavailable, never conflated.
 
