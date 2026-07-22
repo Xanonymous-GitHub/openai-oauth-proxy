@@ -70,6 +70,7 @@ export function fakeThread(overrides: Partial<Thread> = {}): Thread {
     cwd: "/workspace",
     cliVersion: "0.144.1",
     source: "appServer",
+    canAcceptDirectInput: true,
     threadSource: null,
     agentNickname: null,
     agentRole: null,

@@ -68,7 +68,7 @@ it.each([
   [
     {
       type: "amazonBedrock" as const,
-      credentialSource: "awsManaged" as const,
+      usesCodexManagedCredentials: true,
     },
     { type: "signed_out" },
   ],

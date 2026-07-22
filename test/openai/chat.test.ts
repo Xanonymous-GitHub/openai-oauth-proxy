@@ -124,6 +124,7 @@ function emitCompletion(
           total: {
             inputTokens: 100,
             cachedInputTokens: 0,
+            cacheWriteInputTokens: 0,
             outputTokens: 50,
             reasoningOutputTokens: 0,
             totalTokens: 150,
@@ -131,6 +132,7 @@ function emitCompletion(
           last: {
             inputTokens: 7,
             cachedInputTokens: 0,
+            cacheWriteInputTokens: 0,
             outputTokens: 5,
             reasoningOutputTokens: 0,
             totalTokens: 12,
