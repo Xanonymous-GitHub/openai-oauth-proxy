@@ -19,9 +19,9 @@
     "protocol:check": "bun run protocol:generate && git diff --exit-code -- src/codex/generated"
   },
   "dependencies": {
-    "@hono/node-server": "2.0.11",
+    "@hono/node-server": "2.0.12",
     "@openai/codex": "0.145.0",
-    "hono": "4.12.31",
+    "hono": "4.12.32",
     "zod": "4.4.3"
   },
   "devDependencies": {
@@ -41,12 +41,12 @@
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
     "jsdom": "29.1.1",
-    "npm-check-updates": "22.2.9",
-    "openai": "6.48.0",
-    "radix-ui": "1.6.4",
+    "npm-check-updates": "23.0.0",
+    "openai": "6.49.0",
+    "radix-ui": "1.6.7",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "shadcn": "4.14.0",
+    "shadcn": "4.15.0",
     "tailwind-merge": "3.6.0",
     "tailwindcss": "4.3.3",
     "typescript": "7.0.2",
