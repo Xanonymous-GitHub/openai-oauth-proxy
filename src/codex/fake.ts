@@ -60,6 +60,7 @@ export function fakeThread(overrides: Partial<Thread> = {}): Thread {
     parentThreadId: null,
     preview: "",
     ephemeral: false,
+    isPinned: false,
     historyMode: "legacy",
     modelProvider: "openai",
     createdAt: 1,
