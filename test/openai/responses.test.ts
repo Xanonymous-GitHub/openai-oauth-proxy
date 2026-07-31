@@ -349,7 +349,6 @@ function createToolFixture(
   const runner = new ActualTurnRunner({
     host,
     emptyWorkingDirectory: "/tmp/work",
-    neutralInstructions: "Use only the supplied interface.",
     interruptWaitMs: 10,
   });
   const app = createDataApp({

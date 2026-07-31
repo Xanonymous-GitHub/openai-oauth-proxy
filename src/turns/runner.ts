@@ -63,7 +63,6 @@ export interface TurnLifecycleCallbacks {
 export interface TurnRunnerOptions {
   host: CodexHost;
   emptyWorkingDirectory: string;
-  neutralInstructions: string;
   timeoutMs?: number;
   interruptWaitMs?: number;
   lifecycleWaitMs?: number;
@@ -275,7 +274,6 @@ function completedReasoning(
 export class TurnRunner {
   readonly #host: CodexHost;
   readonly #emptyWorkingDirectory: string;
-  readonly #neutralInstructions: string;
   readonly #timeoutMs: number;
   readonly #interruptWaitMs: number;
   readonly #lifecycleWaitMs: number;
@@ -289,7 +287,6 @@ export class TurnRunner {
   constructor(options: TurnRunnerOptions) {
     this.#host = options.host;
     this.#emptyWorkingDirectory = options.emptyWorkingDirectory;
-    this.#neutralInstructions = options.neutralInstructions;
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.#interruptWaitMs =
       options.interruptWaitMs ?? DEFAULT_INTERRUPT_WAIT_MS;
@@ -885,7 +882,8 @@ export class TurnRunner {
             cwd: command.cwd ?? this.#emptyWorkingDirectory,
             approvalPolicy: "never",
             sandbox: "read-only",
-            baseInstructions: this.#neutralInstructions,
+            // Prevent Codex from falling back to its coding-agent instructions.
+            baseInstructions: "",
             developerInstructions: null,
             ephemeral: false,
             serviceName: "openai_oauth_proxy",

@@ -219,7 +219,6 @@ function createFixture(
   const runner = new TurnRunner({
     host,
     emptyWorkingDirectory: "/tmp/work",
-    neutralInstructions: "Use only the supplied interface.",
     ...(options.timeoutMs === undefined
       ? {}
       : { timeoutMs: options.timeoutMs }),

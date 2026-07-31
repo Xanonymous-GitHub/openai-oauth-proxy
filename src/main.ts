@@ -27,7 +27,6 @@ import { Metrics } from "./operations/metrics.js";
 import {
   assertCodexConfiguration,
   prepareRuntimeFilesystem,
-  readNeutralInstructions,
 } from "./runtime-security.js";
 import { TurnRunner } from "./turns/runner.js";
 
@@ -161,7 +160,6 @@ export async function start(
   const turnRunner = new TurnRunner({
     host: lazyHost,
     emptyWorkingDirectory: EMPTY_WORKING_DIRECTORY,
-    neutralInstructions: readNeutralInstructions(),
     timeoutMs: config.turnTimeoutMs,
     toolTimeoutMs: config.toolTimeoutMs,
   });

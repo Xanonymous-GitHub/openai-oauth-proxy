@@ -16,7 +16,6 @@ import type { ProxyStreamEvent, TurnCommand } from "../../src/turns/events.js";
 import { TurnRunner } from "../../src/turns/runner.js";
 
 const emptyWorkingDirectory = "/tmp/openai-oauth-proxy-empty";
-const neutralInstructions = "Respond only through the supplied interface.";
 
 class EventQueue implements AsyncIterable<HostNotification> {
   readonly #values: HostNotification[] = [];
@@ -124,7 +123,6 @@ function createRunner(host: CodexHost, overrides = {}) {
   return new TurnRunner({
     host,
     emptyWorkingDirectory,
-    neutralInstructions,
     ...overrides,
   });
 }
@@ -537,7 +535,7 @@ describe("TurnRunner", () => {
     });
   });
 
-  it("hardens new threads and injects history plus newest developer instructions", async () => {
+  it("uses an empty instruction override and injects history plus newest developer instructions", async () => {
     const { events, host } = createHost();
     vi.mocked(host.turnStart).mockImplementation(async () => {
       emitCompletedTurn(events, "thread-1", "turn-1", "final", false);
@@ -561,7 +559,7 @@ describe("TurnRunner", () => {
         cwd: emptyWorkingDirectory,
         approvalPolicy: "never",
         sandbox: "read-only",
-        baseInstructions: neutralInstructions,
+        baseInstructions: "",
         developerInstructions: null,
         ephemeral: false,
         serviceName: "openai_oauth_proxy",

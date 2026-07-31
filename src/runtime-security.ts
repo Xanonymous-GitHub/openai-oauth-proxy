@@ -20,9 +20,6 @@ import { fileURLToPath } from "node:url";
 const BASELINE_CONFIG_PATH = fileURLToPath(
   new URL("../config/codex/config.toml", import.meta.url),
 );
-const NEUTRAL_INSTRUCTIONS_PATH = fileURLToPath(
-  new URL("../config/codex/neutral-instructions.md", import.meta.url),
-);
 
 interface RuntimeFilesystemOptions {
   codexHome: string;
@@ -136,8 +133,4 @@ export function assertCodexConfiguration(codexHome: string): void {
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
   }
-}
-
-export function readNeutralInstructions(): string {
-  return readFileSync(NEUTRAL_INSTRUCTIONS_PATH, "utf8");
 }
