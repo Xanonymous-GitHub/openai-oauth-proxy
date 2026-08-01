@@ -15,7 +15,7 @@ jobs:
       REQUIRE_EXTERNAL_AGENTS: "1"
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "26"
           cache: ""

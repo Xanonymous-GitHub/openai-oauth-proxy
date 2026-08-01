@@ -25,7 +25,7 @@ jobs:
           IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/openai-oauth-proxy"
           printf 'IMAGE=%s\n' "$IMAGE" >> "$GITHUB_ENV"
           printf 'image=%s\n' "$IMAGE" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "26"
           cache: ""
