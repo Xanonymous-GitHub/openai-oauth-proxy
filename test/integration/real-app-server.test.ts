@@ -29,6 +29,7 @@ describe("pinned real Codex App Server offline contract", () => {
       "inherited fixture tool result",
     );
     expect(result.toolOutputForwarded).toBe(true);
+    expect(result.rawEvents).toBe(true);
     expect(result.frameCounts).toMatchObject({
       requests: expect.any(Number),
       responses: expect.any(Number),

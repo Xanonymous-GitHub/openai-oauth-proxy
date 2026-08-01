@@ -45,11 +45,19 @@ function completionId(): string {
 function usageBody(usage: TokenUsage): {
   prompt_tokens: number;
   completion_tokens: number;
+  completion_tokens_details?: { reasoning_tokens: number };
   total_tokens: number;
 } {
   return {
     prompt_tokens: usage.inputTokens,
     completion_tokens: usage.outputTokens,
+    ...(usage.reasoningTokens === undefined
+      ? {}
+      : {
+          completion_tokens_details: {
+            reasoning_tokens: usage.reasoningTokens,
+          },
+        }),
     total_tokens: usage.totalTokens,
   };
 }
@@ -323,8 +331,7 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
         lastMessage?.role === "user"
           ? translateTurnInput(lastMessage.content)
           : [],
-      ...(request.reasoning_effort == null ||
-      request.reasoning_effort === "none"
+      ...(request.reasoning_effort == null
         ? {}
         : { effort: request.reasoning_effort }),
       ...(request.service_tier == null

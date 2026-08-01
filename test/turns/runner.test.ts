@@ -170,6 +170,7 @@ function emitCompletedTurn(
   text: string,
   usage = true,
   turnItems: ThreadItem[] = [],
+  rawUsage = true,
 ): void {
   events.push({
     method: "item/agentMessage/delta",
@@ -223,6 +224,24 @@ function emitCompletedTurn(
   });
   if (usage) {
     events.push({
+      method: "rawResponse/completed",
+      params: {
+        threadId,
+        turnId,
+        responseId: "response-1",
+        usage: rawUsage
+          ? {
+              totalTokens: 12,
+              inputTokens: 7,
+              cachedInputTokens: 0,
+              cacheWriteInputTokens: 0,
+              outputTokens: 5,
+              reasoningOutputTokens: 4,
+            }
+          : null,
+      },
+    });
+    events.push({
       method: "thread/tokenUsage/updated",
       params: {
         threadId,
@@ -234,7 +253,7 @@ function emitCompletedTurn(
             cachedInputTokens: 0,
             cacheWriteInputTokens: 0,
             outputTokens: 11,
-            reasoningOutputTokens: 0,
+            reasoningOutputTokens: 3,
           },
           last: {
             totalTokens: 12,
@@ -242,7 +261,7 @@ function emitCompletedTurn(
             cachedInputTokens: 0,
             cacheWriteInputTokens: 0,
             outputTokens: 5,
-            reasoningOutputTokens: 0,
+            reasoningOutputTokens: 3,
           },
           modelContextWindow: 128_000,
         },
@@ -278,7 +297,12 @@ describe("TurnRunner", () => {
       { type: "text.delta", delta: "delta" },
       {
         type: "usage",
-        usage: { inputTokens: 7, outputTokens: 5, totalTokens: 12 },
+        usage: {
+          inputTokens: 7,
+          outputTokens: 5,
+          reasoningTokens: 4,
+          totalTokens: 12,
+        },
       },
       {
         type: "completed",
@@ -288,7 +312,12 @@ describe("TurnRunner", () => {
           text: "authoritative final",
           finishReason: "stop",
           outputOrder: [{ type: "message" }],
-          usage: { inputTokens: 7, outputTokens: 5, totalTokens: 12 },
+          usage: {
+            inputTokens: 7,
+            outputTokens: 5,
+            reasoningTokens: 4,
+            totalTokens: 12,
+          },
         },
       },
     ]);
@@ -307,20 +336,6 @@ describe("TurnRunner", () => {
           itemId: "reasoning-1",
           contentIndex: 0,
           delta: "private raw delta",
-        },
-      });
-      events.push({
-        method: "rawResponseItem/completed",
-        params: {
-          threadId: "thread-1",
-          turnId: "turn-1",
-          item: {
-            type: "reasoning",
-            id: "raw-reasoning",
-            summary: [{ type: "summary_text", text: "raw summary" }],
-            content: [{ type: "reasoning_text", text: "private raw item" }],
-            encrypted_content: null,
-          },
         },
       });
       events.push({
@@ -357,6 +372,20 @@ describe("TurnRunner", () => {
         },
       });
       events.push({
+        method: "rawResponseItem/completed",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            type: "reasoning",
+            id: "reasoning-1",
+            summary: [{ type: "summary_text", text: "raw summary" }],
+            content: [{ type: "reasoning_text", text: "private raw item" }],
+            encrypted_content: "encrypted-reasoning",
+          },
+        },
+      });
+      events.push({
         method: "item/completed",
         params: {
           threadId: "thread-1",
@@ -382,7 +411,9 @@ describe("TurnRunner", () => {
     });
 
     const projected = await collect(
-      createRunner(host).stream(command({ summary: "concise" })),
+      createRunner(host).stream(
+        command({ summary: "concise", includeEncryptedReasoning: true }),
+      ),
     );
 
     expect(host.turnStart).toHaveBeenCalledWith(
@@ -406,6 +437,7 @@ describe("TurnRunner", () => {
         item: {
           id: "reasoning-1",
           summary: ["Authoritative summary."],
+          encryptedContent: "encrypted-reasoning",
         },
       },
       {
@@ -423,6 +455,7 @@ describe("TurnRunner", () => {
             {
               id: "reasoning-1",
               summary: ["Authoritative summary."],
+              encryptedContent: "encrypted-reasoning",
             },
           ],
         },
@@ -431,6 +464,52 @@ describe("TurnRunner", () => {
     expect(JSON.stringify(projected)).not.toContain("private reasoning");
     expect(JSON.stringify(projected)).not.toContain("private raw");
     expect(JSON.stringify(projected)).not.toContain("raw summary");
+  });
+
+  it("projects encrypted reasoning without exposing or requiring a summary", async () => {
+    const { events, host } = createHost();
+    vi.mocked(host.turnStart).mockImplementation(async () => {
+      events.push({
+        method: "rawResponseItem/completed",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            type: "reasoning",
+            id: "rs_reasoning-1",
+            summary: [],
+            encrypted_content: "encrypted-reasoning",
+          },
+        },
+      });
+      emitCompletedTurn(events, "thread-1", "turn-1", "answer", false);
+      return { turn: fakeTurn() };
+    });
+
+    const projected = await collect(
+      createRunner(host).stream(command({ includeEncryptedReasoning: true })),
+    );
+
+    expect(projected).toContainEqual({
+      type: "reasoning.completed",
+      item: {
+        id: "rs_reasoning-1",
+        summary: [],
+        encryptedContent: "encrypted-reasoning",
+      },
+    });
+    expect(projected.at(-1)).toMatchObject({
+      type: "completed",
+      result: {
+        reasoning: [
+          {
+            id: "rs_reasoning-1",
+            summary: [],
+            encryptedContent: "encrypted-reasoning",
+          },
+        ],
+      },
+    });
   });
 
   it("preserves output order for a reasoning summary recovered at completion", async () => {
@@ -535,6 +614,28 @@ describe("TurnRunner", () => {
     });
   });
 
+  it("does not replace exact null raw usage with sanitized usage", async () => {
+    const { events, host } = createHost();
+    vi.mocked(host.turnStart).mockImplementation(async () => {
+      emitCompletedTurn(events, "thread-1", "turn-1", "final", true, [], false);
+      return { turn: fakeTurn() };
+    });
+
+    const projected = await collect(createRunner(host).stream(command()));
+
+    expect(projected.some((event) => event.type === "usage")).toBe(false);
+    expect(projected.at(-1)).toEqual({
+      type: "completed",
+      result: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        text: "final",
+        finishReason: "stop",
+        outputOrder: [{ type: "message" }],
+      },
+    });
+  });
+
   it("uses an empty instruction override and injects history plus newest developer instructions", async () => {
     const { events, host } = createHost();
     vi.mocked(host.turnStart).mockImplementation(async () => {
@@ -565,6 +666,7 @@ describe("TurnRunner", () => {
         serviceName: "openai_oauth_proxy",
         environments: [],
         selectedCapabilityRoots: [],
+        experimentalRawEvents: true,
       }),
       expect.any(AbortSignal),
     );

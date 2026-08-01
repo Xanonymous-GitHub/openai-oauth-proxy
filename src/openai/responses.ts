@@ -94,9 +94,15 @@ export interface ProxyResponse {
         type: "reasoning";
         status: "in_progress" | "completed";
         summary: Array<{ type: "summary_text"; text: string }>;
+        encrypted_content?: string;
       }
   >;
-  usage?: { input_tokens: number; output_tokens: number; total_tokens: number };
+  usage?: {
+    input_tokens: number;
+    output_tokens: number;
+    output_tokens_details?: { reasoning_tokens: number };
+    total_tokens: number;
+  };
 }
 
 interface ResponseRecoveryDependencies {
@@ -304,7 +310,7 @@ function opaqueId(prefix: "resp" | "msg"): string {
 }
 
 function reasoningId(itemId: string): string {
-  return `rs_${itemId}`;
+  return itemId.startsWith("rs_") ? itemId : `rs_${itemId}`;
 }
 
 function reasoningResponseItem(
@@ -316,6 +322,9 @@ function reasoningResponseItem(
     type: "reasoning",
     status,
     summary: item.summary.map((text) => ({ type: "summary_text", text })),
+    ...(item.encryptedContent === undefined
+      ? {}
+      : { encrypted_content: item.encryptedContent }),
   };
 }
 
@@ -564,6 +573,7 @@ function assertOrdinaryRequest(request: ResponsesRequest): void {
       pendingCallIds.add(item.call_id);
       continue;
     }
+    if (item.type === "reasoning") continue;
     if (!pendingCallIds.delete(item.call_id)) {
       throw ProxyError.public(
         400,
@@ -750,6 +760,13 @@ function usageBody(usage: TokenUsage): NonNullable<ProxyResponse["usage"]> {
   return {
     input_tokens: usage.inputTokens,
     output_tokens: usage.outputTokens,
+    ...(usage.reasoningTokens === undefined
+      ? {}
+      : {
+          output_tokens_details: {
+            reasoning_tokens: usage.reasoningTokens,
+          },
+        }),
     total_tokens: usage.totalTokens,
   };
 }
@@ -1317,8 +1334,7 @@ export function createResponsesHandler(
       ...(request.instructions == null
         ? {}
         : { instructions: request.instructions }),
-      ...(request.reasoning?.effort == null ||
-      request.reasoning.effort === "none"
+      ...(request.reasoning?.effort == null
         ? {}
         : { effort: request.reasoning.effort }),
       ...(request.service_tier == null
@@ -1327,6 +1343,10 @@ export function createResponsesHandler(
       ...(request.reasoning?.summary == null
         ? {}
         : { summary: request.reasoning.summary }),
+      ...(request.store === false ||
+      request.include?.includes("reasoning.encrypted_content") === true
+        ? { includeEncryptedReasoning: true }
+        : {}),
       ...(request.text?.format?.type !== "json_schema"
         ? {}
         : { outputSchema: request.text.format.schema }),

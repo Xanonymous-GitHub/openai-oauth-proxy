@@ -418,9 +418,19 @@ const responseFunctionCallOutputSchema = z.strictObject({
   call_id: nonEmptyString,
   output: z.string(),
 });
+const responseReasoningSchema = z.strictObject({
+  type: z.literal("reasoning"),
+  id: nonEmptyString.optional(),
+  status: z.enum(["in_progress", "completed", "incomplete"]).optional(),
+  summary: z.array(
+    z.strictObject({ type: z.literal("summary_text"), text: z.string() }),
+  ),
+  encrypted_content: nonEmptyString.nullable().optional(),
+});
 
 export const responseInputItemSchema = z.union([
   responseMessageSchema,
+  responseReasoningSchema,
   responseFunctionCallSchema,
   responseFunctionCallOutputSchema,
 ]);
@@ -480,7 +490,6 @@ const responsesRequestSchema = z
     temperature: ignoredTemperatureSchema.optional(),
     // Compatibility no-op: Codex App Server cannot enforce this limit, but Responses clients send it by default.
     max_output_tokens: ignoredOutputTokenLimitSchema.optional(),
-    // Compatibility no-op: continuations stay server-side, so encrypted reasoning is neither needed nor exposed.
     include: z
       .array(
         z.enum([

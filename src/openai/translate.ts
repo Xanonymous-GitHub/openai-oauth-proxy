@@ -104,7 +104,14 @@ export function translateHistory(
       continue;
     }
 
-    if (message.type === "function_call") {
+    if (message.type === "reasoning") {
+      translated.push({
+        type: "reasoning",
+        ...(message.id === undefined ? {} : { id: message.id }),
+        summary: message.summary,
+        encrypted_content: message.encrypted_content ?? null,
+      });
+    } else if (message.type === "function_call") {
       translated.push({
         type: "function_call",
         ...(message.id === undefined ? {} : { id: message.id }),

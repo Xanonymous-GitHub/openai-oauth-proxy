@@ -17,6 +17,7 @@ export type ThreadAction =
 export interface TokenUsage {
   inputTokens: number;
   outputTokens: number;
+  reasoningTokens?: number;
   totalTokens: number;
 }
 
@@ -30,6 +31,7 @@ export interface TurnCommand {
   effort?: ReasoningEffort;
   serviceTier?: string;
   summary?: ReasoningSummary;
+  includeEncryptedReasoning?: boolean;
   outputSchema?: JsonValue;
   dynamicTools?: DynamicToolSpec[];
 }
@@ -37,6 +39,7 @@ export interface TurnCommand {
 export interface ReasoningSummaryItem {
   id: string;
   summary: string[];
+  encryptedContent?: string;
 }
 
 export type TurnOutputItem =
@@ -180,6 +183,8 @@ function eventIdentity(
     case "item/reasoning/summaryPartAdded":
     case "item/reasoning/summaryTextDelta":
     case "item/completed":
+    case "rawResponseItem/completed":
+    case "rawResponse/completed":
     case "thread/tokenUsage/updated":
       return {
         threadId: event.params.threadId,

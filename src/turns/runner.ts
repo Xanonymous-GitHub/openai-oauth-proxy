@@ -1,5 +1,6 @@
 import type { ResponseItem } from "../codex/generated/ResponseItem.js";
 import type { JsonValue } from "../codex/generated/serde_json/JsonValue.js";
+import type { TokenUsageBreakdown } from "../codex/generated/v2/TokenUsageBreakdown.js";
 import type { Turn } from "../codex/generated/v2/Turn.js";
 import type { CodexHost, HostNotification } from "../codex/host.js";
 import { CodexGenerationChangedError } from "../codex/transport.js";
@@ -13,6 +14,7 @@ import {
 import {
   eventDispatcherFor,
   type ProxyStreamEvent,
+  type ReasoningSummaryItem,
   type TokenUsage,
   type TurnCommand,
   type TurnEventSubscription,
@@ -238,11 +240,28 @@ class TurnAccumulator {
 function usageFrom(
   event: Extract<HostNotification, { method: "thread/tokenUsage/updated" }>,
 ): TokenUsage {
-  const usage = event.params.tokenUsage.last;
+  return usageFromBreakdown(event.params.tokenUsage.last);
+}
+
+function usageFromBreakdown(usage: TokenUsageBreakdown): TokenUsage {
   return {
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
+    reasoningTokens: usage.reasoningOutputTokens,
     totalTokens: usage.totalTokens,
+  };
+}
+
+function reasoningItem(
+  id: string,
+  summary: string[],
+  encryptedReasoning: ReadonlyMap<string, string>,
+): ReasoningSummaryItem {
+  const encryptedContent = encryptedReasoning.get(id);
+  return {
+    id,
+    summary,
+    ...(encryptedContent === undefined ? {} : { encryptedContent }),
   };
 }
 
@@ -354,11 +373,14 @@ export class TurnRunner {
       : drainController.signal;
     let text = "";
     let reasoning = new Map<string, string[]>();
+    let encryptedReasoning = new Map<string, string>();
+    let completedReasoningIds = new Set<string>();
     let observedReasoningIds = new Set<string>();
     let pendingReasoningEvents = new Map<string, PendingReasoningEvent[]>();
     const priorStageReasoningIds = new Set<string>();
     let outputOrder: TurnOutputItem[] = [];
     let usage: TokenUsage | undefined;
+    let rawUsageObserved = false;
     const release = lifecycle?.release ?? this.#release;
     const cleanup = lifecycle?.cleanup ?? this.#cleanup;
     const onSettled = lifecycle?.settled;
@@ -460,6 +482,14 @@ export class TurnRunner {
         accumulator.emit(event);
       }
       pendingReasoningEvents.delete(id);
+    };
+    const completeReasoning = (item: ReasoningSummaryItem): void => {
+      observeReasoning(item.id);
+      flushReasoning(item.id);
+      reasoning.set(item.id, item.summary);
+      if (completedReasoningIds.has(item.id)) return;
+      completedReasoningIds.add(item.id);
+      accumulator.emit({ type: "reasoning.completed", item });
     };
     let finalization: Promise<unknown | undefined> | undefined;
     const finalize = (): Promise<unknown | undefined> => {
@@ -657,8 +687,7 @@ export class TurnRunner {
               ? {}
               : {
                   reasoning: [...reasoning].map(([id, summary]) => ({
-                    id,
-                    summary,
+                    ...reasoningItem(id, summary, encryptedReasoning),
                   })),
                 }),
             ...(outputOrder.length === 0 ? {} : { outputOrder }),
@@ -693,9 +722,13 @@ export class TurnRunner {
               priorStageReasoningIds.add(id);
             }
             reasoning = new Map();
+            encryptedReasoning = new Map();
+            completedReasoningIds = new Set();
             observedReasoningIds = new Set();
             pendingReasoningEvents = new Map();
             outputOrder = [];
+            usage = undefined;
+            rawUsageObserved = false;
             const resumedSignal = toolLifecycle.signal
               ? nextSignal
                 ? AbortSignal.any([toolLifecycle.signal, nextSignal])
@@ -755,6 +788,43 @@ export class TurnRunner {
               });
             }
             break;
+          case "rawResponseItem/completed":
+            if (
+              command.includeEncryptedReasoning === true &&
+              event.params.item.type === "reasoning" &&
+              event.params.item.id !== undefined &&
+              event.params.item.encrypted_content !== null
+            ) {
+              encryptedReasoning.set(
+                event.params.item.id,
+                event.params.item.encrypted_content,
+              );
+              const summary = reasoning.get(event.params.item.id);
+              if (
+                summary !== undefined &&
+                !priorStageReasoningIds.has(event.params.item.id)
+              ) {
+                completeReasoning(
+                  reasoningItem(
+                    event.params.item.id,
+                    summary,
+                    encryptedReasoning,
+                  ),
+                );
+              } else if (
+                command.summary === undefined &&
+                !priorStageReasoningIds.has(event.params.item.id) &&
+                !reasoning.has(event.params.item.id)
+              ) {
+                const item = reasoningItem(
+                  event.params.item.id,
+                  event.params.item.summary.map(({ text }) => text),
+                  encryptedReasoning,
+                );
+                completeReasoning(item);
+              }
+            }
+            break;
           case "item/completed":
             if (event.params.item.type === "agentMessage") {
               observeMessage();
@@ -766,19 +836,32 @@ export class TurnRunner {
               if (priorStageReasoningIds.has(event.params.item.id)) {
                 break;
               }
-              const item = {
-                id: event.params.item.id,
-                summary: event.params.item.summary,
-              };
+              const item = reasoningItem(
+                event.params.item.id,
+                event.params.item.summary,
+                encryptedReasoning,
+              );
               observeReasoning(item.id);
-              flushReasoning(item.id);
               reasoning.set(item.id, item.summary);
-              accumulator.emit({ type: "reasoning.completed", item });
+              if (command.includeEncryptedReasoning !== true) {
+                completeReasoning(item);
+              } else if (item.encryptedContent !== undefined) {
+                completeReasoning(item);
+              }
             }
             break;
           case "thread/tokenUsage/updated":
-            usage = usageFrom(event);
-            accumulator.emit({ type: "usage", usage });
+            if (!rawUsageObserved) usage = usageFrom(event);
+            break;
+          case "rawResponse/completed":
+            rawUsageObserved = true;
+            usage =
+              event.params.usage === null
+                ? undefined
+                : usageFromBreakdown(event.params.usage);
+            if (usage !== undefined) {
+              accumulator.emit({ type: "usage", usage });
+            }
             break;
           case "turn/completed": {
             terminal = true;
@@ -792,12 +875,10 @@ export class TurnRunner {
               for (const [id, summary] of completed) {
                 if (!reasoning.has(id)) {
                   observeReasoning(id);
-                  flushReasoning(id);
-                  accumulator.emit({
-                    type: "reasoning.completed",
-                    item: { id, summary },
-                  });
                 }
+                completeReasoning(
+                  reasoningItem(id, summary, encryptedReasoning),
+                );
               }
               reasoning = completed;
             }
@@ -829,8 +910,7 @@ export class TurnRunner {
                 ? {}
                 : {
                     reasoning: [...reasoning].map(([id, summary]) => ({
-                      id,
-                      summary,
+                      ...reasoningItem(id, summary, encryptedReasoning),
                     })),
                   }),
               ...(outputOrder.length === 0 ? {} : { outputOrder }),
@@ -892,6 +972,7 @@ export class TurnRunner {
               ? {}
               : { dynamicTools: command.dynamicTools }),
             selectedCapabilityRoots: [],
+            experimentalRawEvents: true,
           },
           signal,
         );

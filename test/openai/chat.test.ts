@@ -126,7 +126,7 @@ function emitCompletion(
             cachedInputTokens: 0,
             cacheWriteInputTokens: 0,
             outputTokens: 50,
-            reasoningOutputTokens: 0,
+            reasoningOutputTokens: 3,
             totalTokens: 150,
           },
           last: {
@@ -134,7 +134,7 @@ function emitCompletion(
             cachedInputTokens: 0,
             cacheWriteInputTokens: 0,
             outputTokens: 5,
-            reasoningOutputTokens: 0,
+            reasoningOutputTokens: 3,
             totalTokens: 12,
           },
           modelContextWindow: 128_000,
@@ -370,7 +370,12 @@ describe("POST /v1/chat/completions", () => {
           finish_reason: "stop",
         },
       ],
-      usage: { prompt_tokens: 7, completion_tokens: 5, total_tokens: 12 },
+      usage: {
+        prompt_tokens: 7,
+        completion_tokens: 5,
+        completion_tokens_details: { reasoning_tokens: 3 },
+        total_tokens: 12,
+      },
     });
     expect(Number.isInteger(body.created)).toBe(true);
     expect(body.created).toBeGreaterThanOrEqual(before);
@@ -457,7 +462,7 @@ describe("POST /v1/chat/completions", () => {
     expect(host.toolCalls).not.toHaveBeenCalled();
   });
 
-  it("treats reasoning effort none as no override", async () => {
+  it("forwards reasoning effort none", async () => {
     const { app, host } = createFixture();
     const response = await post(app, {
       ...ordinaryRequest,
@@ -466,7 +471,7 @@ describe("POST /v1/chat/completions", () => {
 
     expect(response.status).toBe(200);
     expect(host.turnStart).toHaveBeenCalledWith(
-      expect.not.objectContaining({ effort: expect.anything() }),
+      expect.objectContaining({ effort: "none" }),
       expect.any(AbortSignal),
     );
   });
@@ -937,6 +942,7 @@ describe("POST /v1/chat/completions", () => {
     expect(chunks.at(-1)?.usage).toEqual({
       prompt_tokens: 7,
       completion_tokens: 5,
+      completion_tokens_details: { reasoning_tokens: 3 },
       total_tokens: 12,
     });
     expect(new Set(chunks.map(({ id }) => id)).size).toBe(1);

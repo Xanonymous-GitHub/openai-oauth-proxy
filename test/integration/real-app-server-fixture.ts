@@ -22,6 +22,7 @@ interface ContractResult {
   dynamicToolResult: string;
   inheritedDynamicToolResult: string;
   toolOutputForwarded: boolean;
+  rawEvents: boolean;
   frameCounts: { requests: number; responses: number; notifications: number };
   schemaErrors: string[];
 }
@@ -141,6 +142,13 @@ export function validateCapturedFrames(frames: CapturedFrames): string[] {
     if (frame.id !== undefined && typeof frame.method === "string") {
       validate("server", "request", method, "ServerRequest.json", frame);
     } else if (typeof frame.method === "string") {
+      // Codex emits these experimental notifications but omits them from its generated JSON Schema.
+      if (
+        method === "rawResponseItem/completed" ||
+        method === "rawResponse/completed"
+      ) {
+        continue;
+      }
       validate(
         "server",
         "notification",
@@ -210,7 +218,7 @@ async function startThread(host: CodexHost, cwd: string) {
     approvalPolicy: "never",
     sandbox: "read-only",
     ephemeral: false,
-    experimentalRawEvents: false,
+    experimentalRawEvents: true,
   });
 }
 
@@ -288,6 +296,7 @@ export async function runRealAppServerContract(): Promise<ContractResult> {
       host.turnStart({
         threadId: started.thread.id,
         input: [{ type: "text", text: "text fixture", text_elements: [] }],
+        effort: "none",
       }),
     );
     const text = await nextAgentText(events);
@@ -417,6 +426,12 @@ export async function runRealAppServerContract(): Promise<ContractResult> {
       inheritedDynamicToolResult,
       toolOutputForwarded: JSON.stringify(fake.requests.at(-1)).includes(
         "fixture tool result",
+      ),
+      rawEvents: frames.server.some(
+        (frame) =>
+          frame.method === "rawResponseItem/completed" &&
+          (frame.params as { turnId?: string } | undefined)?.turnId ===
+            turn.turn.id,
       ),
       frameCounts,
       schemaErrors,

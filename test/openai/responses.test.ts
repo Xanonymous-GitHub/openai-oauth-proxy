@@ -144,17 +144,25 @@ function createFixture(
         turnId,
         text: `answer-${call}`,
         finishReason: "stop",
-        ...(command.summary === undefined
+        ...(command.summary === undefined &&
+        command.includeEncryptedReasoning !== true
           ? {}
           : {
               reasoning: [
                 {
-                  id: `reasoning-${call}`,
-                  summary: [`summary-${call}`],
+                  id: `rs_reasoning-${call}`,
+                  summary:
+                    command.summary === undefined ? [] : [`summary-${call}`],
+                  encryptedContent: `encrypted-${call}`,
                 },
               ],
             }),
-        usage: { inputTokens: 7, outputTokens: 5, totalTokens: 12 },
+        usage: {
+          inputTokens: 7,
+          outputTokens: 5,
+          reasoningTokens: 3,
+          totalTokens: 12,
+        },
       };
     } finally {
       await Promise.all([
@@ -715,6 +723,7 @@ describe("POST /v1/responses", () => {
       ],
       instructions: "newest developer instruction",
       max_output_tokens: 128,
+      include: ["reasoning.encrypted_content"],
       reasoning: { effort: "high", summary: "concise" },
       text: {
         format: {
@@ -740,6 +749,7 @@ describe("POST /v1/responses", () => {
           type: "reasoning",
           status: "completed",
           summary: [{ type: "summary_text", text: "summary-1" }],
+          encrypted_content: "encrypted-1",
         },
         {
           type: "message",
@@ -748,7 +758,12 @@ describe("POST /v1/responses", () => {
           content: [{ type: "output_text", text: "answer-1", annotations: [] }],
         },
       ],
-      usage: { input_tokens: 7, output_tokens: 5, total_tokens: 12 },
+      usage: {
+        input_tokens: 7,
+        output_tokens: 5,
+        output_tokens_details: { reasoning_tokens: 3 },
+        total_tokens: 12,
+      },
     });
     expect(invocations[0]?.command).toMatchObject({
       instructions: "newest developer instruction",
@@ -761,12 +776,54 @@ describe("POST /v1/responses", () => {
     });
   });
 
+  it("returns encrypted reasoning for stateless replay without a summary", async () => {
+    const { app } = createFixture();
+    const response = await postResponse(app, {
+      model: "gpt-5.4",
+      input: "reason",
+      store: false,
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      output: [
+        {
+          id: "rs_reasoning-1",
+          type: "reasoning",
+          summary: [],
+          encrypted_content: "encrypted-1",
+        },
+        { type: "message" },
+      ],
+    });
+  });
+
   it("replays completed function calls and assistant output as history", async () => {
     const { app, invocations } = createFixture();
     const response = await postResponse(app, {
       model: "gpt-5.4",
       store: false,
       input: [
+        {
+          type: "reasoning",
+          id: "rs_history",
+          status: "completed",
+          summary: [{ type: "summary_text", text: "Prior reasoning." }],
+          encrypted_content: "encrypted-history",
+        },
+        {
+          type: "reasoning",
+          id: "rs_history_without_encrypted_content",
+          status: "completed",
+          summary: [],
+        },
+        {
+          type: "reasoning",
+          id: "rs_history_with_null_encrypted_content",
+          status: "completed",
+          summary: [],
+          encrypted_content: null,
+        },
         {
           type: "function_call",
           call_id: "call-history",
@@ -790,6 +847,24 @@ describe("POST /v1/responses", () => {
     expect(response.status).toBe(200);
     expect(invocations).toHaveLength(1);
     expect(invocations[0]?.command.history).toEqual([
+      {
+        type: "reasoning",
+        id: "rs_history",
+        summary: [{ type: "summary_text", text: "Prior reasoning." }],
+        encrypted_content: "encrypted-history",
+      },
+      {
+        type: "reasoning",
+        id: "rs_history_without_encrypted_content",
+        summary: [],
+        encrypted_content: null,
+      },
+      {
+        type: "reasoning",
+        id: "rs_history_with_null_encrypted_content",
+        summary: [],
+        encrypted_content: null,
+      },
       {
         type: "function_call",
         call_id: "call-history",
@@ -2006,19 +2081,16 @@ describe("POST /v1/responses", () => {
     expect(invocations).toHaveLength(2);
   });
 
-  it.each([
-    ["none", { reasoning: { effort: "none" } }],
-    ["omitted", {}],
-  ])("treats %s reasoning effort as no override", async (_name, options) => {
+  it("forwards reasoning effort none", async () => {
     const { app, invocations } = createFixture();
     const response = await postResponse(app, {
       model: "gpt-5.4",
       input: "reason",
-      ...options,
+      reasoning: { effort: "none" },
     });
 
     expect(response.status).toBe(200);
-    expect(invocations[0]?.command).not.toHaveProperty("effort");
+    expect(invocations[0]?.command.effort).toBe("none");
   });
 
   it("validates model and image support before acquiring a continuation lease", async () => {

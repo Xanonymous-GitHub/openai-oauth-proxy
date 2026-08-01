@@ -349,7 +349,7 @@ describe("official OpenAI JavaScript client compatibility", () => {
           messages: [{ role: "user", content: "no reasoning" }],
           reasoning_effort: "none",
         });
-        expect(fixture.commands.at(-1)).not.toHaveProperty("effort");
+        expect(fixture.commands.at(-1)?.effort).toBe("none");
       },
     },
     {
@@ -587,7 +587,7 @@ describe("official OpenAI JavaScript client compatibility", () => {
           input: "no reasoning",
           reasoning: { effort: "none" },
         });
-        expect(fixture.commands.at(-1)).not.toHaveProperty("effort");
+        expect(fixture.commands.at(-1)?.effort).toBe("none");
       },
     },
     {
