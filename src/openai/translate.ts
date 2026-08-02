@@ -105,9 +105,11 @@ export function translateHistory(
     }
 
     if (message.type === "reasoning") {
+      // Encrypted reasoning is bound to its upstream item ID and cannot be replayed without it.
+      if (message.id === undefined) continue;
       translated.push({
         type: "reasoning",
-        ...(message.id === undefined ? {} : { id: message.id }),
+        id: message.id,
         summary: message.summary,
         encrypted_content: message.encrypted_content ?? null,
       });

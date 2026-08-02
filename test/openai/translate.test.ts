@@ -157,6 +157,35 @@ describe("OpenAI input translation", () => {
     ]);
   });
 
+  it("drops reasoning history whose upstream item ID was lost", () => {
+    const request = parseResponsesRequest({
+      model: "gpt-5.4",
+      input: [
+        {
+          type: "reasoning",
+          summary: [{ type: "summary_text", text: "Unreplayable." }],
+          encrypted_content: "bound-to-a-missing-item-id",
+        },
+        {
+          id: "rs_exact",
+          type: "reasoning",
+          summary: [{ type: "summary_text", text: "Replayable." }],
+          encrypted_content: "bound-to-rs_exact",
+        },
+      ],
+    });
+
+    if (typeof request.input === "string") throw new Error("expected items");
+    expect(translateHistory(request.input)).toEqual([
+      {
+        id: "rs_exact",
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "Replayable." }],
+        encrypted_content: "bound-to-rs_exact",
+      },
+    ]);
+  });
+
   it("translates Responses final input content", () => {
     const imageUrl = "data:image/jpeg;base64,/9j/";
     expect(
