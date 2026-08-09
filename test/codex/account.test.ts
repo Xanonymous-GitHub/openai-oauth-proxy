@@ -150,7 +150,12 @@ it("correlates login completion IDs and never exposes protocol errors", async ()
   fixture.events.push({
     generation: 1,
     method: "account/login/completed",
-    params: { loginId: "other-login", success: true, error: null },
+    params: {
+      loginId: "other-login",
+      success: true,
+      error: null,
+      onboardingEntrypoint: null,
+    },
   });
   await flush();
   expect(fixture.accountRead).not.toHaveBeenCalled();
@@ -162,6 +167,7 @@ it("correlates login completion IDs and never exposes protocol errors", async ()
       loginId: "login-1",
       success: false,
       error: "access-token at /home/person/.codex/auth.json",
+      onboardingEntrypoint: null,
     },
   });
   await flush();
@@ -358,7 +364,12 @@ it("does not let account updates start reads while logout is active", async () =
   fixture.events.push({
     generation: 1,
     method: "account/login/completed",
-    params: { loginId: "login-1", success: true, error: null },
+    params: {
+      loginId: "login-1",
+      success: true,
+      error: null,
+      onboardingEntrypoint: null,
+    },
   });
   await flush();
 
@@ -477,6 +488,7 @@ it("serializes only safe fields from real account transitions", async () => {
       loginId: "login-1",
       success: false,
       error: "access_token from /home/person/.codex/auth.json",
+      onboardingEntrypoint: null,
     },
   });
   await flush();

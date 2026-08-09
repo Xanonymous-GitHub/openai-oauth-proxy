@@ -1,80 +1,80 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "GetAccountTokenUsageResponse",
-  "type": "object",
-  "required": [
-    "summary"
-  ],
-  "properties": {
-    "dailyUsageBuckets": {
-      "type": [
-        "array",
-        "null"
-      ],
-      "items": {
-        "$ref": "#/definitions/AccountTokenUsageDailyBucket"
-      }
-    },
-    "summary": {
-      "$ref": "#/definitions/AccountTokenUsageSummary"
-    }
-  },
   "definitions": {
     "AccountTokenUsageDailyBucket": {
-      "type": "object",
-      "required": [
-        "startDate",
-        "tokens"
-      ],
       "properties": {
         "startDate": {
           "type": "string"
         },
         "tokens": {
-          "type": "integer",
-          "format": "int64"
+          "format": "int64",
+          "type": "integer"
         }
-      }
+      },
+      "required": [
+        "startDate",
+        "tokens"
+      ],
+      "type": "object"
     },
     "AccountTokenUsageSummary": {
-      "type": "object",
       "properties": {
         "currentStreakDays": {
+          "format": "int64",
           "type": [
             "integer",
             "null"
-          ],
-          "format": "int64"
+          ]
         },
         "lifetimeTokens": {
+          "format": "int64",
           "type": [
             "integer",
             "null"
-          ],
-          "format": "int64"
+          ]
         },
         "longestRunningTurnSec": {
+          "format": "int64",
           "type": [
             "integer",
             "null"
-          ],
-          "format": "int64"
+          ]
         },
         "longestStreakDays": {
+          "format": "int64",
           "type": [
             "integer",
             "null"
-          ],
-          "format": "int64"
+          ]
         },
         "peakDailyTokens": {
+          "format": "int64",
           "type": [
             "integer",
             "null"
-          ],
-          "format": "int64"
+          ]
         }
-      }
+      },
+      "type": "object"
     }
-  }
+  },
+  "properties": {
+    "dailyUsageBuckets": {
+      "items": {
+        "$ref": "#/definitions/AccountTokenUsageDailyBucket"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "summary": {
+      "$ref": "#/definitions/AccountTokenUsageSummary"
+    }
+  },
+  "required": [
+    "summary"
+  ],
+  "title": "GetAccountTokenUsageResponse",
+  "type": "object"
 }

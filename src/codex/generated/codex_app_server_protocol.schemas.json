@@ -549,6 +549,30 @@
             },
             "method": {
               "enum": [
+                "thread/section/move"
+              ],
+              "title": "Thread/section/moveRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadSectionMoveParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/section/moveRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
                 "thread/settings/update"
               ],
               "title": "Thread/settings/updateRequestMethod",
@@ -827,6 +851,102 @@
             "params"
           ],
           "title": "Thread/listRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "threadSection/list"
+              ],
+              "title": "ThreadSection/listRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadSectionListParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "ThreadSection/listRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "threadSection/create"
+              ],
+              "title": "ThreadSection/createRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadSectionCreateParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "ThreadSection/createRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "threadSection/update"
+              ],
+              "title": "ThreadSection/updateRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadSectionUpdateParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "ThreadSection/updateRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "threadSection/delete"
+              ],
+              "title": "ThreadSection/deleteRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadSectionDeleteParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "ThreadSection/deleteRequest",
           "type": "object"
         },
         {
@@ -1164,6 +1284,30 @@
             "params"
           ],
           "title": "Plugin/listRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "plugin/search"
+              ],
+              "title": "Plugin/searchRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/PluginSearchParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Plugin/searchRequest",
           "type": "object"
         },
         {
@@ -4018,8 +4162,16 @@
           "description": "Opt into receiving experimental API methods and fields.",
           "type": "boolean"
         },
+        "extensions": {
+          "additionalProperties": true,
+          "description": "MCP extension settings declared by the app-server client.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "mcpServerOpenaiFormElicitation": {
-          "description": "Allow downstream MCP servers to request OpenAI extended form elicitations.",
+          "description": "Legacy opt-in for the `openai/form` MCP extension.\n\nNew clients should declare `openai/form` in [`Self::extensions`].",
           "type": "boolean"
         },
         "optOutNotificationMethods": {
@@ -6953,12 +7105,16 @@
       "properties": {
         "autoResolutionMs": {
           "default": null,
+          "description": "@deprecated Use `isBlocking` to decide whether the request should block.",
           "format": "uint64",
           "minimum": 0,
           "type": [
             "integer",
             "null"
           ]
+        },
+        "isBlocking": {
+          "type": "boolean"
         },
         "itemId": {
           "type": "string"
@@ -6977,6 +7133,7 @@
         }
       },
       "required": [
+        "isBlocking",
         "itemId",
         "questions",
         "threadId",
@@ -7124,6 +7281,16 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "onboardingEntrypoint": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/DesktopOnboardingEntrypoint"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "success": {
@@ -8655,7 +8822,7 @@
                 "type": "string"
               },
               "path": {
-                "$ref": "#/definitions/v2/AbsolutePathBuf"
+                "$ref": "#/definitions/v2/LegacyAppPathString"
               },
               "type": {
                 "enum": [
@@ -10371,6 +10538,12 @@
         "title": "DeprecationNoticeNotification",
         "type": "object"
       },
+      "DesktopOnboardingEntrypoint": {
+        "enum": [
+          "life_sciences"
+        ],
+        "type": "string"
+      },
       "DynamicToolCallOutputContentItem": {
         "oneOf": [
           {
@@ -10975,6 +11148,13 @@
       "ExternalAgentConfigDetectResponse": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
+          "connectors": {
+            "default": [],
+            "items": {
+              "$ref": "#/definitions/v2/ExternalAgentDetectedConnectorCandidate"
+            },
+            "type": "array"
+          },
           "items": {
             "items": {
               "$ref": "#/definitions/v2/ExternalAgentConfigMigrationItem"
@@ -11073,7 +11253,7 @@
           "itemTypeResults": {
             "description": "Completed results grouped by imported item type.",
             "items": {
-              "$ref": "#/definitions/v2/ExternalAgentConfigImportTypeResult"
+              "$ref": "#/definitions/v2/ExternalAgentConfigImportHistoryRecordTypeResultParams"
             },
             "type": "array"
           },
@@ -11100,6 +11280,68 @@
           "importId"
         ],
         "title": "ExternalAgentConfigImportHistoryRecordResponse",
+        "type": "object"
+      },
+      "ExternalAgentConfigImportHistoryRecordSuccessParams": {
+        "properties": {
+          "cwd": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "itemType": {
+            "$ref": "#/definitions/v2/ExternalAgentConfigMigrationItemType"
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "default": null,
+            "description": "Original title for an imported session, when available.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "itemType"
+        ],
+        "type": "object"
+      },
+      "ExternalAgentConfigImportHistoryRecordTypeResultParams": {
+        "properties": {
+          "failures": {
+            "items": {
+              "$ref": "#/definitions/v2/ExternalAgentConfigImportItemTypeFailure"
+            },
+            "type": "array"
+          },
+          "itemType": {
+            "$ref": "#/definitions/v2/ExternalAgentConfigMigrationItemType"
+          },
+          "successes": {
+            "items": {
+              "$ref": "#/definitions/v2/ExternalAgentConfigImportHistoryRecordSuccessParams"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "failures",
+          "itemType",
+          "successes"
+        ],
         "type": "object"
       },
       "ExternalAgentConfigImportItemTypeFailure": {
@@ -11163,6 +11405,14 @@
             ]
           },
           "target": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "default": null,
+            "description": "Original title for an imported session; null for other item types.",
             "type": [
               "string",
               "null"
@@ -11313,6 +11563,34 @@
           "COMMANDS",
           "MEMORY",
           "SESSIONS"
+        ],
+        "type": "string"
+      },
+      "ExternalAgentDetectedConnectorCandidate": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "sessionCount": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "source": {
+            "$ref": "#/definitions/v2/ExternalAgentDetectedConnectorSource"
+          }
+        },
+        "required": [
+          "name",
+          "sessionCount",
+          "source"
+        ],
+        "type": "object"
+      },
+      "ExternalAgentDetectedConnectorSource": {
+        "enum": [
+          "remoteMcpServersConfig",
+          "sessionToolUse"
         ],
         "type": "string"
       },
@@ -13919,6 +14197,7 @@
       },
       "McpAuthStatus": {
         "enum": [
+          "unknown",
           "unsupported",
           "notLoggedIn",
           "bearerToken",
@@ -14577,6 +14856,13 @@
           },
           "model": {
             "type": "string"
+          },
+          "modelSpecialty": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "serviceTiers": {
             "default": [],
@@ -15314,9 +15600,11 @@
           "pro",
           "prolite",
           "team",
+          "self_serve_business_prolite",
           "self_serve_business_usage_based",
           "business",
           "ent26",
+          "enterprise_cbp_automation",
           "enterprise_cbp_usage_based",
           "enterprise",
           "edu",
@@ -15428,6 +15716,15 @@
           "summary"
         ],
         "type": "object"
+      },
+      "PluginDisabledReason": {
+        "enum": [
+          "disabled_by_admin",
+          "plan_not_eligible",
+          "required_app_unavailable",
+          "unknown"
+        ],
+        "type": "string"
       },
       "PluginHookSummary": {
         "properties": {
@@ -15857,6 +16154,107 @@
         ],
         "title": "PluginReadResponse",
         "type": "object"
+      },
+      "PluginSearchParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cwds": {
+            "items": {
+              "$ref": "#/definitions/v2/AbsolutePathBuf"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "limit": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/PluginSearchScope"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "searchTerm": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "searchTerm"
+        ],
+        "title": "PluginSearchParams",
+        "type": "object"
+      },
+      "PluginSearchResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/definitions/v2/PluginSearchResult"
+            },
+            "type": "array"
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "PluginSearchResponse",
+        "type": "object"
+      },
+      "PluginSearchResult": {
+        "properties": {
+          "marketplaceName": {
+            "type": "string"
+          },
+          "marketplacePath": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/AbsolutePathBuf"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "plugin": {
+            "$ref": "#/definitions/v2/PluginSummary"
+          }
+        },
+        "required": [
+          "marketplaceName",
+          "plugin"
+        ],
+        "type": "object"
+      },
+      "PluginSearchScope": {
+        "enum": [
+          "global",
+          "workspace",
+          "personal"
+        ],
+        "type": "string"
       },
       "PluginShareCheckoutParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",
@@ -16399,6 +16797,29 @@
             "default": "AVAILABLE",
             "description": "Availability state for installing and using the plugin."
           },
+          "disabledReason": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/PluginDisabledReason"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Why the remote plugin is unavailable, when provided by plugin-service."
+          },
+          "eligiblePlanTypes": {
+            "default": null,
+            "description": "Raw plugin-service plan identifiers eligible to install the plugin.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "enabled": {
             "type": "boolean"
           },
@@ -16407,6 +16828,15 @@
           },
           "installed": {
             "type": "boolean"
+          },
+          "installedAt": {
+            "default": null,
+            "description": "Unix timestamp in seconds when the remote plugin was installed, when available.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "installPolicy": {
             "$ref": "#/definitions/v2/PluginInstallPolicy"
@@ -18063,6 +18493,15 @@
               },
               "call_id": {
                 "type": "string"
+              },
+              "encrypted_function_args": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
               },
               "id": {
                 "type": [
@@ -19900,11 +20339,6 @@
             "description": "Identifier for this thread. Codex-generated thread IDs are UUIDv7.",
             "type": "string"
           },
-          "isPinned": {
-            "default": false,
-            "description": "Whether the thread has been pinned by the user.",
-            "type": "boolean"
-          },
           "modelProvider": {
             "description": "Model provider used for this thread (for example, 'openai').",
             "type": "string"
@@ -19936,6 +20370,27 @@
           },
           "recencyAt": {
             "description": "Unix timestamp (in seconds) used for thread recency ordering.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "section": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ThreadSection"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The independently persisted section selected for this thread, if any."
+          },
+          "sectionEnteredAt": {
+            "default": null,
+            "description": "Unix timestamp in seconds when the thread entered its current section.",
             "format": "int64",
             "type": [
               "integer",
@@ -20075,7 +20530,7 @@
             ]
           },
           "cwd": {
-            "$ref": "#/definitions/v2/AbsolutePathBuf"
+            "$ref": "#/definitions/v2/LegacyAppPathString"
           },
           "itemId": {
             "type": "string"
@@ -21173,6 +21628,12 @@
                   "null"
                 ]
               },
+              "readOnlyHint": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
               "result": {
                 "anyOf": [
                   {
@@ -21508,6 +21969,13 @@
               "status": {
                 "type": "string"
               },
+              "transparentBackground": {
+                "default": null,
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
               "type": {
                 "enum": [
                   "imageGeneration"
@@ -21736,13 +22204,6 @@
             ],
             "description": "Optional cwd filter or filters; when set, only threads whose session cwd exactly matches one of these paths are returned."
           },
-          "isPinned": {
-            "description": "Optional pinned filter; when set, only threads matching this value are returned.",
-            "type": [
-              "boolean",
-              "null"
-            ]
-          },
           "limit": {
             "description": "Optional page size; defaults to a reasonable server-side value.",
             "format": "uint32",
@@ -21771,6 +22232,13 @@
           },
           "searchTerm": {
             "description": "Optional substring filter for the extracted thread title.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sectionId": {
+            "description": "Omit to include every section, set to `null` for unsectioned threads, or provide a section ID to return only threads in that section.",
             "type": [
               "string",
               "null"
@@ -21961,13 +22429,6 @@
               }
             ],
             "description": "Patch the stored Git metadata for this thread. Omit a field to leave it unchanged, set it to `null` to clear it, or provide a string to replace the stored value."
-          },
-          "isPinned": {
-            "description": "Patch whether this thread is pinned. Omit to leave the stored value unchanged.",
-            "type": [
-              "boolean",
-              "null"
-            ]
           },
           "threadId": {
             "type": "string"
@@ -22358,6 +22819,13 @@
               "null"
             ]
           },
+          "delegationAckFiller": {
+            "description": "Controls whether a realtime V3 delegation produces an acknowledgement filler. Omitted values preserve the Realtime API's default behavior.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "flushTranscriptTailOnSessionEnd": {
             "description": "Routes any transcript tail remaining at session end through Codex. Defaults to false. TODO: Remove this rollout knob once transcript-tail flushing is always enabled.",
             "type": [
@@ -22403,7 +22871,21 @@
               "null"
             ]
           },
+          "realtimeEndInstructions": {
+            "description": "Developer instructions given to the backing Codex model when this realtime session ends.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "realtimeSessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "realtimeStartInstructions": {
+            "description": "Developer instructions given to the backing Codex model when this realtime session starts.",
             "type": [
               "string",
               "null"
@@ -23054,7 +23536,7 @@
           "sortKey": {
             "anyOf": [
               {
-                "$ref": "#/definitions/v2/ThreadSortKey"
+                "$ref": "#/definitions/v2/ThreadSearchSortKey"
               },
               {
                 "type": "null"
@@ -23124,6 +23606,14 @@
         ],
         "type": "object"
       },
+      "ThreadSearchSortKey": {
+        "enum": [
+          "created_at",
+          "updated_at",
+          "recency_at"
+        ],
+        "type": "string"
+      },
       "ThreadSearchTextRange": {
         "description": "UTF-16 code-unit range within `snippet`.",
         "properties": {
@@ -23144,6 +23634,191 @@
           "end",
           "start"
         ],
+        "type": "object"
+      },
+      "ThreadSection": {
+        "description": "An independently persisted, user-visible thread section.",
+        "properties": {
+          "id": {
+            "description": "Opaque UUIDv7 identity that remains stable when the section is renamed.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The current user-visible section name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "ThreadSectionCreateParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "Parameters for creating an independently persisted thread section.",
+        "properties": {
+          "name": {
+            "description": "The user-visible name of the section.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "ThreadSectionCreateParams",
+        "type": "object"
+      },
+      "ThreadSectionCreateResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "The independently persisted section created by the server.",
+        "properties": {
+          "section": {
+            "$ref": "#/definitions/v2/ThreadSection"
+          }
+        },
+        "required": [
+          "section"
+        ],
+        "title": "ThreadSectionCreateResponse",
+        "type": "object"
+      },
+      "ThreadSectionDeleteParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "Parameters for deleting an independently persisted thread section.",
+        "properties": {
+          "sectionId": {
+            "description": "The stable, server-generated identity of the section to delete.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sectionId"
+        ],
+        "title": "ThreadSectionDeleteParams",
+        "type": "object"
+      },
+      "ThreadSectionDeleteResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "Successful deletion does not return additional section data.",
+        "title": "ThreadSectionDeleteResponse",
+        "type": "object"
+      },
+      "ThreadSectionListParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "Parameters for listing independently persisted thread sections.",
+        "properties": {
+          "cursor": {
+            "description": "Opaque pagination cursor returned by a previous call.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "description": "Maximum number of sections to return.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "title": "ThreadSectionListParams",
+        "type": "object"
+      },
+      "ThreadSectionListResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "One page of independently persisted thread sections.",
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/definitions/v2/ThreadSection"
+            },
+            "type": "array"
+          },
+          "nextCursor": {
+            "description": "Opaque cursor for the next page, or `null` when no sections remain.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "ThreadSectionListResponse",
+        "type": "object"
+      },
+      "ThreadSectionMoveParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "Parameters for moving a thread within a server-owned section ordering.",
+        "properties": {
+          "beforeThreadId": {
+            "description": "Existing thread to insert before; omission or null appends to the section.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sectionId": {
+            "description": "Destination section, or `null` to remove the thread from its section.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "threadId": {
+            "description": "Thread to move into, within, or out of a section.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sectionId",
+          "threadId"
+        ],
+        "title": "ThreadSectionMoveParams",
+        "type": "object"
+      },
+      "ThreadSectionMoveResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": "ThreadSectionMoveResponse",
+        "type": "object"
+      },
+      "ThreadSectionUpdateParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "Parameters for updating an independently persisted thread section.",
+        "properties": {
+          "name": {
+            "description": "The updated user-visible name of the section.",
+            "type": "string"
+          },
+          "sectionId": {
+            "description": "The stable, server-generated identity of the section to update.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "sectionId"
+        ],
+        "title": "ThreadSectionUpdateParams",
+        "type": "object"
+      },
+      "ThreadSectionUpdateResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "The independently persisted section after its name is updated.",
+        "properties": {
+          "section": {
+            "$ref": "#/definitions/v2/ThreadSection"
+          }
+        },
+        "required": [
+          "section"
+        ],
+        "title": "ThreadSectionUpdateResponse",
         "type": "object"
       },
       "ThreadSetNameParams": {
@@ -23436,7 +24111,8 @@
         "enum": [
           "created_at",
           "updated_at",
-          "recency_at"
+          "recency_at",
+          "section_position"
         ],
         "type": "string"
       },

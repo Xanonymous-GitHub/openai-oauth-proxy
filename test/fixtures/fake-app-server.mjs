@@ -29,6 +29,8 @@ function thread(id, forkedFromId = null) {
     parentThreadId: null,
     preview: "",
     ephemeral: false,
+    section: null,
+    sectionEnteredAt: null,
     historyMode: "legacy",
     modelProvider: "openai",
     createdAt: 1,
@@ -37,7 +39,7 @@ function thread(id, forkedFromId = null) {
     status: { type: "idle" },
     path: null,
     cwd: "/workspace",
-    cliVersion: "0.145.0",
+    cliVersion: "0.147.0",
     source: "appServer",
     threadSource: null,
     agentNickname: null,
@@ -130,7 +132,7 @@ function handleRequest({ id, method, params }) {
   if (method === "initialize") {
     initializeReceived = true;
     respond(id, {
-      userAgent: "fake-codex-app-server/0.145.0",
+      userAgent: "fake-codex-app-server/0.147.0",
       codexHome: "/tmp/fake-codex-home",
       platformFamily: "unix",
       platformOs: process.platform,
@@ -186,6 +188,7 @@ function handleRequest({ id, method, params }) {
             availabilityNux: null,
             displayName: "GPT-5.2 Codex",
             description: "Deterministic fake Codex model",
+            modelSpecialty: null,
             hidden: false,
             supportedReasoningEfforts: [],
             defaultReasoningEffort: "medium",
