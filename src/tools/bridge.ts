@@ -95,6 +95,7 @@ interface PendingTurn {
   context: ToolBridgeContext;
   expiresAt: number;
   calls: Map<string, PendingCall>;
+  results: Map<string, ToolResultInput>;
   invalidated: boolean;
   invalidation: Promise<void> | undefined;
   timer: ReturnType<typeof setTimeout> | undefined;
@@ -262,6 +263,7 @@ export class ToolBridge {
         context,
         expiresAt: this.#now() + this.#timeoutMs,
         calls: new Map(),
+        results: new Map(),
         invalidated: false,
         invalidation: undefined,
         timer: undefined,
@@ -335,6 +337,14 @@ export class ToolBridge {
         "messages",
       );
     }
+    if (turn.context.kind !== request.kind) {
+      throw ProxyError.public(
+        400,
+        "unknown_tool_call",
+        "Tool call was not found",
+        request.kind === "chat" ? "messages" : "input",
+      );
+    }
     if (turn.context.generation !== this.#host.generation) {
       this.invalidate(turn);
       return { type: "lost" };
@@ -379,12 +389,60 @@ export class ToolBridge {
           "input",
         );
       }
+      if (turn.results.has(result.callId)) {
+        throw ProxyError.public(
+          400,
+          "duplicate_tool_output",
+          "Each tool call may have only one output",
+          "input",
+        );
+      }
     }
-    const submitted = new Set(request.results.map((result) => result.callId));
+    const submitted = new Set([
+      ...turn.results.keys(),
+      ...request.results.map((result) => result.callId),
+    ]);
     const missingCallIds = [...turn.calls.keys()].filter(
       (callId) => !submitted.has(callId),
     );
     if (missingCallIds.length > 0) {
+      if (request.kind === "responses") {
+        for (const result of request.results) {
+          turn.results.set(result.callId, result);
+        }
+        this.scheduleExpiry(turn);
+        const calls = missingCallIds.flatMap((callId) => {
+          const call = turn.calls.get(callId);
+          return call ? [call.external] : [];
+        });
+        const result: TurnResult = {
+          threadId: turn.context.threadId,
+          turnId: turn.context.turnId,
+          text: "",
+          finishReason: "tool_calls",
+          toolCalls: calls,
+        };
+        return {
+          type: "continued",
+          ...(turn.context.responseId === undefined
+            ? {}
+            : { responseId: turn.context.responseId }),
+          threadId: turn.context.threadId,
+          turnId: turn.context.turnId,
+          result: Promise.resolve(result),
+          events: (async function* () {
+            for (const call of calls)
+              yield { type: "tool.call" as const, call };
+            yield { type: "completed" as const, result };
+          })(),
+          ...(turn.context.signal === undefined
+            ? {}
+            : { signal: turn.context.signal }),
+          ...(turn.context.finish === undefined
+            ? {}
+            : { finish: turn.context.finish }),
+        };
+      }
       return { type: "incomplete", missingCallIds };
     }
     if (submitted.size !== turn.calls.size) {
@@ -400,7 +458,7 @@ export class ToolBridge {
     if (turn.timer) clearTimeout(turn.timer);
     turn.timer = undefined;
     try {
-      for (const result of request.results) {
+      for (const result of [...turn.results.values(), ...request.results]) {
         const pending = turn.calls.get(result.callId);
         if (!pending) continue;
         pending.server.respond({
@@ -415,6 +473,7 @@ export class ToolBridge {
         turn.calls.delete(result.callId);
         this.#calls.delete(result.callId);
       }
+      turn.results.clear();
     } catch {
       this.invalidate(turn);
       return { type: "lost" };
@@ -577,6 +636,7 @@ export class ToolBridge {
     }
     for (const callId of turn.calls.keys()) this.#calls.delete(callId);
     turn.calls.clear();
+    turn.results.clear();
   }
 
   private turnKey(threadId: string, turnId: string): string {

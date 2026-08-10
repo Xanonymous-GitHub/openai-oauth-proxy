@@ -370,6 +370,80 @@ describe("ToolBridge", () => {
     ).rejects.toMatchObject({ status: 400, code: "duplicate_tool_output" });
   });
 
+  it("buffers partial Responses outputs and re-exposes pending calls", async () => {
+    const { bridge } = createBridge();
+    const turn = context({ kind: "responses", responseId: "resp-1" });
+    const first = serverCall("rpc-1", "first");
+    const second = serverCall("rpc-2", "second");
+    const externalFirst = bridge.register(first, turn);
+    const externalSecond = bridge.register(second, turn);
+
+    const partial = await bridge.continue({
+      kind: "responses",
+      responseId: "resp-1",
+      toolFingerprint: "tools-v1",
+      results: [{ callId: externalFirst.id, output: "one" }],
+    });
+
+    expect(partial.type).toBe("continued");
+    if (partial.type !== "continued") throw new Error("not continued");
+    await expect(partial.result).resolves.toMatchObject({
+      finishReason: "tool_calls",
+      toolCalls: [externalSecond],
+    });
+    expect(first.respond).not.toHaveBeenCalled();
+    expect(second.respond).not.toHaveBeenCalled();
+    expect(turn.resume).not.toHaveBeenCalled();
+
+    await expect(
+      bridge.continue({
+        kind: "responses",
+        responseId: "resp-1",
+        toolFingerprint: "tools-v1",
+        results: [{ callId: externalSecond.id, output: "two" }],
+      }),
+    ).resolves.toMatchObject({ type: "continued" });
+    expect(turn.resume).toHaveBeenCalledOnce();
+    expect(first.respond).toHaveBeenCalledWith({
+      success: true,
+      contentItems: [{ type: "inputText", text: "one" }],
+    });
+    expect(second.respond).toHaveBeenCalledWith({
+      success: true,
+      contentItems: [{ type: "inputText", text: "two" }],
+    });
+  });
+
+  it("does not buffer a Responses output into a Chat turn", async () => {
+    const { bridge } = createBridge();
+    const turn = context({ kind: "chat" });
+    const first = serverCall("rpc-1", "first");
+    const second = serverCall("rpc-2", "second");
+    const externalFirst = bridge.register(first, turn);
+    const externalSecond = bridge.register(second, turn);
+
+    await expect(
+      bridge.continue({
+        kind: "responses",
+        toolFingerprint: "tools-v1",
+        results: [{ callId: externalFirst.id, output: "one" }],
+      }),
+    ).rejects.toMatchObject({ status: 400, code: "unknown_tool_call" });
+
+    await expect(
+      bridge.continue({
+        kind: "chat",
+        toolFingerprint: "tools-v1",
+        results: [
+          { callId: externalFirst.id, output: "one" },
+          { callId: externalSecond.id, output: "two" },
+        ],
+      }),
+    ).resolves.toMatchObject({ type: "continued" });
+    expect(first.respond).toHaveBeenCalledOnce();
+    expect(second.respond).toHaveBeenCalledOnce();
+  });
+
   it("sanitizes failed client tool results", async () => {
     const { bridge } = createBridge();
     const turn = context();

@@ -1074,6 +1074,136 @@ describe("POST /v1/responses", () => {
     expect(fixture.host.toolCalls).toHaveBeenCalledOnce();
   });
 
+  it("re-exposes a late parallel call during a stateless streamed continuation", async () => {
+    const fixture = createToolFixture();
+    let responses = 0;
+    const respond = vi.fn(() => {
+      responses += 1;
+      if (responses === 2) fixture.complete("late calls complete");
+    });
+    const serverCall = (id: string, tool: string): PendingServerToolCall => ({
+      generation: 1,
+      id,
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        callId: `internal-${id}`,
+        namespace: null,
+        tool,
+        arguments: {},
+      },
+      respond,
+      reject: vi.fn(),
+    });
+    vi.mocked(fixture.host.turnStart).mockImplementationOnce(async () => {
+      fixture.tools.push(serverCall("one", "first"));
+      return { turn: fakeTurn() };
+    });
+    const definitions = ["first", "second"].map((name) => ({
+      type: "function" as const,
+      name,
+      parameters: { type: "object" },
+    }));
+    const completedResponse = async (response: Response) => {
+      const frames = (await response.text()).trim().split("\n\n");
+      const last = frames.at(-1)?.split("\n")[1]?.replace("data: ", "");
+      return JSON.parse(last ?? "null").response as {
+        output: Array<{
+          call_id?: string;
+          name?: string;
+          arguments?: string;
+          content?: Array<{ text: string }>;
+        }>;
+      };
+    };
+
+    const firstResponse = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      input: "start",
+      store: false,
+      stream: true,
+      tools: definitions,
+    });
+    const firstBody = await completedResponse(firstResponse);
+    const firstCallId = firstBody.output[0]?.call_id ?? "missing";
+
+    fixture.tools.push(serverCall("two", "second"));
+    await vi.waitFor(() => expect(fixture.runner.tools.pending).toBe(2));
+
+    const partialResponse = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      input: [
+        { role: "user", content: "start" },
+        {
+          type: "function_call",
+          call_id: firstCallId,
+          name: "first",
+          arguments: "{}",
+        },
+        {
+          type: "function_call_output",
+          call_id: firstCallId,
+          output: "one",
+        },
+      ],
+      store: false,
+      stream: true,
+      tools: definitions,
+    });
+
+    expect(partialResponse.status).toBe(200);
+    const partialBody = await completedResponse(partialResponse);
+    expect(partialBody.output).toMatchObject([
+      {
+        type: "function_call",
+        call_id: expect.stringMatching(/^call_g1_/),
+        name: "second",
+      },
+    ]);
+    expect(respond).not.toHaveBeenCalled();
+    const secondCallId = partialBody.output[0]?.call_id ?? "missing";
+
+    const finalResponse = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      input: [
+        { role: "user", content: "start" },
+        {
+          type: "function_call",
+          call_id: firstCallId,
+          name: "first",
+          arguments: "{}",
+        },
+        {
+          type: "function_call_output",
+          call_id: firstCallId,
+          output: "one",
+        },
+        {
+          type: "function_call",
+          call_id: secondCallId,
+          name: "second",
+          arguments: "{}",
+        },
+        {
+          type: "function_call_output",
+          call_id: secondCallId,
+          output: "two",
+        },
+      ],
+      store: false,
+      stream: true,
+      tools: definitions,
+    });
+
+    expect(finalResponse.status).toBe(200);
+    const finalBody = await completedResponse(finalResponse);
+    expect(finalBody.output).toMatchObject([
+      { content: [{ text: "late calls complete" }] },
+    ]);
+    expect(respond).toHaveBeenCalledTimes(2);
+    expect(fixture.host.turnStart).toHaveBeenCalledOnce();
+  });
+
   it("continues multi-round store=false tool calls by trailing call IDs", async () => {
     const fixture = createToolFixture();
     const secondRespond = vi.fn(() => fixture.complete("stateless complete"));
