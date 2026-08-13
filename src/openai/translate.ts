@@ -34,11 +34,13 @@ function messageContent(
     if (
       part.type === "text" ||
       part.type === "input_text" ||
-      part.type === "output_text"
+      part.type === "output_text" ||
+      part.type === "refusal"
     ) {
+      const text = part.type === "refusal" ? part.refusal : part.text;
       return role === "assistant"
-        ? { type: "output_text", text: part.text }
-        : { type: "input_text", text: part.text };
+        ? { type: "output_text", text }
+        : { type: "input_text", text };
     }
     if (part.type === "image_url") {
       return {
@@ -86,7 +88,7 @@ export function translateHistory(
           content,
           ...(message.role !== "assistant" ||
           !("phase" in message) ||
-          message.phase === undefined
+          message.phase == null
             ? {}
             : { phase: message.phase }),
         });
@@ -111,6 +113,7 @@ export function translateHistory(
         type: "reasoning",
         id: message.id,
         summary: message.summary,
+        ...(message.content === undefined ? {} : { content: message.content }),
         encrypted_content: message.encrypted_content ?? null,
       });
     } else if (message.type === "function_call") {

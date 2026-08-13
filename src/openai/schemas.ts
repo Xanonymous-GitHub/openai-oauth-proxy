@@ -108,22 +108,42 @@ const assistantToolCallSchema = z.strictObject({
   }),
 });
 
+const chatRefusalPartSchema = z.strictObject({
+  type: z.literal("refusal"),
+  refusal: z.string(),
+});
 const systemMessageSchema = z.strictObject({
   role: z.literal("system"),
   content: chatTextContentSchema,
+  name: z.string().optional(),
 });
 const developerMessageSchema = z.strictObject({
   role: z.literal("developer"),
   content: chatTextContentSchema,
+  name: z.string().optional(),
 });
 const userMessageSchema = z.strictObject({
   role: z.literal("user"),
   content: chatUserContentSchema,
+  name: z.string().optional(),
 });
 const assistantMessageSchema = z
   .strictObject({
     role: z.literal("assistant"),
-    content: z.string().nullable().optional(),
+    content: z
+      .union([
+        z.string(),
+        z.array(
+          z.discriminatedUnion("type", [
+            chatTextPartSchema,
+            chatRefusalPartSchema,
+          ]),
+        ),
+      ])
+      .nullable()
+      .optional(),
+    refusal: z.string().nullable().optional(),
+    name: z.string().optional(),
     tool_calls: z.array(assistantToolCallSchema).min(1).optional(),
   })
   .superRefine((message, context) => {
@@ -138,7 +158,14 @@ const assistantMessageSchema = z
 const toolMessageSchema = z.strictObject({
   role: z.literal("tool"),
   tool_call_id: nonEmptyString,
-  content: z.string(),
+  // Chat allows structured tool output; Codex App Server consumes plain text.
+  content: z
+    .union([z.string(), z.array(chatTextPartSchema)])
+    .transform((content) =>
+      typeof content === "string"
+        ? content
+        : content.map((part) => part.text).join("\n"),
+    ),
   name: nonEmptyString.optional(),
 });
 
@@ -156,6 +183,7 @@ const chatFunctionToolSchema = z.strictObject({
     name: nonEmptyString,
     description: z.string().optional(),
     parameters: jsonObjectSchema.optional(),
+    strict: z.boolean().nullable().optional(),
   }),
 });
 const legacyChatFunctionSchema = z.strictObject({
@@ -311,24 +339,33 @@ const chatRequestSchema = z
     }
   });
 
+const promptCacheBreakpointSchema = z.strictObject({
+  mode: z.literal("explicit"),
+});
+const responseImageDetailSchema = z.enum(["auto", "low", "high", "original"]);
 const responseInputTextSchema = z.strictObject({
   type: z.literal("input_text"),
   text: z.string(),
+  // Compatibility no-op: Codex App Server owns upstream prompt-cache routing.
+  prompt_cache_breakpoint: promptCacheBreakpointSchema.optional(),
 });
 const responseOutputTextSchema = z.strictObject({
   type: z.literal("output_text"),
   text: z.string(),
-  annotations: z.array(z.never()).optional(),
-  logprobs: z.array(z.never()).optional(),
+  // Output-item metadata accepted for replay; annotations and logprobs are not model-visible.
+  annotations: z.array(jsonObjectSchema).nullable().optional(),
+  logprobs: z.array(jsonObjectSchema).nullable().optional(),
+});
+const responseRefusalSchema = z.strictObject({
+  type: z.literal("refusal"),
+  refusal: z.string(),
 });
 const responseInputImageSchema = z.strictObject({
   type: z.literal("input_image"),
-  file_id: z.never().optional(),
+  file_id: z.null().optional(),
   image_url: dataImageUrlSchema,
-  detail: imageDetailSchema.optional(),
-});
-const promptCacheBreakpointSchema = z.strictObject({
-  mode: z.literal("explicit"),
+  detail: responseImageDetailSchema.optional(),
+  prompt_cache_breakpoint: promptCacheBreakpointSchema.optional(),
 });
 const responsePromptValueSchema = z.union([
   z.string(),
@@ -367,34 +404,42 @@ const responseUserContentSchema = z.union([
   z.string(),
   z.array(responseUserContentPartSchema),
 ]);
-const responseSystemMessageSchema = z.strictObject({
+// Output-item metadata accepted for replay; none of it is model-visible history.
+const responseItemStatusSchema = z
+  .enum(["in_progress", "completed", "incomplete"])
+  .nullable()
+  .optional();
+const responseMessageMetadata = {
+  id: nonEmptyString.optional(),
   type: z.literal("message").optional(),
+  status: responseItemStatusSchema,
+  phase: z.enum(["commentary", "final_answer"]).nullable().optional(),
+};
+const responseSystemMessageSchema = z.strictObject({
+  ...responseMessageMetadata,
   role: z.literal("system"),
   content: responseTextContentSchema,
 });
 const responseDeveloperMessageSchema = z.strictObject({
-  type: z.literal("message").optional(),
+  ...responseMessageMetadata,
   role: z.literal("developer"),
   content: responseTextContentSchema,
 });
 const responseUserMessageSchema = z.strictObject({
-  type: z.literal("message").optional(),
+  ...responseMessageMetadata,
   role: z.literal("user"),
   content: responseUserContentSchema,
 });
 const responseAssistantMessageSchema = z.strictObject({
-  id: nonEmptyString.optional(),
-  type: z.literal("message").optional(),
+  ...responseMessageMetadata,
   role: z.literal("assistant"),
-  // Output-item metadata accepted for replay; status is validated but is not model-visible history.
-  status: z.enum(["in_progress", "completed", "incomplete"]).optional(),
-  phase: z.enum(["commentary", "final_answer"]).optional(),
   content: z.union([
     z.string(),
     z.array(
       z.discriminatedUnion("type", [
         responseInputTextSchema,
         responseOutputTextSchema,
+        responseRefusalSchema,
       ]),
     ),
   ]),
@@ -405,28 +450,90 @@ const responseMessageSchema = z.discriminatedUnion("role", [
   responseUserMessageSchema,
   responseAssistantMessageSchema,
 ]);
+// Tool-call provenance accepted for replay; the proxy never routes on it.
+const responseToolCallerSchema = jsonObjectSchema.nullable().optional();
 const responseFunctionCallSchema = z.strictObject({
   type: z.literal("function_call"),
   id: nonEmptyString.optional(),
   call_id: nonEmptyString,
   name: nonEmptyString,
   arguments: z.string(),
+  status: responseItemStatusSchema,
+  namespace: z.string().nullable().optional(),
+  caller: responseToolCallerSchema,
 });
 const responseFunctionCallOutputSchema = z.strictObject({
   type: z.literal("function_call_output"),
   id: nonEmptyString.optional(),
   call_id: nonEmptyString,
-  output: z.string(),
+  // Responses allows structured tool output; Codex App Server consumes plain text.
+  output: z
+    .union([z.string(), z.array(responseInputTextSchema)])
+    .transform((output) =>
+      typeof output === "string"
+        ? output
+        : output.map((part) => part.text).join("\n"),
+    ),
+  status: responseItemStatusSchema,
+  name: z.string().nullable().optional(),
+  namespace: z.string().nullable().optional(),
+  caller: responseToolCallerSchema,
 });
 const responseReasoningSchema = z.strictObject({
   type: z.literal("reasoning"),
   id: nonEmptyString.optional(),
-  status: z.enum(["in_progress", "completed", "incomplete"]).optional(),
-  summary: z.array(
-    z.strictObject({ type: z.literal("summary_text"), text: z.string() }),
-  ),
+  status: responseItemStatusSchema,
+  summary: z
+    .array(
+      z.strictObject({ type: z.literal("summary_text"), text: z.string() }),
+    )
+    .default([]),
+  content: z
+    .array(
+      z.strictObject({
+        type: z.enum(["reasoning_text", "text"]),
+        text: z.string(),
+      }),
+    )
+    .optional(),
   encrypted_content: nonEmptyString.nullable().optional(),
 });
+
+// Responses item types the Codex App Server cannot replay. They are accepted so
+// agent clients that round-trip their own history keep working, then dropped
+// before translation instead of failing the whole request.
+const droppedInputItemTypes = [
+  "additional_tools",
+  "apply_patch_call",
+  "apply_patch_call_output",
+  "code_interpreter_call",
+  "compaction",
+  "compaction_trigger",
+  "computer_call",
+  "computer_call_output",
+  "custom_tool_call",
+  "custom_tool_call_output",
+  "file_search_call",
+  "image_generation_call",
+  "item_reference",
+  "local_shell_call",
+  "local_shell_call_output",
+  "mcp_approval_request",
+  "mcp_approval_response",
+  "mcp_call",
+  "mcp_list_tools",
+  "program",
+  "program_output",
+  "shell_call",
+  "shell_call_output",
+  "tool_search_call",
+  "tool_search_output",
+  "web_search_call",
+] as const;
+const droppedInputItem = Symbol("dropped-responses-input-item");
+const droppedInputItemSchema = z
+  .looseObject({ type: z.enum(droppedInputItemTypes) })
+  .transform(() => droppedInputItem);
 
 export const responseInputItemSchema = z.union([
   responseMessageSchema,
@@ -435,10 +542,22 @@ export const responseInputItemSchema = z.union([
   responseFunctionCallOutputSchema,
 ]);
 
+const responseInputSchema = z.union([
+  z.string(),
+  z
+    .array(z.union([responseInputItemSchema, droppedInputItemSchema]))
+    .transform((items) =>
+      items.filter(
+        (item): item is z.infer<typeof responseInputItemSchema> =>
+          item !== droppedInputItem,
+      ),
+    ),
+]);
+
 const responsesRequestSchema = z
   .strictObject({
     model: nonEmptyString,
-    input: z.union([z.string(), z.array(responseInputItemSchema)]),
+    input: responseInputSchema,
     instructions: z.string().nullable().optional(),
     stream: z.boolean().nullable().optional(),
     previous_response_id: nonEmptyString.nullable().optional(),
@@ -486,6 +605,8 @@ const responsesRequestSchema = z
     prompt_cache_retention: promptCacheRetentionSchema.optional(),
     safety_identifier: z.string().max(64).optional(),
     user: z.string().optional(),
+    // Compatibility no-op: Codex clients tag turns with session/window identifiers the proxy never forwards.
+    client_metadata: jsonObjectSchema.nullable().optional(),
     // Compatibility no-op: Codex App Server has no per-turn sampling temperature override.
     temperature: ignoredTemperatureSchema.optional(),
     // Compatibility no-op: Codex App Server cannot enforce this limit, but Responses clients send it by default.
@@ -511,6 +632,13 @@ const responsesRequestSchema = z
       .strictObject({
         effort: reasoningEffortSchema.nullable().optional(),
         summary: reasoningSummarySchema.nullable().optional(),
+        // Compatibility no-ops: Codex App Server owns reasoning replay and execution mode.
+        context: z
+          .enum(["auto", "current_turn", "all_turns"])
+          .nullable()
+          .optional(),
+        generate_summary: reasoningSummarySchema.nullable().optional(),
+        mode: z.string().nullable().optional(),
       })
       .nullable()
       .optional(),

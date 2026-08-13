@@ -884,6 +884,70 @@ describe("POST /v1/responses", () => {
     ]);
   });
 
+  it("serves a Codex CLI turn by dropping items the App Server cannot replay", async () => {
+    const { app, invocations } = createFixture();
+    const response = await postResponse(app, {
+      model: "gpt-5.4",
+      store: false,
+      stream: false,
+      parallel_tool_calls: false,
+      tool_choice: "auto",
+      include: ["reasoning.encrypted_content"],
+      prompt_cache_key: "019ffa20-1407-7aa0-9760-baf1326e5c73",
+      reasoning: { effort: "high", context: "all_turns" },
+      text: { verbosity: "low" },
+      client_metadata: {
+        session_id: "019ffa20-1407-7aa0-9760-baf1326e5c73",
+        turn_id: "019ffa20-145b-7191-bb3e-dcb5feb31026",
+      },
+      input: [
+        {
+          type: "additional_tools",
+          role: "developer",
+          tools: [
+            {
+              type: "namespace",
+              name: "functions",
+              description: "",
+              tools: [],
+            },
+          ],
+        },
+        {
+          type: "message",
+          role: "developer",
+          content: [{ type: "input_text", text: "You are Codex." }],
+        },
+        {
+          type: "message",
+          id: "msg_019ffa20-1464-7783-9eb2-c2e7fd507de4",
+          role: "user",
+          content: [{ type: "input_text", text: "<environment_context/>" }],
+        },
+        {
+          type: "message",
+          id: "msg_019ffa20-1485-7763-ad8e-f342c6779b76",
+          role: "user",
+          content: [{ type: "input_text", text: "say hi" }],
+        },
+      ],
+    });
+
+    expect(response.status).toBe(200);
+    expect(invocations[0]?.command.history).toEqual([
+      {
+        type: "message",
+        role: "developer",
+        content: [{ type: "input_text", text: "You are Codex." }],
+      },
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "<environment_context/>" }],
+      },
+    ]);
+  });
+
   it("durably suspends and completes a function call on the original response turn", async () => {
     const fixture = createToolFixture();
     const respond = vi.fn(() => fixture.complete("weather complete"));

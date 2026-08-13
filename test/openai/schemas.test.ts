@@ -297,6 +297,46 @@ describe("parseChatRequest", () => {
     expect(parseChatRequest(request)).toEqual(request);
   });
 
+  it("accepts participant names, refusal parts, and structured tool content", () => {
+    const parsed = parseChatRequest({
+      model: "gpt-5.4",
+      messages: [
+        { role: "system", content: "system", name: "operator" },
+        {
+          role: "assistant",
+          name: "assistant-1",
+          content: [
+            { type: "text", text: "partial" },
+            { type: "refusal", refusal: "cannot help" },
+          ],
+          refusal: null,
+        },
+        {
+          role: "tool",
+          tool_call_id: "call_external_1",
+          content: [{ type: "text", text: "found" }],
+        },
+        { role: "user", content: "continue", name: "ada" },
+      ],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "lookup",
+            parameters: { type: "object" },
+            strict: true,
+          },
+        },
+      ],
+    });
+
+    expect(parsed.messages[2]).toEqual({
+      role: "tool",
+      tool_call_id: "call_external_1",
+      content: "found",
+    });
+  });
+
   it("accepts Chat allowed_tools choice", () => {
     const request = {
       ...chatRequest,
@@ -695,6 +735,146 @@ describe("parseResponsesRequest", () => {
     };
 
     expect(parseResponsesRequest(request)).toEqual(request);
+  });
+
+  it("drops replayed input items the App Server cannot reproduce", () => {
+    const parsed = parseResponsesRequest({
+      model: "gpt-5.4",
+      input: [
+        // Codex CLI sends this first, and its developer role used to be read as a message.
+        {
+          type: "additional_tools",
+          role: "developer",
+          tools: [{ type: "namespace", name: "functions", tools: [] }],
+        },
+        { type: "item_reference", id: "msg_stored" },
+        {
+          type: "local_shell_call",
+          id: "lsh_1",
+          call_id: "call_shell_1",
+          status: "completed",
+          action: { type: "exec", command: ["ls"] },
+        },
+        {
+          type: "custom_tool_call",
+          call_id: "call_custom_1",
+          name: "exec",
+          input: "1",
+        },
+        { type: "message", role: "user", content: "hi" },
+      ],
+    });
+
+    expect(parsed.input).toEqual([
+      { type: "message", role: "user", content: "hi" },
+    ]);
+  });
+
+  it("accepts Codex client input metadata and reasoning controls", () => {
+    const request = {
+      model: "gpt-5.4",
+      input: [
+        {
+          type: "message" as const,
+          id: "msg_developer",
+          status: "completed" as const,
+          role: "developer" as const,
+          content: [{ type: "input_text" as const, text: "instructions" }],
+        },
+        {
+          type: "message" as const,
+          id: "msg_user",
+          role: "user" as const,
+          content: [{ type: "input_text" as const, text: "hi" }],
+        },
+      ],
+      reasoning: { effort: "medium" as const, context: "all_turns" as const },
+      client_metadata: { session_id: "sess_fixture", turn_id: "turn_fixture" },
+    };
+
+    expect(parseResponsesRequest(request)).toEqual(request);
+  });
+
+  it("accepts replay metadata that upstream proxies attach to output text", () => {
+    const parsed = parseResponsesRequest({
+      model: "gpt-5.4",
+      input: [
+        {
+          type: "message",
+          id: "msg_history",
+          role: "assistant",
+          status: "completed",
+          content: [
+            {
+              type: "output_text",
+              text: "prior answer",
+              annotations: [
+                { type: "url_citation", url: "https://example.test" },
+              ],
+              logprobs: null,
+            },
+            { type: "refusal", refusal: "cannot help" },
+          ],
+        },
+        { type: "message", role: "user", content: "hi" },
+      ],
+    });
+
+    expect(parsed.input).toHaveLength(2);
+  });
+
+  it("accepts reasoning items without a summary and with reasoning text", () => {
+    const parsed = parseResponsesRequest({
+      model: "gpt-5.4",
+      input: [
+        {
+          type: "reasoning",
+          id: "rs_1",
+          content: [{ type: "reasoning_text", text: "thought" }],
+          encrypted_content: "opaque",
+        },
+        { type: "message", role: "user", content: "hi" },
+      ],
+    });
+
+    expect(parsed.input[0]).toEqual({
+      type: "reasoning",
+      id: "rs_1",
+      summary: [],
+      content: [{ type: "reasoning_text", text: "thought" }],
+      encrypted_content: "opaque",
+    });
+  });
+
+  it("flattens structured function call output and tolerates call metadata", () => {
+    const parsed = parseResponsesRequest({
+      model: "gpt-5.4",
+      input: [
+        {
+          type: "function_call",
+          call_id: "call_external_3",
+          name: "lookup",
+          arguments: "{}",
+          status: "completed",
+          namespace: "functions",
+        },
+        {
+          type: "function_call_output",
+          call_id: "call_external_3",
+          status: "completed",
+          name: "lookup",
+          output: [
+            { type: "input_text", text: "first" },
+            { type: "input_text", text: "second" },
+          ],
+        },
+        { type: "message", role: "user", content: "hi" },
+      ],
+    });
+
+    expect(parsed.input[1]).toEqual(
+      expect.objectContaining({ output: "first\nsecond" }),
+    );
   });
 
   it.each(["system", "developer", "user"] as const)(
