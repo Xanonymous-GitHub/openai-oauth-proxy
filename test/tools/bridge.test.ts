@@ -303,6 +303,178 @@ describe("ToolBridge", () => {
     expect(call.respond).toHaveBeenCalledOnce();
   });
 
+  it("joins only an identical active Chat continuation", async () => {
+    const { bridge } = createBridge();
+    const pending = Promise.withResolvers<TurnResult>();
+    const turn = context({
+      resume: vi.fn(() => ({
+        result: pending.promise,
+        events: (async function* () {
+          await pending.promise;
+          return yield* [];
+        })(),
+      })),
+    });
+    const call = serverCall("rpc-1", "lookup");
+    const external = bridge.register(call, turn);
+    const request = {
+      kind: "chat" as const,
+      toolFingerprint: "tools-v1",
+      results: [{ callId: external.id, output: "found" }],
+    };
+
+    const owner = await bridge.continue(request);
+    const retry = await bridge.continue({ ...request, serviceTier: "auto" });
+
+    expect(owner).toMatchObject({ type: "continued" });
+    expect(retry).toMatchObject({ type: "continued", joined: true });
+    expect(turn.resume).toHaveBeenCalledOnce();
+    expect(call.respond).toHaveBeenCalledOnce();
+    await expect(
+      bridge.continue({
+        ...request,
+        results: [{ callId: external.id, output: "different" }],
+      }),
+    ).rejects.toMatchObject({ status: 409, code: "thread_busy" });
+    await expect(
+      bridge.continue({ ...request, toolFingerprint: "different-tools" }),
+    ).rejects.toMatchObject({
+      status: 400,
+      code: "tool_definitions_changed",
+    });
+    pending.resolve(result());
+    if (retry.type !== "continued") throw new Error("not continued");
+    await expect(retry.result).resolves.toEqual(result());
+  });
+
+  it("isolates cancellation of a joined Chat continuation", async () => {
+    const { bridge } = createBridge();
+    const pending = Promise.withResolvers<TurnResult>();
+    const turn = context({
+      resume: vi.fn(() => ({
+        result: pending.promise,
+        events: (async function* () {
+          await pending.promise;
+          return yield* [];
+        })(),
+      })),
+    });
+    const call = serverCall("rpc-cancel", "lookup");
+    const external = bridge.register(call, turn);
+    const request = {
+      kind: "chat" as const,
+      toolFingerprint: "tools-v1",
+      results: [{ callId: external.id, output: "found" }],
+    };
+    await bridge.continue(request);
+    const controller = new AbortController();
+    const retry = await bridge.continue({
+      ...request,
+      signal: controller.signal,
+    });
+    if (retry.type !== "continued") throw new Error("not continued");
+
+    controller.abort();
+
+    await expect(retry.result).rejects.toMatchObject({
+      status: 499,
+      code: "request_aborted",
+    });
+    expect(turn.invalidate).not.toHaveBeenCalled();
+    pending.resolve(result());
+  });
+
+  it("keeps an active Chat retry joinable through normal turn cleanup", async () => {
+    const { bridge } = createBridge();
+    const pending = Promise.withResolvers<TurnResult>();
+    const turn = context({
+      resume: vi.fn(() => ({
+        result: pending.promise,
+        events: (async function* () {
+          await pending.promise;
+          return yield* [];
+        })(),
+      })),
+    });
+    const call = serverCall("rpc-cleanup", "lookup");
+    const external = bridge.register(call, turn);
+    const request = {
+      kind: "chat" as const,
+      toolFingerprint: "tools-v1",
+      results: [{ callId: external.id, output: "found" }],
+    };
+
+    await bridge.continue(request);
+    bridge.complete(turn);
+    const retry = await bridge.continue(request);
+
+    expect(retry).toMatchObject({ type: "continued", joined: true });
+    pending.resolve(result());
+    if (retry.type !== "continued") throw new Error("not continued");
+    await expect(retry.result).resolves.toEqual(result());
+  });
+
+  it("invalidates an active Chat retry after normal turn cleanup", async () => {
+    const { bridge } = createBridge();
+    const pending = Promise.withResolvers<TurnResult>();
+    const turn = context({
+      resume: vi.fn(() => ({
+        result: pending.promise,
+        events: (async function* () {
+          await pending.promise;
+          return yield* [];
+        })(),
+      })),
+    });
+    const call = serverCall("rpc-invalidate", "lookup");
+    const external = bridge.register(call, turn);
+    const request = {
+      kind: "chat" as const,
+      toolFingerprint: "tools-v1",
+      results: [{ callId: external.id, output: "found" }],
+    };
+
+    await bridge.continue(request);
+    bridge.complete(turn);
+    bridge.invalidateAll();
+
+    await expect(bridge.continue(request)).resolves.toEqual({ type: "lost" });
+    expect(turn.invalidate).toHaveBeenCalledOnce();
+    pending.resolve(result());
+  });
+
+  it("expires invalidated Chat continuation tombstones", async () => {
+    const { bridge, setNow } = createBridge();
+    const pending = Promise.withResolvers<TurnResult>();
+    const turn = context({
+      resume: vi.fn(() => ({
+        result: pending.promise,
+        events: (async function* () {
+          await pending.promise;
+          return yield* [];
+        })(),
+      })),
+    });
+    const call = serverCall("rpc-tombstone", "lookup");
+    const external = bridge.register(call, turn);
+    const request = {
+      kind: "chat" as const,
+      toolFingerprint: "tools-v1",
+      results: [{ callId: external.id, output: "found" }],
+    };
+
+    await bridge.continue(request);
+    bridge.invalidateAll();
+    await expect(bridge.continue(request)).resolves.toEqual({ type: "lost" });
+
+    setNow(1_000 + 15 * 60 * 1_000);
+    await expect(bridge.continue(request)).rejects.toMatchObject({
+      status: 400,
+      code: "unknown_tool_call",
+    });
+    pending.resolve(result());
+  });
+
   it.each([
     ["undeclared tool", { tool: "filesystem", namespace: null }],
     ["namespaced tool", { tool: "weather", namespace: "internal" }],

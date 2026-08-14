@@ -19,9 +19,9 @@
     "protocol:check": "tmpdir=$(mktemp -d) && trap 'rm -rf \"$tmpdir\"' EXIT && cp -R src/codex/generated/. \"$tmpdir\" && bun run protocol:generate && diff -ru \"$tmpdir\" src/codex/generated"
   },
   "dependencies": {
-    "@hono/node-server": "2.1.0",
+    "@hono/node-server": "2.1.1",
     "@openai/codex": "0.147.0",
-    "hono": "4.13.1",
+    "hono": "4.13.2",
     "zod": "4.4.3"
   },
   "devDependencies": {
@@ -46,7 +46,7 @@
     "radix-ui": "1.6.7",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "shadcn": "4.17.0",
+    "shadcn": "4.18.0",
     "tailwind-merge": "3.6.0",
     "tailwindcss": "4.3.3",
     "typescript": "7.0.2",

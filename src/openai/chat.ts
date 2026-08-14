@@ -277,6 +277,7 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
       | {
           result: Promise<TurnResult>;
           events: AsyncIterable<ProxyStreamEvent>;
+          joined?: boolean;
         }
       | undefined;
     if (outputs.length > 0) {
@@ -418,7 +419,9 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
           errorCode: "request_aborted",
         });
         streamController?.abort();
-        deps.runner.tools.invalidateCalls(streamedToolCallIds);
+        if (continuationStage?.joined !== true) {
+          deps.runner.tools.invalidateCalls(streamedToolCallIds);
+        }
       });
       const writeSSE = async (event: { data: string }): Promise<void> => {
         await writeSSEWithSignal(stream, event, turnSignal);
@@ -544,7 +547,9 @@ export function createChatHandler(deps: ChatHandlerDependencies): Handler {
       } catch (error) {
         streamController?.abort();
         if (!runnerStarted) admission?.done();
-        deps.runner.tools.invalidateCalls(streamedToolCallIds);
+        if (continuationStage?.joined !== true) {
+          deps.runner.tools.invalidateCalls(streamedToolCallIds);
+        }
         if (
           aborted &&
           ((error instanceof DOMException && error.name === "AbortError") ||

@@ -11,6 +11,10 @@ const DEFAULT_TIMEOUT_MS = 15 * 60 * 1_000;
 const TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 const FAILED_TOOL_TEXT = "Tool execution failed";
 
+function requestAborted(): ProxyError {
+  return new ProxyError(499, "request_aborted", "Request aborted");
+}
+
 type ChatFunctionTool = {
   type: "function";
   function: {
@@ -80,6 +84,7 @@ export type ToolContinuation =
       turnId: string;
       result: Promise<TurnResult>;
       events: AsyncIterable<ProxyStreamEvent>;
+      joined?: boolean;
       signal?: AbortSignal;
       finish?(): void;
     }
@@ -99,6 +104,109 @@ interface PendingTurn {
   invalidated: boolean;
   invalidation: Promise<void> | undefined;
   timer: ReturnType<typeof setTimeout> | undefined;
+}
+
+interface ActiveChatContinuation {
+  turn: PendingTurn;
+  fingerprint: string;
+  callIds: Set<string>;
+  completion: SharedTurnResult;
+}
+
+type SharedResultWaiter = {
+  resolve(result: TurnResult): void;
+  reject(error: unknown): void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+};
+
+class SharedTurnResult {
+  readonly owner: Promise<TurnResult>;
+  readonly #waiters = new Set<SharedResultWaiter>();
+  #status: "pending" | "fulfilled" | "rejected" = "pending";
+  #result: TurnResult | undefined;
+  #error: unknown;
+
+  constructor(owner: Promise<TurnResult>, onSettled: () => void) {
+    this.owner = owner;
+    void owner.then(
+      (result) => {
+        this.#status = "fulfilled";
+        this.#result = result;
+        for (const waiter of this.#waiters) {
+          this.detach(waiter);
+          waiter.resolve(result);
+        }
+        this.#waiters.clear();
+        onSettled();
+      },
+      (error: unknown) => {
+        this.#status = "rejected";
+        this.#error = error;
+        for (const waiter of this.#waiters) {
+          this.detach(waiter);
+          waiter.reject(error);
+        }
+        this.#waiters.clear();
+        onSettled();
+      },
+    );
+  }
+
+  wait(signal?: AbortSignal): Promise<TurnResult> {
+    if (this.#status === "fulfilled") {
+      return Promise.resolve(this.#result as TurnResult);
+    }
+    if (this.#status === "rejected") return Promise.reject(this.#error);
+    if (signal?.aborted) return Promise.reject(requestAborted());
+    return new Promise((resolve, reject) => {
+      const waiter: SharedResultWaiter = { resolve, reject };
+      if (signal) {
+        waiter.signal = signal;
+        waiter.onAbort = () => {
+          if (!this.#waiters.delete(waiter)) return;
+          this.detach(waiter);
+          reject(requestAborted());
+        };
+        signal.addEventListener("abort", waiter.onAbort, { once: true });
+      }
+      this.#waiters.add(waiter);
+    });
+  }
+
+  private detach(waiter: SharedResultWaiter): void {
+    if (waiter.signal && waiter.onAbort) {
+      waiter.signal.removeEventListener("abort", waiter.onAbort);
+    }
+  }
+}
+
+async function* replayChatContinuation(
+  pending: Promise<TurnResult>,
+  signal?: AbortSignal,
+): AsyncIterable<ProxyStreamEvent> {
+  try {
+    const result = await pending;
+    if (result.text !== "") yield { type: "text.delta", delta: result.text };
+    for (const call of result.toolCalls ?? [])
+      yield { type: "tool.call", call };
+    if (result.usage !== undefined)
+      yield { type: "usage", usage: result.usage };
+    yield { type: "completed", result };
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    yield {
+      type: "failed",
+      error:
+        error instanceof ProxyError
+          ? error
+          : new ProxyError(
+              502,
+              "codex_host_error",
+              "Codex host request failed",
+            ),
+    };
+  }
 }
 
 export interface ToolBridgeOptions {
@@ -145,6 +253,7 @@ export class ToolBridge {
   readonly #timeoutMs: number;
   readonly #turns = new Map<ToolBridgeContext, PendingTurn>();
   readonly #calls = new Map<string, PendingTurn>();
+  readonly #activeChatContinuations = new Map<string, ActiveChatContinuation>();
   readonly #responses = new Map<string, PendingTurn>();
   readonly #lostCalls = new Map<string, number>();
   readonly #lostResponses = new Map<string, number>();
@@ -153,6 +262,7 @@ export class ToolBridge {
     { context: ToolBridgeContext; listener: ToolCallListener }
   >();
   readonly #unclaimed = new Map<string, PendingServerToolCall[]>();
+  #lostTimer: ReturnType<typeof setTimeout> | undefined;
   #consuming = false;
   #expired = 0;
 
@@ -304,6 +414,7 @@ export class ToolBridge {
   }
 
   async continue(request: ToolContinuationRequest): Promise<ToolContinuation> {
+    this.pruneLost(this.#now());
     const duplicate = new Set<string>();
     for (const result of request.results) {
       if (duplicate.has(result.callId)) {
@@ -315,6 +426,36 @@ export class ToolBridge {
         );
       }
       duplicate.add(result.callId);
+    }
+
+    const activeChatContinuation = this.findActiveChatContinuation(request);
+    if (activeChatContinuation) {
+      if (
+        activeChatContinuation.turn.context.generation !== this.#host.generation
+      ) {
+        this.invalidate(activeChatContinuation.turn);
+        return { type: "lost" };
+      }
+      this.validateContinuationConfiguration(
+        activeChatContinuation.turn,
+        request,
+      );
+      if (
+        activeChatContinuation.fingerprint !==
+        this.continuationFingerprint(request)
+      ) {
+        throw ProxyError.public(
+          409,
+          "thread_busy",
+          "Tool continuation is already active",
+          "messages",
+        );
+      }
+      return this.projectContinuation(
+        activeChatContinuation,
+        true,
+        request.signal,
+      );
     }
 
     const turn = this.findTurn(request);
@@ -349,36 +490,7 @@ export class ToolBridge {
       this.invalidate(turn);
       return { type: "lost" };
     }
-    if (turn.context.toolFingerprint !== request.toolFingerprint) {
-      throw ProxyError.public(
-        400,
-        "tool_definitions_changed",
-        "Tool definitions must exactly match the suspended request",
-        "tools",
-      );
-    }
-    if (
-      "reasoningSummary" in request &&
-      request.reasoningSummary !== (turn.context.reasoningSummary ?? null)
-    ) {
-      throw ProxyError.public(
-        400,
-        "reasoning_summary_changed",
-        "Reasoning summary must match the suspended request",
-        "reasoning.summary",
-      );
-    }
-    if (
-      "serviceTier" in request &&
-      request.serviceTier !== turn.context.serviceTier
-    ) {
-      throw ProxyError.public(
-        400,
-        "service_tier_changed",
-        "Service tier must match the suspended request",
-        "service_tier",
-      );
-    }
+    this.validateContinuationConfiguration(turn, request);
 
     for (const result of request.results) {
       if (this.#calls.get(result.callId) !== turn) {
@@ -455,6 +567,10 @@ export class ToolBridge {
     }
 
     const nextStage = turn.context.resume(request.signal);
+    const trackedChatContinuation =
+      request.kind === "chat"
+        ? this.trackChatContinuation(turn, request, nextStage)
+        : undefined;
     if (turn.timer) clearTimeout(turn.timer);
     turn.timer = undefined;
     try {
@@ -478,32 +594,75 @@ export class ToolBridge {
       this.invalidate(turn);
       return { type: "lost" };
     }
-    return {
-      type: "continued",
-      ...(turn.context.responseId === undefined
-        ? {}
-        : { responseId: turn.context.responseId }),
-      threadId: turn.context.threadId,
-      turnId: turn.context.turnId,
-      result: nextStage.result,
-      events: nextStage.events,
-      ...(turn.context.signal === undefined
-        ? {}
-        : { signal: turn.context.signal }),
-      ...(turn.context.finish === undefined
-        ? {}
-        : { finish: turn.context.finish }),
-    };
+    return trackedChatContinuation
+      ? this.projectContinuation(
+          trackedChatContinuation,
+          false,
+          undefined,
+          nextStage.events,
+        )
+      : {
+          type: "continued",
+          ...(turn.context.responseId === undefined
+            ? {}
+            : { responseId: turn.context.responseId }),
+          threadId: turn.context.threadId,
+          turnId: turn.context.turnId,
+          result: nextStage.result,
+          events: nextStage.events,
+          ...(turn.context.signal === undefined
+            ? {}
+            : { signal: turn.context.signal }),
+          ...(turn.context.finish === undefined
+            ? {}
+            : { finish: turn.context.finish }),
+        };
+  }
+
+  private validateContinuationConfiguration(
+    turn: PendingTurn,
+    request: ToolContinuationRequest,
+  ): void {
+    if (turn.context.toolFingerprint !== request.toolFingerprint) {
+      throw ProxyError.public(
+        400,
+        "tool_definitions_changed",
+        "Tool definitions must exactly match the suspended request",
+        "tools",
+      );
+    }
+    if (
+      "reasoningSummary" in request &&
+      request.reasoningSummary !== (turn.context.reasoningSummary ?? null)
+    ) {
+      throw ProxyError.public(
+        400,
+        "reasoning_summary_changed",
+        "Reasoning summary must match the suspended request",
+        "reasoning.summary",
+      );
+    }
+    if (
+      "serviceTier" in request &&
+      request.serviceTier !== turn.context.serviceTier
+    ) {
+      throw ProxyError.public(
+        400,
+        "service_tier_changed",
+        "Service tier must match the suspended request",
+        "service_tier",
+      );
+    }
   }
 
   invalidateGeneration(generation: number): void {
-    for (const turn of [...this.#turns.values()]) {
+    for (const turn of this.activeTurns()) {
       if (turn.context.generation === generation) this.invalidate(turn);
     }
   }
 
   invalidateAll(): void {
-    for (const turn of [...this.#turns.values()]) this.invalidate(turn);
+    for (const turn of this.activeTurns()) this.invalidate(turn);
     for (const calls of this.#unclaimed.values()) {
       for (const call of calls) {
         try {
@@ -532,18 +691,14 @@ export class ToolBridge {
   }
 
   expire(now = this.#now()): void {
-    for (const [callId, expiresAt] of this.#lostCalls) {
-      if (expiresAt <= now) this.#lostCalls.delete(callId);
-    }
-    for (const [responseId, expiresAt] of this.#lostResponses) {
-      if (expiresAt <= now) this.#lostResponses.delete(responseId);
-    }
+    this.pruneLost(now);
     for (const turn of [...this.#turns.values()]) {
       if (turn.calls.size > 0 && turn.expiresAt <= now) {
         this.#expired += turn.calls.size;
         this.invalidate(turn);
       }
     }
+    this.scheduleLostExpiry();
   }
 
   complete(context: ToolBridgeContext): void {
@@ -617,6 +772,13 @@ export class ToolBridge {
         // A generation change may already have invalidated the responder.
       }
     }
+    for (const [callId, continuation] of this.#activeChatContinuations) {
+      if (continuation.turn === turn) {
+        this.#lostCalls.set(callId, lostUntil);
+        this.#activeChatContinuations.delete(callId);
+      }
+    }
+    this.scheduleLostExpiry();
     this.remove(turn);
     try {
       turn.invalidation = Promise.resolve(turn.context.invalidate()).catch(
@@ -639,8 +801,139 @@ export class ToolBridge {
     turn.results.clear();
   }
 
+  private continuationFingerprint(request: ToolContinuationRequest): string {
+    const results = request.results
+      .map((result) => ({
+        callId: result.callId,
+        output: result.output,
+        success: result.success !== false,
+      }))
+      .sort((left, right) => left.callId.localeCompare(right.callId));
+    return createHash("sha256")
+      .update(
+        stableJson({
+          results,
+        }),
+      )
+      .digest("base64url");
+  }
+
+  private findActiveChatContinuation(
+    request: ToolContinuationRequest,
+  ): ActiveChatContinuation | undefined {
+    if (request.kind !== "chat") return undefined;
+    const continuations = new Set(
+      request.results.flatMap((result) => {
+        const continuation = this.#activeChatContinuations.get(result.callId);
+        return continuation ? [continuation] : [];
+      }),
+    );
+    if (continuations.size !== 1) return undefined;
+    const continuation = continuations.values().next().value;
+    if (
+      !continuation ||
+      request.results.length !== continuation.callIds.size ||
+      !request.results.every((result) =>
+        continuation.callIds.has(result.callId),
+      )
+    ) {
+      return undefined;
+    }
+    return continuation;
+  }
+
+  private trackChatContinuation(
+    turn: PendingTurn,
+    request: ToolContinuationRequest,
+    stage: ResumedToolStage,
+  ): ActiveChatContinuation {
+    let continuation: ActiveChatContinuation;
+    const completion = new SharedTurnResult(stage.result, () => {
+      for (const callId of continuation.callIds) {
+        if (this.#activeChatContinuations.get(callId) === continuation) {
+          this.#activeChatContinuations.delete(callId);
+        }
+      }
+    });
+    continuation = {
+      turn,
+      fingerprint: this.continuationFingerprint(request),
+      callIds: new Set(request.results.map((result) => result.callId)),
+      completion,
+    };
+    for (const callId of continuation.callIds) {
+      this.#activeChatContinuations.set(callId, continuation);
+    }
+    return continuation;
+  }
+
+  private projectContinuation(
+    continuation: ActiveChatContinuation,
+    joined = false,
+    signal?: AbortSignal,
+    ownerEvents?: AsyncIterable<ProxyStreamEvent>,
+  ): Extract<ToolContinuation, { type: "continued" }> {
+    const { context } = continuation.turn;
+    const result = joined
+      ? continuation.completion.wait(signal)
+      : continuation.completion.owner;
+    if (joined) void result.catch(() => undefined);
+    const events = joined
+      ? replayChatContinuation(result, signal)
+      : ownerEvents;
+    if (!events) throw new Error("Missing owner continuation events");
+    return {
+      type: "continued",
+      ...(context.responseId === undefined
+        ? {}
+        : { responseId: context.responseId }),
+      threadId: context.threadId,
+      turnId: context.turnId,
+      result,
+      events,
+      ...(joined ? { joined: true } : {}),
+      ...(context.signal === undefined ? {} : { signal: context.signal }),
+      ...(context.finish === undefined ? {} : { finish: context.finish }),
+    };
+  }
+
   private turnKey(threadId: string, turnId: string): string {
     return `${threadId}\u0000${turnId}`;
+  }
+
+  private activeTurns(): Set<PendingTurn> {
+    return new Set([
+      ...this.#turns.values(),
+      ...[...this.#activeChatContinuations.values()].map(
+        (continuation) => continuation.turn,
+      ),
+    ]);
+  }
+
+  private scheduleLostExpiry(): void {
+    if (this.#lostTimer) clearTimeout(this.#lostTimer);
+    const nextExpiry = Math.min(
+      ...this.#lostCalls.values(),
+      ...this.#lostResponses.values(),
+    );
+    if (!Number.isFinite(nextExpiry)) {
+      this.#lostTimer = undefined;
+      return;
+    }
+    this.#lostTimer = setTimeout(
+      () => this.expire(this.#now()),
+      Math.max(0, nextExpiry - this.#now()),
+    );
+    this.#lostTimer.unref?.();
+  }
+
+  private pruneLost(now: number): void {
+    for (const [callId, expiresAt] of this.#lostCalls) {
+      if (expiresAt <= now) this.#lostCalls.delete(callId);
+    }
+    for (const [responseId, expiresAt] of this.#lostResponses) {
+      if (expiresAt <= now) this.#lostResponses.delete(responseId);
+    }
   }
 
   private scheduleExpiry(turn: PendingTurn): void {

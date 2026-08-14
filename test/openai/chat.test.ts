@@ -1033,6 +1033,118 @@ describe("POST /v1/chat/completions", () => {
     expect(host.turnStart).toHaveBeenCalledOnce();
   });
 
+  it("joins an identical continuation retry while the resumed turn is active", async () => {
+    const fixture = createFixture();
+    const respond = vi.fn();
+    vi.mocked(fixture.host.turnStart).mockImplementationOnce(async () => {
+      fixture.tools.push({
+        generation: 1,
+        id: "rpc-retry",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          callId: "internal-retry",
+          namespace: null,
+          tool: "lookup",
+          arguments: { id: 1 },
+        },
+        respond,
+        reject: vi.fn(),
+      });
+      return { turn: fakeTurn() };
+    });
+    const definitions = [
+      {
+        type: "function" as const,
+        function: { name: "lookup", parameters: { type: "object" } },
+      },
+    ];
+    const suspended = await post(fixture.app, {
+      ...ordinaryRequest,
+      tools: definitions,
+    });
+    const suspendedBody = (await suspended.json()) as {
+      choices: Array<{ message: { tool_calls: Array<{ id: string }> } }>;
+    };
+    const callId = suspendedBody.choices[0]?.message.tool_calls[0]?.id;
+    if (!callId) throw new Error("Missing tool call");
+    const continuationRequest = {
+      model: "gpt-5.4",
+      stream: true,
+      tools: definitions,
+      messages: [
+        ...ordinaryRequest.messages,
+        suspendedBody.choices[0]?.message,
+        { role: "tool" as const, tool_call_id: callId, content: "found" },
+      ],
+    };
+
+    const owner = await post(fixture.app, continuationRequest);
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledOnce());
+    const changedRetry = await post(fixture.app, {
+      ...continuationRequest,
+      messages: [
+        ...continuationRequest.messages.slice(0, -1),
+        { role: "tool", tool_call_id: callId, content: "different" },
+      ],
+    });
+    const retry = await post(fixture.app, continuationRequest);
+
+    expect(owner.status).toBe(200);
+    expect(changedRetry.status).toBe(409);
+    await expect(changedRetry.json()).resolves.toMatchObject({
+      error: { code: "thread_busy" },
+    });
+    expect(retry.status).toBe(200);
+    await retry.body?.cancel();
+    expect(fixture.host.turnInterrupt).not.toHaveBeenCalled();
+    const secondRetry = await post(fixture.app, continuationRequest);
+    expect(secondRetry.status).toBe(200);
+    fixture.tools.push({
+      generation: 1,
+      id: "rpc-retry-next",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        callId: "internal-retry-next",
+        namespace: null,
+        tool: "lookup",
+        arguments: { id: 2 },
+      },
+      respond: vi.fn(),
+      reject: vi.fn(),
+    });
+    const [ownerPayload, retryPayload] = await Promise.all([
+      owner.text(),
+      secondRetry.text(),
+    ]);
+    const streamedCallIds = (payload: string) =>
+      payload
+        .trim()
+        .split("\n\n")
+        .flatMap((frame) => {
+          const data = frame.replace(/^data: /, "");
+          if (data === "[DONE]") return [];
+          const chunk = JSON.parse(data) as {
+            choices: Array<{
+              delta: { tool_calls?: Array<{ id: string }> };
+            }>;
+          };
+          return (
+            chunk.choices[0]?.delta.tool_calls?.map((call) => call.id) ?? []
+          );
+        });
+    const ownerCallIds = streamedCallIds(ownerPayload);
+    expect(ownerCallIds).toHaveLength(1);
+    expect(retryPayload).toContain(ownerCallIds[0] ?? "missing");
+    expect(ownerPayload).toContain('"finish_reason":"tool_calls"');
+    expect(retryPayload).toContain('"finish_reason":"tool_calls"');
+    expect(ownerPayload).toContain("data: [DONE]");
+    expect(retryPayload).toContain("data: [DONE]");
+    expect(respond).toHaveBeenCalledOnce();
+    expect(fixture.host.turnInterrupt).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["write", { streamWriteFailureAt: 2 }],
     ["abort", { streamAbortAt: 2 }],
