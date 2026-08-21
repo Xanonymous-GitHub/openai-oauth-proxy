@@ -438,6 +438,7 @@ function createToolFixture(
           text,
           phase: null,
           memoryCitation: null,
+          delivery: null,
         },
       },
     });
@@ -2604,6 +2605,7 @@ describe("POST /v1/responses", () => {
             text: "Calling lookup.",
             phase: null,
             memoryCitation: null,
+            delivery: null,
           },
         },
       });

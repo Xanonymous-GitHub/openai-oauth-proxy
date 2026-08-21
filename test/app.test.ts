@@ -565,6 +565,7 @@ it("serves Chat and Responses through the production listener after host readine
             text: "production answer",
             phase: null,
             memoryCitation: null,
+            delivery: null,
           },
         },
       });
@@ -734,6 +735,7 @@ it("aborts hung Responses cleanup at the drain deadline and retains reconciliati
             text: "disposable answer",
             phase: null,
             memoryCitation: null,
+            delivery: null,
           },
         },
       });

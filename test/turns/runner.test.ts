@@ -219,6 +219,7 @@ function emitCompletedTurn(
         text,
         phase: null,
         memoryCitation: null,
+        delivery: null,
       },
     },
   });
@@ -397,6 +398,7 @@ describe("TurnRunner", () => {
             text: "answer",
             phase: null,
             memoryCitation: null,
+            delivery: null,
           },
         },
       });
@@ -544,6 +546,7 @@ describe("TurnRunner", () => {
                 text: "answer",
                 phase: null,
                 memoryCitation: null,
+                delivery: null,
               },
             ],
           }),

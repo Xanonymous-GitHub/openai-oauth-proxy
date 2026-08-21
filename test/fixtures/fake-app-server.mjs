@@ -132,7 +132,7 @@ function handleRequest({ id, method, params }) {
   if (method === "initialize") {
     initializeReceived = true;
     respond(id, {
-      userAgent: "fake-codex-app-server/0.147.0",
+      userAgent: "fake-codex-app-server/0.149.0",
       codexHome: "/tmp/fake-codex-home",
       platformFamily: "unix",
       platformOs: process.platform,

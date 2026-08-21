@@ -105,6 +105,13 @@
         "null"
       ]
     },
+    "projectId": {
+      "description": "Omit to include every project, set to null for unassigned threads, or provide a project ID to return only threads in that project.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "searchTerm": {
       "description": "Optional substring filter for the extracted thread title.",
       "type": [

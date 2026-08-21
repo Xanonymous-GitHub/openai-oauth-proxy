@@ -439,6 +439,13 @@
         }
       ]
     },
+    "projectId": {
+      "description": "Optional project identity for this new thread. Durable threads persist the assignment; ephemeral threads expose it only in live responses.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "runtimeWorkspaceRoots": {
       "description": "Replace the thread's runtime workspace roots. Paths must be absolute.",
       "items": {

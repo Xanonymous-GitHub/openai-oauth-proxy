@@ -111,6 +111,7 @@ function emitCompletion(
         text,
         phase: null,
         memoryCitation: null,
+        delivery: null,
       },
     },
   });
@@ -1167,6 +1168,7 @@ describe("POST /v1/chat/completions", () => {
               text: "tool preamble",
               phase: null,
               memoryCitation: null,
+              delivery: null,
             },
           },
         });
