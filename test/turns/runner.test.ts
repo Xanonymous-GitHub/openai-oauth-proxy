@@ -11,7 +11,7 @@ import type {
   PendingServerToolCall,
 } from "../../src/codex/host.js";
 import { CodexGenerationChangedError } from "../../src/codex/transport.js";
-import { ProxyError } from "../../src/http/errors.js";
+import { openAIErrorBody, ProxyError } from "../../src/http/errors.js";
 import type { ProxyStreamEvent, TurnCommand } from "../../src/turns/events.js";
 import { TurnRunner } from "../../src/turns/runner.js";
 
@@ -1235,11 +1235,12 @@ describe("TurnRunner", () => {
   });
 
   it.each([
-    ["failed", 502, "codex_turn_failed"],
-    ["interrupted", 499, "codex_turn_interrupted"],
+    ["failed", 502, "codex_turn_failed", null],
+    ["failed", 400, "codex_context_window_exceeded", "contextWindowExceeded"],
+    ["interrupted", 499, "codex_turn_interrupted", null],
   ] as const)(
     "maps %s turns to a stable error",
-    async (status, httpStatus, code) => {
+    async (status, httpStatus, code, codexErrorInfo) => {
       const { events, host } = createHost();
       vi.mocked(host.turnStart).mockImplementation(async () => {
         events.push({
@@ -1252,7 +1253,7 @@ describe("TurnRunner", () => {
                 status === "failed"
                   ? {
                       message: "sensitive upstream failure",
-                      codexErrorInfo: null,
+                      codexErrorInfo,
                       additionalDetails: null,
                     }
                   : null,
@@ -1268,6 +1269,64 @@ describe("TurnRunner", () => {
       });
     },
   );
+
+  it("classifies a terminal Codex error notification without exposing its details", async () => {
+    const { events, host } = createHost();
+    vi.mocked(host.turnStart).mockImplementation(async () => {
+      events.push({
+        method: "error",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          willRetry: true,
+          error: {
+            message: "retry-sensitive failure",
+            codexErrorInfo: "contextWindowExceeded",
+            additionalDetails: "retry-sensitive details",
+          },
+        },
+      });
+      events.push({
+        method: "error",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          willRetry: false,
+          error: {
+            message: "terminal-sensitive failure",
+            codexErrorInfo: "usageLimitExceeded",
+            additionalDetails: "terminal-sensitive details",
+          },
+        },
+      });
+      events.push({
+        method: "turn/completed",
+        params: {
+          threadId: "thread-1",
+          turn: fakeTurn({ status: "failed", error: null }),
+        },
+      });
+      return { turn: fakeTurn() };
+    });
+
+    const error = await createRunner(host)
+      .run(command())
+      .catch((failure: unknown) => failure);
+
+    expect(error).toMatchObject({
+      status: 429,
+      code: "codex_usage_limit_exceeded",
+    });
+    expect(openAIErrorBody(error)).toEqual({
+      error: {
+        message: "Rate limit exceeded",
+        type: "invalid_request_error",
+        param: null,
+        code: "codex_usage_limit_exceeded",
+      },
+    });
+    expect(JSON.stringify(openAIErrorBody(error))).not.toContain("sensitive");
+  });
 
   it("interrupts once on abort and runs release and cleanup once", async () => {
     const { events, host } = createHost();

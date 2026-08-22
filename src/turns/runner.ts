@@ -2,6 +2,7 @@ import type { ResponseItem } from "../codex/generated/ResponseItem.js";
 import type { JsonValue } from "../codex/generated/serde_json/JsonValue.js";
 import type { TokenUsageBreakdown } from "../codex/generated/v2/TokenUsageBreakdown.js";
 import type { Turn } from "../codex/generated/v2/Turn.js";
+import type { TurnError } from "../codex/generated/v2/TurnError.js";
 import type { CodexHost, HostNotification } from "../codex/host.js";
 import { CodexGenerationChangedError } from "../codex/transport.js";
 import { ProxyError } from "../http/errors.js";
@@ -81,8 +82,45 @@ function cancellationError(cause: CancellationCause): ProxyError {
     : new ProxyError(499, "request_aborted", "Request aborted");
 }
 
-function completedTurnError(turn: Turn): ProxyError | undefined {
+function completedTurnError(
+  turn: Turn,
+  notificationError?: TurnError,
+): ProxyError | undefined {
   if (turn.status === "failed") {
+    const codexErrorInfo =
+      turn.error?.codexErrorInfo ?? notificationError?.codexErrorInfo;
+    switch (codexErrorInfo) {
+      case "contextWindowExceeded":
+        return new ProxyError(
+          400,
+          "codex_context_window_exceeded",
+          "Codex turn failed",
+        );
+      case "sessionBudgetExceeded":
+        return new ProxyError(
+          429,
+          "codex_session_budget_exceeded",
+          "Codex turn failed",
+        );
+      case "usageLimitExceeded":
+        return new ProxyError(
+          429,
+          "codex_usage_limit_exceeded",
+          "Codex turn failed",
+        );
+      case "serverOverloaded":
+        return new ProxyError(
+          503,
+          "codex_server_overloaded",
+          "Codex turn failed",
+        );
+      case "unauthorized":
+        return new ProxyError(
+          503,
+          "authentication_required",
+          "Codex authentication required",
+        );
+    }
     return new ProxyError(502, "codex_turn_failed", "Codex turn failed");
   }
   if (turn.status === "interrupted") {
@@ -381,6 +419,7 @@ export class TurnRunner {
     let outputOrder: TurnOutputItem[] = [];
     let usage: TokenUsage | undefined;
     let rawUsageObserved = false;
+    let terminalNotificationError: TurnError | undefined;
     const release = lifecycle?.release ?? this.#release;
     const cleanup = lifecycle?.cleanup ?? this.#cleanup;
     const onSettled = lifecycle?.settled;
@@ -758,6 +797,12 @@ export class TurnRunner {
       for await (const event of subscription) {
         this.assertGeneration(generation);
         switch (event.method) {
+          case "error":
+            // A retry notification is transient; terminal cleanup stays gated on turn/completed.
+            if (!event.params.willRetry) {
+              terminalNotificationError = event.params.error;
+            }
+            break;
           case "item/agentMessage/delta":
             observeMessage();
             text += event.params.delta;
@@ -884,7 +929,10 @@ export class TurnRunner {
             }
             const error = cancellationCause
               ? cancellationError(cancellationCause)
-              : completedTurnError(event.params.turn);
+              : completedTurnError(
+                  event.params.turn,
+                  terminalNotificationError,
+                );
             const lifecycleError = await finalize();
             if (lifecycleError !== undefined) {
               if (projectLifecycleFailures) {

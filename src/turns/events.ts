@@ -179,6 +179,7 @@ function eventIdentity(
   event: HostNotification,
 ): { threadId: string; turnId: string } | undefined {
   switch (event.method) {
+    case "error":
     case "item/agentMessage/delta":
     case "item/reasoning/summaryPartAdded":
     case "item/reasoning/summaryTextDelta":
