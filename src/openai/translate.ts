@@ -129,6 +129,8 @@ export function translateHistory(
         type: "function_call_output",
         ...(message.id === undefined ? {} : { id: message.id }),
         call_id: message.call_id,
+        ...(message.name == null ? {} : { name: message.name }),
+        ...(message.namespace == null ? {} : { namespace: message.namespace }),
         output: message.output,
       });
     }

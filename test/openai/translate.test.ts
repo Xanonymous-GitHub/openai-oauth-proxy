@@ -127,6 +127,8 @@ describe("OpenAI input translation", () => {
           type: "function_call_output",
           id: "fco_item_exact",
           call_id: "call_external_exact",
+          name: "lookup",
+          namespace: "external",
           output: "found",
         },
       ],
@@ -152,6 +154,8 @@ describe("OpenAI input translation", () => {
         type: "function_call_output",
         id: "fco_item_exact",
         call_id: "call_external_exact",
+        name: "lookup",
+        namespace: "external",
         output: "found",
       },
     ]);

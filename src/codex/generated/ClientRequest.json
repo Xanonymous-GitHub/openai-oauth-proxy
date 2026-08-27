@@ -213,13 +213,6 @@
         }
       ]
     },
-    "AwsCredentialType": {
-      "enum": [
-        "accessKeys",
-        "bedrockApiKey"
-      ],
-      "type": "string"
-    },
     "BedrockDiscoverParams": {
       "type": "object"
     },
@@ -251,9 +244,6 @@
         },
         {
           "properties": {
-            "credentialType": {
-              "$ref": "#/definitions/AwsCredentialType"
-            },
             "region": {
               "type": "string"
             },
@@ -266,45 +256,10 @@
             }
           },
           "required": [
-            "credentialType",
             "region",
             "type"
           ],
           "title": "EnvironmentBedrockSetupParams",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "accessKeyId": {
-              "type": "string"
-            },
-            "region": {
-              "type": "string"
-            },
-            "secretAccessKey": {
-              "type": "string"
-            },
-            "sessionToken": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "type": {
-              "enum": [
-                "accessKeys"
-              ],
-              "title": "AccessKeysBedrockSetupParamsType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "accessKeyId",
-            "region",
-            "secretAccessKey",
-            "type"
-          ],
-          "title": "AccessKeysBedrockSetupParams",
           "type": "object"
         }
       ]
@@ -2051,6 +2006,41 @@
           ],
           "title": "AmazonBedrockLoginAccountParams",
           "type": "object"
+        },
+        {
+          "description": "[UNSTABLE] Managed Amazon Bedrock AWS access key login is experimental.",
+          "properties": {
+            "accessKeyId": {
+              "type": "string"
+            },
+            "region": {
+              "type": "string"
+            },
+            "secretAccessKey": {
+              "type": "string"
+            },
+            "sessionToken": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "amazonBedrockAccessKeys"
+              ],
+              "title": "AmazonBedrockAccessKeysLoginAccountParamsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "accessKeyId",
+            "region",
+            "secretAccessKey",
+            "type"
+          ],
+          "title": "AmazonBedrockAccessKeysLoginAccountParams",
+          "type": "object"
         }
       ]
     },
@@ -2140,6 +2130,43 @@
       "required": [
         "server",
         "uri"
+      ],
+      "type": "object"
+    },
+    "McpServerEventStreamStartParams": {
+      "properties": {
+        "_meta": true,
+        "arguments": true,
+        "name": {
+          "type": "string"
+        },
+        "server": {
+          "type": "string"
+        },
+        "subscriptionId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "arguments",
+        "name",
+        "server",
+        "subscriptionId",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "McpServerEventStreamStopParams": {
+      "properties": {
+        "subscriptionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "subscriptionId"
       ],
       "type": "object"
     },
@@ -3694,7 +3721,10 @@
         {
           "properties": {
             "call_id": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "id": {
               "type": [
@@ -3712,6 +3742,18 @@
                 }
               ]
             },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "namespace": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "output": {
               "$ref": "#/definitions/FunctionCallOutputBody"
             },
@@ -3724,7 +3766,6 @@
             }
           },
           "required": [
-            "call_id",
             "output",
             "type"
           ],
@@ -5707,6 +5748,27 @@
           ],
           "title": "WebrtcThreadRealtimeStartTransport",
           "type": "object"
+        },
+        {
+          "properties": {
+            "callId": {
+              "description": "Identifier of a realtime call already created and negotiated by the client.",
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "existingCall"
+              ],
+              "title": "ExistingCallThreadRealtimeStartTransportType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "callId",
+            "type"
+          ],
+          "title": "ExistingCallThreadRealtimeStartTransport",
+          "type": "object"
         }
       ]
     },
@@ -6587,6 +6649,32 @@
         "clear"
       ],
       "type": "string"
+    },
+    "ThreadTimelineListParams": {
+      "description": "EXPERIMENTAL - list ordinary and realtime thread history in rollout order.",
+      "properties": {
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "type": "object"
     },
     "ThreadTurnsListParams": {
       "properties": {
@@ -9388,6 +9476,30 @@
         },
         "method": {
           "enum": [
+            "thread/timeline/list"
+          ],
+          "title": "Thread/timeline/listRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadTimelineListParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Thread/timeline/listRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
             "thread/realtime/listVoices"
           ],
           "title": "Thread/realtime/listVoicesRequestMethod",
@@ -9946,6 +10058,54 @@
         "params"
       ],
       "title": "McpServer/resource/readRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "mcpServer/event/stream/start"
+          ],
+          "title": "McpServer/event/stream/startRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/McpServerEventStreamStartParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "McpServer/event/stream/startRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "mcpServer/event/stream/stop"
+          ],
+          "title": "McpServer/event/stream/stopRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/McpServerEventStreamStopParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "McpServer/event/stream/stopRequest",
       "type": "object"
     },
     {

@@ -21,14 +21,37 @@ jobs:
           cache: ""
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.13"
+          python-version: "3.14.7"
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
       - name: Install pinned external agent clients
+        env:
+          HERMES_COMMIT: 5fc308a70719a83cccdbba4c0e39c23f5a8239d5
+          HERMES_INSTALLER_SHA256: c0380bc1f78d3d662a77663ce20cc17e14cbc4bec35e61ab7a33bac5f3afed2d
         run: |
-          bun i -g opencode-ai@1.18.4
-          python -m pip install hermes-agent==0.19.0
+          bun i -g opencode-ai@1.18.23
+          HERMES_INSTALLER="$RUNNER_TEMP/hermes-install.sh"
+          curl -fsSL \
+            "https://raw.githubusercontent.com/NousResearch/hermes-agent/$HERMES_COMMIT/scripts/install.sh" \
+            --output "$HERMES_INSTALLER"
+          printf '%s  %s\n' "$HERMES_INSTALLER_SHA256" "$HERMES_INSTALLER" | sha256sum --check
+          bash "$HERMES_INSTALLER" \
+            --branch v2026.8.27 \
+            --commit "$HERMES_COMMIT" \
+            --force-commit \
+            --skip-setup \
+            --skip-browser \
+            --skip-computer-use \
+            --no-skills \
+            --non-interactive \
+            --hermes-home "$RUNNER_TEMP/hermes-home" \
+            --dir "$RUNNER_TEMP/hermes-agent"
+          printf '%s\n' "$HOME/.local/bin" >> "$GITHUB_PATH"
+          python -c 'import sys; assert sys.version_info[:3] == (3, 14, 7), sys.version'
+          test "$(opencode --version)" = "1.18.23"
+          test "$(git -C "$RUNNER_TEMP/hermes-agent" rev-parse HEAD)" = "$HERMES_COMMIT"
+          "$RUNNER_TEMP/hermes-agent/venv/bin/python" -c 'import sys; from hermes_cli import __release_date__, __version__; assert (__version__, __release_date__, sys.version_info[:2]) == ("0.20.6", "2026.8.27", (3, 11))'
       - run: bun install --frozen-lockfile
       - run: bun run protocol:check
       - run: bun run deps:check

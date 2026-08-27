@@ -73,7 +73,7 @@ export function fakeThread(overrides: Partial<Thread> = {}): Thread {
     status: { type: "idle" },
     path: null,
     cwd: "/workspace",
-    cliVersion: "0.149.0",
+    cliVersion: "0.150.1",
     source: "appServer",
     canAcceptDirectInput: true,
     threadSource: null,
