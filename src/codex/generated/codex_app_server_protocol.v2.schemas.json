@@ -1245,6 +1245,31 @@
         }
       ]
     },
+    "AuthRecoveryNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message",
+        "provider",
+        "threadId",
+        "turnId"
+      ],
+      "title": "AuthRecoveryNotification",
+      "type": "object"
+    },
     "AutoCompactTokenLimitScope": {
       "description": "Selects which part of the active context is charged against `model_auto_compact_token_limit`.",
       "oneOf": [
@@ -3781,6 +3806,30 @@
             },
             "method": {
               "enum": [
+                "turn/settings/update"
+              ],
+              "title": "Turn/settings/updateRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/TurnSettingsUpdateParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Turn/settings/updateRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
                 "turn/steer"
               ],
               "title": "Turn/steerRequestMethod",
@@ -5440,6 +5489,7 @@
             "contextWindowExceeded",
             "sessionBudgetExceeded",
             "usageLimitExceeded",
+            "rateLimitExceeded",
             "serverOverloaded",
             "cyberPolicy",
             "misalignmentPolicyViolation",
@@ -7753,6 +7803,15 @@
       ],
       "type": "object"
     },
+    "CyberAccessProgram": {
+      "description": "Requested cyber treatment for a ChatGPT-authenticated Codex turn. Authorization and model-tier restrictions remain server-owned.",
+      "enum": [
+        "standard",
+        "daybreakBlue",
+        "daybreakRed"
+      ],
+      "type": "string"
+    },
     "DeprecationNoticeNotification": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
@@ -9884,6 +9943,13 @@
     "GetAccountRateLimitsResponse": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
+        "accountId": {
+          "description": "Account associated with this usage snapshot, when supplied by the backend.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "rateLimitResetCredits": {
           "anyOf": [
             {
@@ -9911,6 +9977,9 @@
             "object",
             "null"
           ]
+        },
+        "rateLimitUpsell": {
+          "description": "Optional backend-owned banner from the same usage read. Its nested keys retain the backend's snake_case contract; an absent banner leaves the client's existing UI unchanged."
         }
       },
       "required": [
@@ -12578,6 +12647,47 @@
       },
       "type": "object"
     },
+    "MisalignmentErrorDetails": {
+      "properties": {
+        "detailedExplanation": {
+          "description": "A substantive localized explanation is required before offering continuation.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "errorType": {
+          "description": "Open-ended classification; clients must accept categories added by Responses.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "steer": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MisalignmentSteer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Instruction to submit as the next turn's user input if continuation is confirmed."
+        }
+      },
+      "type": "object"
+    },
+    "MisalignmentSteer": {
+      "properties": {
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "type": "object"
+    },
     "MockExperimentalMethodParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
@@ -15122,6 +15232,14 @@
           "format": "int64",
           "type": "integer"
         },
+        "recencyAt": {
+          "description": "Newest non-archived member thread's recency, in Unix seconds; null when none exist.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "roots": {
           "items": {
             "$ref": "#/definitions/ProjectRoot"
@@ -15304,6 +15422,28 @@
             "integer",
             "null"
           ]
+        },
+        "sortDirection": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SortDirection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Requires sortKey. Defaults to asc for position and desc for recencyAt."
+        },
+        "sortKey": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProjectSortKey"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Defaults to position. Recency sorting always places empty projects last."
         }
       },
       "title": "ProjectListParams",
@@ -15391,6 +15531,13 @@
         "path"
       ],
       "type": "object"
+    },
+    "ProjectSortKey": {
+      "enum": [
+        "position",
+        "recencyAt"
+      ],
+      "type": "string"
     },
     "ProjectUpdateParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
@@ -15687,6 +15834,16 @@
           "anyOf": [
             {
               "$ref": "#/definitions/TokenUsageBreakdown"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "usageMetadata": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ResponseUsageMetadata"
             },
             {
               "type": "null"
@@ -17333,6 +17490,18 @@
           "type": "object"
         }
       ]
+    },
+    "ResponseUsageMetadata": {
+      "description": "Usage metadata reported for one upstream response.",
+      "properties": {
+        "amount": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
     },
     "ReviewDelivery": {
       "enum": [
@@ -19015,6 +19184,46 @@
             "params"
           ],
           "title": "Model/verificationNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "modelProvider/authRecoveryStarted"
+              ],
+              "title": "ModelProvider/authRecoveryStartedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AuthRecoveryNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "ModelProvider/authRecoveryStartedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "modelProvider/authRecoveryCompleted"
+              ],
+              "title": "ModelProvider/authRecoveryCompletedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AuthRecoveryNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "ModelProvider/authRecoveryCompletedNotification",
           "type": "object"
         },
         {
@@ -20785,7 +20994,7 @@
           "type": "boolean"
         },
         "excludeTurns": {
-          "description": "When true, return only thread metadata and live fork state without populating `thread.turns`. This is useful when the client plans to call `thread/turns/list` immediately after forking.",
+          "description": "When true, return only thread metadata and live fork state without populating `thread.turns`. This is useful when the client plans to call `thread/turns/list` immediately after forking. Full-history hydration is deprecated for paginated threads; use this with `thread/turns/list` and `thread/items/list` instead.",
           "type": "boolean"
         },
         "lastTurnId": {
@@ -21355,6 +21564,40 @@
             "type"
           ],
           "title": "AgentMessageThreadItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "output": {
+              "$ref": "#/definitions/FunctionCallOutputBody"
+            },
+            "type": {
+              "enum": [
+                "functionCallOutput"
+              ],
+              "title": "FunctionCallOutputThreadItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "output",
+            "type"
+          ],
+          "title": "FunctionCallOutputThreadItem",
           "type": "object"
         },
         {
@@ -22713,7 +22956,7 @@
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
         "includeTurns": {
-          "description": "When true, include turns and their items from rollout history.",
+          "description": "When true, include turns and their items from rollout history. Full-history hydration is deprecated for paginated threads; prefer a metadata-only read and page with `thread/turns/list` and `thread/items/list`.",
           "type": "boolean"
         },
         "threadId": {
@@ -23629,7 +23872,7 @@
           ]
         },
         "excludeTurns": {
-          "description": "When true, return only thread metadata and live-resume state without populating `thread.turns`. This is useful when the client plans to call `thread/turns/list` immediately after resuming.",
+          "description": "When true, return only thread metadata and live-resume state without populating `thread.turns`. This is useful when the client plans to call `thread/turns/list` immediately after resuming. Full-history hydration is deprecated for paginated threads; use this with `thread/turns/list` and `thread/items/list` instead.",
           "type": "boolean"
         },
         "history": {
@@ -24704,6 +24947,14 @@
         },
         "threadId": {
           "type": "string"
+        },
+        "timeoutMs": {
+          "description": "Maximum execution time in milliseconds. Defaults to one hour when omitted or null. Must be non-negative; zero requests an immediate timeout, not unlimited execution. Does not affect the immediate RPC acknowledgement.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
@@ -25917,6 +26168,18 @@
         },
         "message": {
           "type": "string"
+        },
+        "misalignment": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MisalignmentErrorDetails"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional public explanation and continuation instruction for a misalignment block."
         }
       },
       "required": [
@@ -26043,6 +26306,92 @@
       "title": "TurnPlanUpdatedNotification",
       "type": "object"
     },
+    "TurnSettingsUpdateParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Experimental settings changes for one running turn, not future turns. Unsupported fields are rejected rather than silently ignored. Any live task kind may accept publication. Child sessions and consumers of frozen initial settings are unchanged.",
+      "properties": {
+        "effort": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Omission or `null` leaves the effort unchanged."
+        },
+        "model": {
+          "description": "Omission or `null` leaves the model unchanged.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "serviceTier": {
+          "description": "`null` clears the requested tier; omission leaves it unchanged.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReasoningSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Omission or `null` leaves the summary preference unchanged."
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId",
+        "turnId"
+      ],
+      "title": "TurnSettingsUpdateParams",
+      "type": "object"
+    },
+    "TurnSettingsUpdateResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "status": {
+          "$ref": "#/definitions/TurnSettingsUpdateStatus"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "TurnSettingsUpdateResponse",
+      "type": "object"
+    },
+    "TurnSettingsUpdateStatus": {
+      "oneOf": [
+        {
+          "description": "Published for subsequent captures, even if the values were unchanged. Already captured steps are unchanged; a later inference is not guaranteed.",
+          "enum": [
+            "applied"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "No matching live task remained available for publication.",
+          "enum": [
+            "targetUnavailable"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "TurnsPage": {
       "properties": {
         "backwardsCursor": {
@@ -26144,6 +26493,17 @@
             "string",
             "null"
           ]
+        },
+        "cyberAccessProgram": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CyberAccessProgram"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "EXPERIMENTAL - Request a workspace-authorized cyber program for this turn. Omission preserves automatic behavior. This does not grant access."
         },
         "effort": {
           "anyOf": [
@@ -26249,6 +26609,13 @@
             "null"
           ]
         },
+        "serviceTierForTurn": {
+          "description": "Override the service tier only when this request starts a new turn. Use \"default\" for standard speed. Omitted or null inherits the thread's tier. Does not change the thread's tier or a turn being steered.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "summary": {
           "anyOf": [
             {
@@ -26262,6 +26629,23 @@
         },
         "threadId": {
           "type": "string"
+        },
+        "toolOutput": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TurnToolOutput"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "turnTrigger": {
+          "description": "Optional source classification for the caller that starts this turn. Ignored when this request steers an already-active turn.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -26355,6 +26739,27 @@
         "turnId"
       ],
       "title": "TurnSteerResponse",
+      "type": "object"
+    },
+    "TurnToolOutput": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output": {
+          "$ref": "#/definitions/FunctionCallOutputBody"
+        }
+      },
+      "required": [
+        "name",
+        "output"
+      ],
       "type": "object"
     },
     "UserInput": {

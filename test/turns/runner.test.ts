@@ -1237,6 +1237,7 @@ describe("TurnRunner", () => {
   it.each([
     ["failed", 502, "codex_turn_failed", null],
     ["failed", 400, "codex_context_window_exceeded", "contextWindowExceeded"],
+    ["failed", 429, "codex_rate_limit_exceeded", "rateLimitExceeded"],
     ["interrupted", 499, "codex_turn_interrupted", null],
   ] as const)(
     "maps %s turns to a stable error",
@@ -1255,6 +1256,7 @@ describe("TurnRunner", () => {
                       message: "sensitive upstream failure",
                       codexErrorInfo,
                       additionalDetails: null,
+                      misalignment: null,
                     }
                   : null,
             }),
@@ -1283,6 +1285,7 @@ describe("TurnRunner", () => {
             message: "retry-sensitive failure",
             codexErrorInfo: "contextWindowExceeded",
             additionalDetails: "retry-sensitive details",
+            misalignment: null,
           },
         },
       });
@@ -1296,6 +1299,7 @@ describe("TurnRunner", () => {
             message: "terminal-sensitive failure",
             codexErrorInfo: "usageLimitExceeded",
             additionalDetails: "terminal-sensitive details",
+            misalignment: null,
           },
         },
       });

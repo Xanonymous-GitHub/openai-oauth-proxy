@@ -661,7 +661,7 @@ describe("fake App Server", () => {
       });
       await expect(fake.nextOutgoing()).resolves.toMatchObject({
         id: 2,
-        result: { userAgent: "fake-codex-app-server/0.150.1" },
+        result: { userAgent: "fake-codex-app-server/0.152.0" },
       });
       fake.send({ method: "initialized", params: {} });
 

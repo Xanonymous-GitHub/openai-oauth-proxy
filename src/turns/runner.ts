@@ -108,6 +108,12 @@ function completedTurnError(
           "codex_usage_limit_exceeded",
           "Codex turn failed",
         );
+      case "rateLimitExceeded":
+        return new ProxyError(
+          429,
+          "codex_rate_limit_exceeded",
+          "Codex turn failed",
+        );
       case "serverOverloaded":
         return new ProxyError(
           503,
