@@ -3,7 +3,7 @@ import { runLiveAccountContract } from "./live-account-fixture.js";
 
 const enabled = process.env.LIVE_CHATGPT_TESTS === "1";
 const codexHome = process.env.LIVE_CHATGPT_CODEX_HOME;
-const live = enabled && codexHome ? describe.sequential : describe.skip;
+const live = enabled && codexHome ? describe : describe.skip;
 
 live("live ChatGPT account (consumes subscription capacity)", () => {
   it("refreshes account state, lists models, runs text, and checks device schema", async () => {

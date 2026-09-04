@@ -67,6 +67,8 @@ export function fakeThread(overrides: Partial<Thread> = {}): Thread {
     projectId: null,
     historyMode: "legacy",
     modelProvider: "openai",
+    model: "gpt-5.2-codex",
+    reasoningEffort: "medium",
     createdAt: 1,
     updatedAt: 1,
     recencyAt: 1,

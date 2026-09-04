@@ -439,6 +439,7 @@ function createToolFixture(
           phase: null,
           memoryCitation: null,
           delivery: null,
+          questions: null,
         },
       },
     });
@@ -2606,6 +2607,7 @@ describe("POST /v1/responses", () => {
             phase: null,
             memoryCitation: null,
             delivery: null,
+            questions: null,
           },
         },
       });

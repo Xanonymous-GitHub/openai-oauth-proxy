@@ -547,6 +547,7 @@ describe("TurnRunner", () => {
                 phase: null,
                 memoryCitation: null,
                 delivery: null,
+                questions: null,
               },
             ],
           }),
