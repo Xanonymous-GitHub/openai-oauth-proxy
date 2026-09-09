@@ -800,7 +800,7 @@ describe("POST /v1/responses", () => {
     });
   });
 
-  it("replays completed function calls and assistant output as history", async () => {
+  it("drops incompatible Responses replay items before starting a fresh thread", async () => {
     const { app, invocations } = createFixture();
     const response = await postResponse(app, {
       model: "gpt-5.4",
@@ -849,35 +849,6 @@ describe("POST /v1/responses", () => {
     expect(response.status).toBe(200);
     expect(invocations).toHaveLength(1);
     expect(invocations[0]?.command.history).toEqual([
-      {
-        type: "reasoning",
-        id: "rs_history",
-        summary: [{ type: "summary_text", text: "Prior reasoning." }],
-        encrypted_content: "encrypted-history",
-      },
-      {
-        type: "reasoning",
-        id: "rs_history_without_encrypted_content",
-        summary: [],
-        encrypted_content: null,
-      },
-      {
-        type: "reasoning",
-        id: "rs_history_with_null_encrypted_content",
-        summary: [],
-        encrypted_content: null,
-      },
-      {
-        type: "function_call",
-        call_id: "call-history",
-        name: "lookup",
-        arguments: '{"id":1}',
-      },
-      {
-        type: "function_call_output",
-        call_id: "call-history",
-        output: "found",
-      },
       {
         type: "message",
         role: "assistant",

@@ -31,7 +31,7 @@ import {
   type ResponsesInputItem,
   type ResponsesRequest,
 } from "./schemas.js";
-import { translateHistory, translateTurnInput } from "./translate.js";
+import { translateResponsesHistory, translateTurnInput } from "./translate.js";
 
 type ModelLookup = Pick<ModelCatalog, "lookup">;
 const SWEEP_INTERVAL_MS = 60 * 60 * 1_000;
@@ -1218,7 +1218,7 @@ export function createResponsesHandler(
     const split = splitInput(request);
     const model = await validatedModel(deps, request, context.req.raw.signal);
     deps.observe?.(context.req.raw, { model: model.id });
-    const history = translateHistory(split.history);
+    const history = translateResponsesHistory(split.history);
     const input = translateTurnInput(split.input);
     let permit: Permit | undefined = await deps.capacity?.acquire(
       context.req.raw.signal,

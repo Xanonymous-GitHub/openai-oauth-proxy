@@ -139,6 +139,13 @@ export function translateHistory(
   return translated;
 }
 
+export function translateResponsesHistory(
+  messages: readonly ResponsesInputItem[],
+): ResponseItem[] {
+  // Fresh Codex threads cannot safely replay opaque reasoning or legacy tool items.
+  return translateHistory(messages.filter((message) => "role" in message));
+}
+
 export function translateTurnInput(input: TurnInput): UserInput[] {
   if (typeof input === "string") {
     return [{ type: "text", text: input, text_elements: [] }];
