@@ -253,6 +253,102 @@
           "type": "object"
         },
         {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "userVerification/status"
+              ],
+              "title": "UserVerification/statusRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/UserVerificationStatusParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "UserVerification/statusRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "userVerification/enroll"
+              ],
+              "title": "UserVerification/enrollRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/UserVerificationEnrollParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "UserVerification/enrollRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "userVerification/delete"
+              ],
+              "title": "UserVerification/deleteRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/UserVerificationDeleteParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "UserVerification/deleteRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "userVerification/verify"
+              ],
+              "title": "UserVerification/verifyRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/UserVerificationVerifyParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "UserVerification/verifyRequest",
+          "type": "object"
+        },
+        {
           "description": "NEW APIs",
           "properties": {
             "id": {
@@ -3305,7 +3401,14 @@
               "type": "string"
             },
             "params": {
-              "type": "null"
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/v2/GetAccountRateLimitsParams"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -5460,6 +5563,33 @@
       "$schema": "http://json-schema.org/draft-07/schema#",
       "oneOf": [
         {
+          "description": "A device-authenticated approval; accepted responses contain the proof in `content`.",
+          "properties": {
+            "challenge": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "mode": {
+              "enum": [
+                "openai/userVerification"
+              ],
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "challenge",
+            "description",
+            "mode",
+            "title"
+          ],
+          "type": "object"
+        },
+        {
           "properties": {
             "_meta": true,
             "message": {
@@ -5752,7 +5882,7 @@
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
         "cwd": {
-          "$ref": "#/definitions/v2/AbsolutePathBuf"
+          "$ref": "#/definitions/v2/LegacyAppPathString"
         },
         "environmentId": {
           "default": null,
@@ -8626,6 +8756,40 @@
         ],
         "type": "object"
       },
+      "ApplicationNetworkRequirements": {
+        "properties": {
+          "domains": {
+            "additionalProperties": {
+              "$ref": "#/definitions/v2/NetworkDomainPermission"
+            },
+            "type": "object"
+          },
+          "enabled": {
+            "description": "When enabled, only explicitly allowed exact domains may be contacted.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "domains",
+          "enabled"
+        ],
+        "type": "object"
+      },
+      "ApplicationRequirements": {
+        "properties": {
+          "network": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ApplicationNetworkRequirements"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
       "AppLinkConfig": {
         "description": "Approval settings for a connected account within an app.",
         "properties": {
@@ -9664,6 +9828,12 @@
             ]
           },
           "allowHistoryAccess": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "allowWebmcp": {
             "type": [
               "boolean",
               "null"
@@ -11411,6 +11581,16 @@
               "null"
             ]
           },
+          "application": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ApplicationRequirements"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "autoReview": {
             "anyOf": [
               {
@@ -11581,6 +11761,18 @@
           }
         },
         "title": "ConfigRequirementsReadResponse",
+        "type": "object"
+      },
+      "ConfigurationReasoning": {
+        "description": "Reasoning settings interpreted by the backend for the routed model.",
+        "properties": {
+          "effort": {
+            "$ref": "#/definitions/v2/ReasoningEffort"
+          }
+        },
+        "required": [
+          "effort"
+        ],
         "type": "object"
       },
       "ConfiguredHookHandler": {
@@ -14087,6 +14279,20 @@
         "title": "GetAccountParams",
         "type": "object"
       },
+      "GetAccountRateLimitsParams": {
+        "description": "Usage-read capabilities of the requesting client, never inferred from its experiment arm.",
+        "properties": {
+          "excludeResetCreditDetails": {
+            "description": "Skip the separate reset-credit detail lookup for background usage polls. The usage response still includes the available count; omitted/false preserves detailed reads.",
+            "type": "boolean"
+          },
+          "supportsLunaReserve": {
+            "description": "The client supports automatic Luna Reserve fallback. For eligible ChatGPT CLI users, allow the backend to record experiment exposure after ordinary usage is blocked.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
       "GetAccountRateLimitsResponse": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
@@ -14094,6 +14300,13 @@
             "description": "Account associated with this usage snapshot, when supplied by the backend.",
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "ordinaryUsageAllowed": {
+            "description": "Backend permission for ordinary included usage, validated against the active account. Null means unavailable; clients must not infer recovery from percentages or reset times.",
+            "type": [
+              "boolean",
               "null"
             ]
           },
@@ -14295,7 +14508,7 @@
                 "type": "string"
               },
               "cwd": {
-                "$ref": "#/definitions/v2/AbsolutePathBuf"
+                "$ref": "#/definitions/v2/LegacyAppPathString"
               },
               "source": {
                 "$ref": "#/definitions/v2/GuardianCommandSource"
@@ -14388,11 +14601,11 @@
           {
             "properties": {
               "cwd": {
-                "$ref": "#/definitions/v2/AbsolutePathBuf"
+                "$ref": "#/definitions/v2/LegacyAppPathString"
               },
               "files": {
                 "items": {
-                  "$ref": "#/definitions/v2/AbsolutePathBuf"
+                  "$ref": "#/definitions/v2/LegacyAppPathString"
                 },
                 "type": "array"
               },
@@ -16399,6 +16612,13 @@
               "$ref": "#/definitions/v2/Tool"
             },
             "type": "object"
+          },
+          "toolsError": {
+            "description": "Tool discovery failed and no catalog was returned. Null when a catalog is returned, including cached or empty catalogs.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -17409,6 +17629,18 @@
           "compact"
         ],
         "type": "string"
+      },
+      "NullableGetAccountRateLimitsParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "anyOf": [
+          {
+            "$ref": "#/definitions/v2/GetAccountRateLimitsParams"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Nullable_GetAccountRateLimitsParams"
       },
       "NullableGetAccountTokenUsageParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",
@@ -19905,6 +20137,13 @@
               "null"
             ]
           },
+          "normalModelSlug": {
+            "description": "Normal model whose display name and reasoning options describe this quota alias.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "planType": {
             "anyOf": [
               {
@@ -21483,6 +21722,27 @@
             "type": "object"
           },
           {
+            "description": "A durable input control interpreted by the backend at its position in history.",
+            "properties": {
+              "reasoning": {
+                "$ref": "#/definitions/v2/ConfigurationReasoning"
+              },
+              "type": {
+                "enum": [
+                  "configuration_update"
+                ],
+                "title": "ConfigurationUpdateResponseItemType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reasoning",
+              "type"
+            ],
+            "title": "ConfigurationUpdateResponseItem",
+            "type": "object"
+          },
+          {
             "properties": {
               "type": {
                 "enum": [
@@ -21688,7 +21948,7 @@
               }
             ],
             "default": null,
-            "description": "Where to run the review: inline (default) on the current thread or detached on a new thread (returned in `reviewThreadId`)."
+            "description": "Where to run the review: inline (default) on the current thread or detached on a new thread (returned in `reviewThreadId`). Detached delivery is deprecated and emits `deprecationNotice`. Use `thread/start` followed by an inline review for a separate review thread."
           },
           "target": {
             "$ref": "#/definitions/v2/ReviewTarget"
@@ -22972,6 +23232,24 @@
             ],
             "description": "Working directory captured for the thread."
           },
+          "daybreakEnabled": {
+            "description": "Saved Daybreak choice, independent of turn execution. Null if unset.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "environments": {
+            "default": null,
+            "description": "Current environments for a loaded thread, in priority order, primary first. `null` means the thread is not loaded or the server does not expose its selection. An empty list means no environments are selected. This does not report connection status.",
+            "items": {
+              "$ref": "#/definitions/v2/ThreadEnvironment"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "ephemeral": {
             "description": "Whether the thread is ephemeral and should not be materialized on disk.",
             "type": "boolean"
@@ -23031,6 +23309,13 @@
           },
           "name": {
             "description": "Optional user-facing thread title.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "originator": {
+            "description": "Originator recorded when the thread was created, independent of its current client or executor. Null when the recorded originator is unavailable.",
             "type": [
               "string",
               "null"
@@ -23464,6 +23749,29 @@
       "ThreadDeleteResponse": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "title": "ThreadDeleteResponse",
+        "type": "object"
+      },
+      "ThreadEnvironment": {
+        "description": "An environment selected by a loaded thread, independent of connection status.",
+        "properties": {
+          "cwd": {
+            "$ref": "#/definitions/v2/LegacyAppPathString"
+          },
+          "environmentId": {
+            "type": "string"
+          },
+          "runtimeWorkspaceRoots": {
+            "items": {
+              "$ref": "#/definitions/v2/LegacyAppPathString"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "cwd",
+          "environmentId",
+          "runtimeWorkspaceRoots"
+        ],
         "type": "object"
       },
       "ThreadExtra": {
@@ -24994,6 +25302,16 @@
               "null"
             ]
           },
+          "originators": {
+            "description": "Optional originator allowlist, matching any supplied value exactly. Supported by hosted backends only; the local app-server rejects a nonempty list. Omitted or empty lists leave originators unrestricted.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "parentThreadId": {
             "description": "Optional direct parent thread filter. Mutually exclusive with `ancestorThreadId`.",
             "type": [
@@ -25197,6 +25515,13 @@
       "ThreadMetadataUpdateParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
+          "daybreakEnabled": {
+            "description": "Save the client's Daybreak choice for this persistent thread. Omitted or null leaves it unchanged. This does not select a turn's `cyberAccessProgram` or grant access.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "gitInfo": {
             "anyOf": [
               {
@@ -29505,6 +29830,272 @@
             "type": "object"
           }
         ]
+      },
+      "UserVerificationCancellationReason": {
+        "enum": [
+          "userCancelled",
+          "interrupted"
+        ],
+        "type": "string"
+      },
+      "UserVerificationDeleteParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "title": "UserVerificationDeleteParams",
+        "type": "object"
+      },
+      "UserVerificationDeleteResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": "UserVerificationDeleteResponse",
+        "type": "object"
+      },
+      "UserVerificationEnrollParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "title": "UserVerificationEnrollParams",
+        "type": "object"
+      },
+      "UserVerificationEnrollResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "credentialId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "credentialId"
+        ],
+        "title": "UserVerificationEnrollResponse",
+        "type": "object"
+      },
+      "UserVerificationErrorDetails": {
+        "description": "Closed error categories; native diagnostic payloads must not cross this boundary.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "reason": {
+                "$ref": "#/definitions/v2/UserVerificationInvalidRequestReason"
+              },
+              "type": {
+                "enum": [
+                  "invalidRequest"
+                ],
+                "title": "InvalidRequestUserVerificationErrorDetailsType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "type"
+            ],
+            "title": "InvalidRequestUserVerificationErrorDetails",
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "reason": {
+                "$ref": "#/definitions/v2/UserVerificationUnavailableReason"
+              },
+              "type": {
+                "enum": [
+                  "unavailable"
+                ],
+                "title": "UnavailableUserVerificationErrorDetailsType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "type"
+            ],
+            "title": "UnavailableUserVerificationErrorDetails",
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "reason": {
+                "$ref": "#/definitions/v2/UserVerificationCancellationReason"
+              },
+              "type": {
+                "enum": [
+                  "cancelled"
+                ],
+                "title": "CancelledUserVerificationErrorDetailsType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "type"
+            ],
+            "title": "CancelledUserVerificationErrorDetails",
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "reason": {
+                "$ref": "#/definitions/v2/UserVerificationFailureReason"
+              },
+              "type": {
+                "enum": [
+                  "failed"
+                ],
+                "title": "FailedUserVerificationErrorDetailsType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "type"
+            ],
+            "title": "FailedUserVerificationErrorDetails",
+            "type": "object"
+          }
+        ]
+      },
+      "UserVerificationFailureReason": {
+        "enum": [
+          "authenticationFailed",
+          "timeout",
+          "providerError",
+          "serviceError"
+        ],
+        "type": "string"
+      },
+      "UserVerificationInvalidRequestReason": {
+        "enum": [
+          "invalidParams"
+        ],
+        "type": "string"
+      },
+      "UserVerificationProof": {
+        "additionalProperties": false,
+        "description": "A signature over the exact decoded challenge. The verifier validates and consumes it.",
+        "properties": {
+          "credentialId": {
+            "type": "string"
+          },
+          "signature": {
+            "description": "Unpadded base64url DER ECDSA signature using P-256 and SHA-256.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "credentialId",
+          "signature"
+        ],
+        "type": "object"
+      },
+      "UserVerificationRpcError": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "description": "The error object inside the normal JSON-RPC envelope.",
+        "properties": {
+          "code": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "data": {
+            "$ref": "#/definitions/v2/UserVerificationErrorDetails"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "data",
+          "message"
+        ],
+        "title": "UserVerificationRpcError",
+        "type": "object"
+      },
+      "UserVerificationStatusParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "title": "UserVerificationStatusParams",
+        "type": "object"
+      },
+      "UserVerificationStatusResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "Local readiness only; this neither prompts nor queries server registration.",
+        "properties": {
+          "credentialId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "unavailableMessage": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "unavailableReason": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/UserVerificationUnavailableReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "UserVerificationStatusResponse",
+        "type": "object"
+      },
+      "UserVerificationUnavailableReason": {
+        "enum": [
+          "credentialMissing",
+          "biometricsUnavailable",
+          "providerUnavailable"
+        ],
+        "type": "string"
+      },
+      "UserVerificationVerifyParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "description": "Local signing primitive, independent of any pending elicitation.",
+        "properties": {
+          "challenge": {
+            "description": "Unpadded base64url encoding of 1–4096 challenge bytes.",
+            "type": "string"
+          },
+          "description": {
+            "description": "Additional display context; at most 4096 UTF-8 bytes.",
+            "type": "string"
+          },
+          "title": {
+            "description": "Display context already approved by the UI; 1–256 UTF-8 bytes.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "challenge",
+          "description",
+          "title"
+        ],
+        "title": "UserVerificationVerifyParams",
+        "type": "object"
+      },
+      "UserVerificationVerifyResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "proof": {
+            "$ref": "#/definitions/v2/UserVerificationProof"
+          }
+        },
+        "required": [
+          "proof"
+        ],
+        "title": "UserVerificationVerifyResponse",
+        "type": "object"
       },
       "Verbosity": {
         "description": "Controls output length/detail on GPT-5 models via the Responses API. Serialized with lowercase values to match the OpenAI API.",

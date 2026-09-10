@@ -56,6 +56,7 @@ export function fakeModelListResponse(
 export function fakeThread(overrides: Partial<Thread> = {}): Thread {
   return {
     id: "thread-1",
+    environments: null,
     extra: null,
     sessionId: "session-1",
     forkedFromId: null,
@@ -76,6 +77,7 @@ export function fakeThread(overrides: Partial<Thread> = {}): Thread {
     path: null,
     cwd: "/workspace",
     cliVersion: "0.152.0",
+    originator: null,
     source: "appServer",
     canAcceptDirectInput: true,
     threadSource: null,
@@ -83,6 +85,7 @@ export function fakeThread(overrides: Partial<Thread> = {}): Thread {
     agentRole: null,
     gitInfo: null,
     name: null,
+    daybreakEnabled: null,
     turns: [],
     ...overrides,
   };

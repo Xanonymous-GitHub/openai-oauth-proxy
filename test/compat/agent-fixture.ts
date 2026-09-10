@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -17,7 +17,15 @@ function executable(names: string[]): string | undefined {
   for (const directory of (process.env.PATH ?? "").split(delimiter)) {
     for (const name of names) {
       const candidate = join(directory, name);
-      if (existsSync(candidate)) return candidate;
+      if (!existsSync(candidate)) continue;
+      if (
+        spawnSync(candidate, ["--version"], {
+          stdio: "ignore",
+          timeout: 5_000,
+        }).status === 0
+      ) {
+        return candidate;
+      }
     }
   }
   return undefined;
