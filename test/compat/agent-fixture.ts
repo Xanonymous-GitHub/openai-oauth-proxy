@@ -11,7 +11,7 @@ import { type AddressInfo, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { startListeningProxyFixture } from "../integration/proxy-fixture.js";
-import { BIFROST_IMAGE } from "./bifrost-fixture.js";
+import { BIFROST_IMAGE, BIFROST_READY_TIMEOUT_MS } from "./bifrost-fixture.js";
 
 function executable(agent: "opencode" | "hermes"): string | undefined {
   const names = agent === "opencode" ? ["opencode"] : ["hermes"];
@@ -129,7 +129,7 @@ export async function runAgentSmoke(agent: "opencode" | "hermes") {
   container.stdout.resume();
   container.stderr.resume();
   try {
-    const deadline = Date.now() + 30_000;
+    const deadline = Date.now() + BIFROST_READY_TIMEOUT_MS;
     let ready = false;
     while (Date.now() < deadline) {
       if (container.exitCode !== null)

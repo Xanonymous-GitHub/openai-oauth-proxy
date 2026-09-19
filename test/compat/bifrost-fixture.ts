@@ -19,6 +19,7 @@ import OpenAI from "openai";
 
 export const BIFROST_IMAGE =
   "maximhq/bifrost:v1.6.3@sha256:95caedb1c368c6d88178c2b98b9238d8a6a62b51d9cb12b6661bf2671ed1aaa4";
+export const BIFROST_READY_TIMEOUT_MS = 60_000;
 const BIFROST_CONFIG_PATH = "deploy/bifrost/config.example.json";
 
 async function availablePort(host = "127.0.0.1"): Promise<number> {
@@ -231,7 +232,7 @@ export async function runBifrostContract() {
   container.stdout.resume();
   container.stderr.resume();
   try {
-    const deadline = Date.now() + 30_000;
+    const deadline = Date.now() + BIFROST_READY_TIMEOUT_MS;
     let ready = false;
     while (Date.now() < deadline) {
       if (container.exitCode !== null)
