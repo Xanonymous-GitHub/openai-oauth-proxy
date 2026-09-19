@@ -13,7 +13,10 @@ import { delimiter, join } from "node:path";
 import { startListeningProxyFixture } from "../integration/proxy-fixture.js";
 import { BIFROST_IMAGE } from "./bifrost-fixture.js";
 
-function executable(names: string[]): string | undefined {
+function executable(agent: "opencode" | "hermes"): string | undefined {
+  const names = agent === "opencode" ? ["opencode"] : ["hermes"];
+  // Hermes checks for updates after printing its version.
+  const timeout = agent === "hermes" ? 30_000 : 5_000;
   for (const directory of (process.env.PATH ?? "").split(delimiter)) {
     for (const name of names) {
       const candidate = join(directory, name);
@@ -21,7 +24,7 @@ function executable(names: string[]): string | undefined {
       if (
         spawnSync(candidate, ["--version"], {
           stdio: "ignore",
-          timeout: 5_000,
+          timeout,
         }).status === 0
       ) {
         return candidate;
@@ -32,11 +35,7 @@ function executable(names: string[]): string | undefined {
 }
 
 export function agentBinaryAvailable(agent: "opencode" | "hermes"): boolean {
-  return (
-    executable(
-      agent === "opencode" ? ["opencode"] : ["hermes", "hermes-agent"],
-    ) !== undefined
-  );
+  return executable(agent) !== undefined;
 }
 
 async function availablePort(): Promise<number> {
@@ -75,9 +74,7 @@ async function run(
 }
 
 export async function runAgentSmoke(agent: "opencode" | "hermes") {
-  const binary = executable(
-    agent === "opencode" ? ["opencode"] : ["hermes", "hermes-agent"],
-  );
+  const binary = executable(agent);
   if (!binary) {
     throw new Error(`${agent} binary not found`);
   }
