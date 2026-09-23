@@ -2,6 +2,7 @@ import { expect, it, vi } from "vitest";
 import { createAdminApp } from "../../src/admin/app.js";
 import { SessionStore } from "../../src/admin/sessions.js";
 import { AccountManager } from "../../src/codex/account.js";
+import { fakeAccountResponse } from "../../src/codex/fake.js";
 import type { GetAccountResponse } from "../../src/codex/generated/v2/GetAccountResponse.js";
 import type { CodexHost, HostNotification } from "../../src/codex/host.js";
 import { eventDispatcherFor } from "../../src/turns/events.js";
@@ -33,14 +34,14 @@ function flush(): Promise<void> {
 }
 
 function fakeHost(
-  accountReadImplementation: CodexHost["accountRead"] = async () => ({
-    account: {
-      type: "chatgpt" as const,
-      email: "person@example.com",
-      planType: "plus" as const,
-    },
-    requiresOpenaiAuth: true,
-  }),
+  accountReadImplementation: CodexHost["accountRead"] = async () =>
+    fakeAccountResponse({
+      account: {
+        type: "chatgpt",
+        email: "person@example.com",
+        planType: "plus",
+      },
+    }),
 ) {
   const events = new EventQueue();
   const accountRead = vi.fn(accountReadImplementation);
@@ -76,7 +77,7 @@ it.each([
   "forces startup refresh and rejects a non-ChatGPT account",
   async (account, expected) => {
     const fixture = fakeHost(
-      vi.fn(async () => ({ account, requiresOpenaiAuth: true })),
+      vi.fn(async () => fakeAccountResponse({ account })),
     );
     const manager = new AccountManager(fixture.host);
 
@@ -182,27 +183,22 @@ it("correlates login completion IDs and never exposes protocol errors", async ()
 });
 
 it("re-reads a new generation and ignores stale notifications and reads", async () => {
-  let resolveOld!: (value: {
-    account: { type: "chatgpt"; email: string; planType: "plus" };
-    requiresOpenaiAuth: boolean;
-  }) => void;
-  const oldRead = new Promise<{
-    account: { type: "chatgpt"; email: string; planType: "plus" };
-    requiresOpenaiAuth: boolean;
-  }>((resolve) => {
+  let resolveOld!: (value: GetAccountResponse) => void;
+  const oldRead = new Promise<GetAccountResponse>((resolve) => {
     resolveOld = resolve;
   });
   const accountRead = vi
     .fn()
     .mockImplementationOnce(() => oldRead)
-    .mockResolvedValueOnce({
-      account: {
-        type: "chatgpt" as const,
-        email: "new@example.com",
-        planType: "pro" as const,
-      },
-      requiresOpenaiAuth: true,
-    });
+    .mockResolvedValueOnce(
+      fakeAccountResponse({
+        account: {
+          type: "chatgpt",
+          email: "new@example.com",
+          planType: "pro",
+        },
+      }),
+    );
   const fixture = fakeHost(accountRead);
   const manager = new AccountManager(fixture.host);
   const started = manager.start();
@@ -213,14 +209,15 @@ it("re-reads a new generation and ignores stale notifications and reads", async 
   expect(manager.ready()).toBe(false);
   expect(accountRead).toHaveBeenCalledTimes(2);
   await flush();
-  resolveOld({
-    account: {
-      type: "chatgpt",
-      email: "stale@example.com",
-      planType: "plus",
-    },
-    requiresOpenaiAuth: true,
-  });
+  resolveOld(
+    fakeAccountResponse({
+      account: {
+        type: "chatgpt",
+        email: "stale@example.com",
+        planType: "plus",
+      },
+    }),
+  );
   await started;
   await flush();
 
@@ -273,14 +270,15 @@ it("prevents a pending account read from overwriting device login state", async 
   const fixture = fakeHost(
     vi
       .fn<CodexHost["accountRead"]>()
-      .mockResolvedValueOnce({
-        account: {
-          type: "chatgpt",
-          email: "person@example.com",
-          planType: "plus",
-        },
-        requiresOpenaiAuth: true,
-      })
+      .mockResolvedValueOnce(
+        fakeAccountResponse({
+          account: {
+            type: "chatgpt",
+            email: "person@example.com",
+            planType: "plus",
+          },
+        }),
+      )
       .mockImplementationOnce(() => refreshResult),
   );
   const manager = new AccountManager(fixture.host);
@@ -288,7 +286,7 @@ it("prevents a pending account read from overwriting device login state", async 
 
   const refresh = manager.refresh();
   await manager.login();
-  resolveRefresh({ account: null, requiresOpenaiAuth: true });
+  resolveRefresh(fakeAccountResponse({ account: null }));
   await refresh;
 
   expect(manager.state()).toMatchObject({
@@ -329,22 +327,24 @@ it("does not let account updates start reads while logout is active", async () =
   const fixture = fakeHost(
     vi
       .fn<CodexHost["accountRead"]>()
-      .mockResolvedValueOnce({
-        account: {
-          type: "chatgpt",
-          email: "person@example.com",
-          planType: "plus",
-        },
-        requiresOpenaiAuth: true,
-      })
-      .mockResolvedValueOnce({
-        account: {
-          type: "chatgpt",
-          email: "old-account@example.com",
-          planType: "plus",
-        },
-        requiresOpenaiAuth: true,
-      }),
+      .mockResolvedValueOnce(
+        fakeAccountResponse({
+          account: {
+            type: "chatgpt",
+            email: "person@example.com",
+            planType: "plus",
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        fakeAccountResponse({
+          account: {
+            type: "chatgpt",
+            email: "old-account@example.com",
+            planType: "plus",
+          },
+        }),
+      ),
   );
   fixture.logout.mockImplementationOnce(
     () =>
@@ -389,23 +389,25 @@ it("keeps successful logout authoritative over forced and notification reads", a
   const fixture = fakeHost(
     vi
       .fn<CodexHost["accountRead"]>()
-      .mockResolvedValueOnce({
-        account: {
-          type: "chatgpt",
-          email: "person@example.com",
-          planType: "plus",
-        },
-        requiresOpenaiAuth: true,
-      })
+      .mockResolvedValueOnce(
+        fakeAccountResponse({
+          account: {
+            type: "chatgpt",
+            email: "person@example.com",
+            planType: "plus",
+          },
+        }),
+      )
       .mockImplementationOnce(() => forcedRead)
-      .mockResolvedValueOnce({
-        account: {
-          type: "chatgpt",
-          email: "old-account@example.com",
-          planType: "plus",
-        },
-        requiresOpenaiAuth: true,
-      }),
+      .mockResolvedValueOnce(
+        fakeAccountResponse({
+          account: {
+            type: "chatgpt",
+            email: "old-account@example.com",
+            planType: "plus",
+          },
+        }),
+      ),
   );
   fixture.logout.mockImplementationOnce(
     () =>
@@ -426,14 +428,15 @@ it("keeps successful logout authoritative over forced and notification reads", a
   await flush();
   resolveLogout();
   await logout;
-  resolveForcedRead({
-    account: {
-      type: "chatgpt",
-      email: "old-account@example.com",
-      planType: "plus",
-    },
-    requiresOpenaiAuth: true,
-  });
+  resolveForcedRead(
+    fakeAccountResponse({
+      account: {
+        type: "chatgpt",
+        email: "old-account@example.com",
+        planType: "plus",
+      },
+    }),
+  );
   await refresh;
   await flush();
 

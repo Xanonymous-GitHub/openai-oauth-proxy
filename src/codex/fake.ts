@@ -19,6 +19,7 @@ export function fakeAccountResponse(
       planType: "plus",
     },
     requiresOpenaiAuth: true,
+    workspaceRouting: null,
     ...overrides,
   };
 }
@@ -42,6 +43,7 @@ export function fakeModel(overrides: Partial<Model> = {}): Model {
     additionalSpeedTiers: [],
     serviceTiers: [],
     defaultServiceTier: null,
+    availableAccessPrograms: null,
     isDefault: true,
     ...overrides,
   };
@@ -99,6 +101,7 @@ export function fakeThreadStartResponse(
     model: "gpt-5.2-codex",
     modelProvider: "openai",
     serviceTier: null,
+    disabledPluginIds: [],
     cwd: "/workspace",
     runtimeWorkspaceRoots: [],
     instructionSources: [],

@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { afterAll, expect, it, vi } from "vitest";
 import { createDataApp } from "../src/app.js";
 import {
+  fakeAccountResponse,
   fakeModel,
   fakeModelListResponse,
   fakeThreadStartResponse,
@@ -267,10 +268,11 @@ it("aborts an in-flight response sweep so service close reaches every owner", as
   });
   const host = {
     generation: 1,
-    accountRead: vi.fn(async () => ({
-      account: { type: "chatgpt", email: null, planType: "plus" },
-      requiresOpenaiAuth: true,
-    })),
+    accountRead: vi.fn(async () =>
+      fakeAccountResponse({
+        account: { type: "chatgpt", email: null, planType: "plus" },
+      }),
+    ),
     events: vi.fn(() => events),
     threadList,
     threadDelete: vi.fn(async () => ({})),
@@ -493,14 +495,14 @@ it("rejects model requests before the first host is ready without a generation-z
     resolveHost({
       generation: 7,
       modelList,
-      accountRead: async () => ({
-        account: {
-          type: "chatgpt" as const,
-          email: "person@example.com",
-          planType: "plus" as const,
-        },
-        requiresOpenaiAuth: true,
-      }),
+      accountRead: async () =>
+        fakeAccountResponse({
+          account: {
+            type: "chatgpt",
+            email: "person@example.com",
+            planType: "plus",
+          },
+        }),
     } as unknown as CodexHost);
     const initialResponse = await request;
     await nextTurn();
@@ -536,14 +538,15 @@ it("serves Chat and Responses through the production listener after host readine
   const threadDelete = vi.fn(async () => ({}));
   const host = {
     generation: 1,
-    accountRead: vi.fn(async () => ({
-      account: {
-        type: "chatgpt" as const,
-        email: "person@example.com",
-        planType: "plus" as const,
-      },
-      requiresOpenaiAuth: true,
-    })),
+    accountRead: vi.fn(async () =>
+      fakeAccountResponse({
+        account: {
+          type: "chatgpt",
+          email: "person@example.com",
+          planType: "plus",
+        },
+      }),
+    ),
     modelList: vi.fn(async () =>
       fakeModelListResponse({
         data: [fakeModel({ id: "gpt-5.4", model: "gpt-5.4" })],
@@ -701,14 +704,15 @@ it("aborts hung Responses cleanup at the drain deadline and retains reconciliati
   );
   const host = {
     generation: 1,
-    accountRead: vi.fn(async () => ({
-      account: {
-        type: "chatgpt" as const,
-        email: "person@example.com",
-        planType: "plus" as const,
-      },
-      requiresOpenaiAuth: true,
-    })),
+    accountRead: vi.fn(async () =>
+      fakeAccountResponse({
+        account: {
+          type: "chatgpt",
+          email: "person@example.com",
+          planType: "plus",
+        },
+      }),
+    ),
     modelList: vi.fn(async () =>
       fakeModelListResponse({
         data: [fakeModel({ id: "gpt-5.4", model: "gpt-5.4" })],

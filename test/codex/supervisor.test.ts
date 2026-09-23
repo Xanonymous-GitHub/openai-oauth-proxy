@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { fakeAccountResponse } from "../../src/codex/fake.js";
 import {
   type ChildFactory,
   type Clock,
@@ -246,7 +247,7 @@ describe("CodexSupervisor", () => {
       method: "account/read",
       params: { refreshToken: true },
     });
-    second.respondTo(2, { account: null, requiresOpenaiAuth: true });
+    second.respondTo(2, fakeAccountResponse({ account: null }));
     await expect(later).resolves.toMatchObject({ requiresOpenaiAuth: true });
     await expect(supervisor.start()).resolves.toBe(facade);
   });
