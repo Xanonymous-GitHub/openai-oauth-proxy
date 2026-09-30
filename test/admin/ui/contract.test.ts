@@ -1,7 +1,17 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { parseAdminResponse } from "../../../src/admin/contract.js";
 
 const csrfToken = "c".repeat(43);
+const accountSchema = JSON.parse(
+  readFileSync(
+    new URL(
+      "../../../src/codex/generated/v2/GetAccountResponse.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+) as { definitions: { PlanType: { enum: string[] } } };
 
 describe("parseAdminResponse", () => {
   it.each([
@@ -21,6 +31,17 @@ describe("parseAdminResponse", () => {
       csrfToken,
     });
   });
+
+  it.each(accountSchema.definitions.PlanType.enum)(
+    "accepts the generated Codex account plan %s",
+    (planType) => {
+      const state = { type: "ready", email: null, planType };
+      expect(parseAdminResponse({ state, csrfToken })).toEqual({
+        state,
+        csrfToken,
+      });
+    },
+  );
 
   it("accepts only the sanitized optional error", () => {
     expect(
