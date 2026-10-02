@@ -25,6 +25,13 @@ interface ContractResult {
   rawEvents: boolean;
   frameCounts: { requests: number; responses: number; notifications: number };
   schemaErrors: string[];
+  sandboxTypes: {
+    start: string;
+    resume: string;
+    fork: string;
+    dynamicTool: string;
+    resumedDynamicTool: string;
+  };
 }
 
 type JsonFrame = Record<string, unknown>;
@@ -216,7 +223,6 @@ async function startThread(host: CodexHost, cwd: string) {
     modelProvider: "fixture",
     cwd,
     approvalPolicy: "never",
-    sandbox: "read-only",
     ephemeral: false,
     experimentalRawEvents: true,
   });
@@ -237,9 +243,16 @@ export async function runRealAppServerContract(): Promise<ContractResult> {
   const cwd = join(directory, "work");
   mkdirSync(codexHome, { recursive: true });
   mkdirSync(cwd, { recursive: true });
+  const config = readFileSync(
+    resolve("config/codex/config.toml"),
+    "utf8",
+  ).replace(
+    '"/app/config/codex/neutral-instructions.md"',
+    JSON.stringify(resolve("config/codex/neutral-instructions.md")),
+  );
   writeFileSync(
     join(codexHome, "config.toml"),
-    `model_provider = "fixture"\napproval_policy = "never"\nsandbox_mode = "read-only"\n\n[model_providers.fixture]\nname = "Fixture"\nbase_url = "${fake.baseURL}"\nwire_api = "responses"\nrequires_openai_auth = false\n`,
+    `model_provider = "fixture"\n${config}\n[model_providers.fixture]\nname = "Fixture"\nbase_url = "${fake.baseURL}"\nwire_api = "responses"\nrequires_openai_auth = false\n`,
     { mode: 0o600 },
   );
   const codexBin = resolve("node_modules/.bin/codex");
@@ -354,7 +367,6 @@ export async function runRealAppServerContract(): Promise<ContractResult> {
         modelProvider: "fixture",
         cwd,
         approvalPolicy: "never",
-        sandbox: "read-only",
         dynamicTools: [
           {
             type: "function",
@@ -435,6 +447,13 @@ export async function runRealAppServerContract(): Promise<ContractResult> {
       ),
       frameCounts,
       schemaErrors,
+      sandboxTypes: {
+        start: started.sandbox.type,
+        resume: resumed.sandbox.type,
+        fork: forked.sandbox.type,
+        dynamicTool: toolThread.sandbox.type,
+        resumedDynamicTool: resumedToolThread.sandbox.type,
+      },
     };
   } finally {
     await supervisor.stop();

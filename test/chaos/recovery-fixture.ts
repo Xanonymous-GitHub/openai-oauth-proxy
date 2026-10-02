@@ -131,7 +131,7 @@ export async function runRecoveryContract(
   const fake = await startFakeResponsesServer();
   writeFileSync(
     join(codexHome, "config.toml"),
-    `model_provider = "fixture"\napproval_policy = "never"\nsandbox_mode = "read-only"\n\n[model_providers.fixture]\nname = "Fixture"\nbase_url = "${fake.baseURL}"\nwire_api = "responses"\nrequires_openai_auth = false\n`,
+    `model_provider = "fixture"\napproval_policy = "never"\nsandbox_mode = "danger-full-access"\n\n[model_providers.fixture]\nname = "Fixture"\nbase_url = "${fake.baseURL}"\nwire_api = "responses"\nrequires_openai_auth = false\n`,
     { mode: 0o600 },
   );
   let child: ChildProcessWithoutNullStreams | undefined;
@@ -150,6 +150,7 @@ export async function runRecoveryContract(
   let secondProxy: Awaited<ReturnType<typeof startProxyChild>> | undefined;
   try {
     const host = await supervisor.start();
+    // Simulate a stored thread created by the old read-only proxy baseline.
     const first = await host.threadStart({
       model: "gpt-5.4",
       modelProvider: "fixture",
@@ -173,7 +174,6 @@ export async function runRecoveryContract(
       modelProvider: "fixture",
       cwd,
       approvalPolicy: "never",
-      sandbox: "read-only",
     });
     await host.turnStart({
       threadId: active.thread.id,
@@ -212,7 +212,6 @@ export async function runRecoveryContract(
       modelProvider: "fixture",
       cwd,
       approvalPolicy: "never",
-      sandbox: "read-only",
       dynamicTools: [
         {
           type: "function",
@@ -346,6 +345,7 @@ export async function runRecoveryContract(
         resumed.thread.id === first.thread.id &&
         resumedBody.output?.[0]?.content?.[0]?.text ===
           "fixture child response",
+      resumedSandboxType: resumed.sandbox.type,
       toolContinuationCode:
         toolContinuationCode === "proxy_continuation_lost" &&
         lostResponse.status === 409

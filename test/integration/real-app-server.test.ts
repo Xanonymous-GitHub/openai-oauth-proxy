@@ -39,6 +39,13 @@ describe("pinned real Codex App Server offline contract", () => {
     expect(result.frameCounts.responses).toBeGreaterThan(8);
     expect(result.frameCounts.notifications).toBeGreaterThan(8);
     expect(result.schemaErrors).toEqual([]);
+    expect(result.sandboxTypes).toEqual({
+      start: "dangerFullAccess",
+      resume: "dangerFullAccess",
+      fork: "dangerFullAccess",
+      dynamicTool: "dangerFullAccess",
+      resumedDynamicTool: "dangerFullAccess",
+    });
   });
 
   it("reports schema failures without echoing captured fixture data", () => {

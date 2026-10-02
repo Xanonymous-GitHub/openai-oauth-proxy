@@ -29,12 +29,12 @@ const instructions = read("config/codex/neutral-instructions.md");
 const runtimeSecuritySource = read("src/runtime-security.ts");
 
 describe("Codex hardening baseline", () => {
-  it("pins every Codex 0.152.0 hardening setting", () => {
+  it("pins proxy capability settings and disables Codex sandboxing", () => {
     for (const entry of [
       'cli_auth_credentials_store = "file"',
       'forced_login_method = "chatgpt"',
       'approval_policy = "never"',
-      'sandbox_mode = "read-only"',
+      'sandbox_mode = "danger-full-access"',
       'model_instructions_file = "/app/config/codex/neutral-instructions.md"',
       'web_search = "disabled"',
       "check_for_update_on_startup = false",
@@ -121,9 +121,14 @@ describe("runtime filesystem hardening", () => {
     const sessionPath = join(codexHome, "sessions", "fixture.jsonl");
     writeFileSync(authPath, "synthetic-auth-fixture", { mode: 0o600 });
     writeFileSync(sessionPath, "synthetic-session-fixture", { mode: 0o600 });
-    writeFileSync(join(codexHome, "config.toml"), "unsafe = true\n", {
-      mode: 0o644,
-    });
+    writeFileSync(
+      join(codexHome, "config.toml"),
+      config.replace(
+        'sandbox_mode = "danger-full-access"',
+        'sandbox_mode = "read-only"',
+      ),
+      { mode: 0o644 },
+    );
     const authBefore = statSync(authPath);
     const sessionBefore = statSync(sessionPath);
     const previousUmask = process.umask();

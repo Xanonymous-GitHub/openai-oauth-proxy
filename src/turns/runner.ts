@@ -1015,7 +1015,6 @@ export class TurnRunner {
               : { serviceTier: command.serviceTier }),
             cwd: command.cwd ?? this.#emptyWorkingDirectory,
             approvalPolicy: "never",
-            sandbox: "read-only",
             // Prevent Codex from falling back to its coding-agent instructions.
             baseInstructions: "",
             developerInstructions: null,

@@ -1,7 +1,8 @@
 cli_auth_credentials_store = "file"
 forced_login_method = "chatgpt"
 approval_policy = "never"
-sandbox_mode = "read-only"
+# Disable Codex's read-only default; clients own tool execution policy.
+sandbox_mode = "danger-full-access"
 model_instructions_file = "/app/config/codex/neutral-instructions.md"
 web_search = "disabled"
 check_for_update_on_startup = false

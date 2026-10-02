@@ -10,6 +10,7 @@ describe("process recovery", () => {
     expect(result.readinessRemoved).toBe(true);
     expect(result.recoveredWithinMs).toBeLessThanOrEqual(35_000);
     expect(result.storedThreadResumed).toBe(true);
+    expect(result.resumedSandboxType).toBe("dangerFullAccess");
     expect(result.toolContinuationCode).toBe("proxy_continuation_lost");
     expect(result.sqlitePreserved).toBe(true);
     expect(result.credentialFilePreserved).toBe(true);

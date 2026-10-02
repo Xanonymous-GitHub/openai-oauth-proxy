@@ -70,6 +70,8 @@ Live ChatGPT tests are serial, consume subscription capacity, and run only when 
 
 ## Security And Support
 
+Codex sandboxing is disabled with `sandbox_mode = "danger-full-access"`; omitting it would enable Codex's read-only default. Thread requests inherit the managed configuration. Sandboxing client-side tools is the client's responsibility. Restart the proxy after upgrading to replace the previous baseline and apply the new policy to resumed or forked stored threads.
+
 Logs contain request metadata only: no prompts, images, tool payloads, authorization headers, raw App Server events, token fields, or credential paths. Keep the admin port loopback-only, maintain separate proxy/metrics tokens, preserve non-root/read-only/capability-free container settings, and report security issues privately to the repository owner rather than attaching credentials or backups to an issue.
 
 Node 26 is a Node Current release, not LTS. Exact pinning makes drift visible but increases upgrade cadence and ecosystem risk; review scheduled dependency pull requests and image scans before release. Supported incidents should include release SHA, stable error code, sanitized request ID, probe state, and process generation, never request content or credentials.

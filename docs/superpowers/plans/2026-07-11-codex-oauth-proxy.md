@@ -18,7 +18,7 @@
 - Keep four active turns, a waiting queue of 32, a 10-minute ordinary turn timeout, a 15-minute pending-tool timeout, and a seven-day sliding stored-response expiry by default.
 - Permit one active replica and one writer to `/data/codex` and `/data/proxy.sqlite`.
 - Never parse, return, log, or implement refresh for `auth.json`; App Server owns credentials and refresh.
-- Replace built-in coding instructions with the neutral adapter instructions and disable shell, unified exec, multi-agent, apps, plugins, hooks, memories, web search, MCP, skills, and sandbox network access.
+- Replace built-in coding instructions with the neutral adapter instructions and disable shell, unified exec, multi-agent, apps, plugins, hooks, memories, web search, MCP, and skills. Explicitly disable Codex sandboxing; client-side tools own their execution policy.
 - Set App Server `experimentalApi: true` only for `dynamicTools`; expose no generic JSON-RPC method and accept only the `item/tool/call` server request.
 - Generate both TypeScript and JSON Schema artifacts with `--experimental`, commit them, and fail CI when regeneration differs.
 - Use Node.js as the production runtime. Bun is only the package manager, builder, and task orchestrator.
@@ -736,7 +736,6 @@ Assert every new thread starts with:
 expect(host.threadStart).toHaveBeenCalledWith(expect.objectContaining({
   cwd: emptyWorkingDirectory,
   approvalPolicy: "never",
-  sandbox: "read-only",
   baseInstructions: neutralInstructions,
   developerInstructions: null,
   ephemeral: false,
@@ -745,6 +744,8 @@ expect(host.threadStart).toHaveBeenCalledWith(expect.objectContaining({
   selectedCapabilityRoots: [],
 }));
 ```
+
+Omit the per-thread `sandbox` override so threads inherit the managed configuration, which explicitly disables Codex's read-only default with `sandbox_mode = "danger-full-access"`.
 
 Use persisted non-ephemeral threads even for disposable Chat because `thread/delete` rejects ephemeral roots.
 
@@ -1306,7 +1307,7 @@ Parse `config.toml` in the test without adding a runtime TOML dependency; assert
 cli_auth_credentials_store = "file"
 forced_login_method = "chatgpt"
 approval_policy = "never"
-sandbox_mode = "read-only"
+sandbox_mode = "danger-full-access"
 model_instructions_file = "/app/config/codex/neutral-instructions.md"
 web_search = "disabled"
 check_for_update_on_startup = false
@@ -1335,7 +1336,7 @@ Expected: FAIL because hardening files do not exist.
 
 - [ ] **Step 3: Add hardening files and startup verification**
 
-Set `process.umask(0o077)`, create `${CODEX_HOME}` as `0700`, and write the read-only baseline config atomically to `${CODEX_HOME}/config.toml` on every startup, preserving only App Server-owned credential/session files. Force `/data/proxy.sqlite` to `0600` after creation. Inspect the completed local config before spawning App Server and fail closed if required hardening differs; do not add `config/read` to the RPC allowlist. Create the empty working directory under `/tmp/work`; never point App Server at the application source.
+Set `process.umask(0o077)`, create `${CODEX_HOME}` as `0700`, and write the proxy baseline config with Codex sandboxing disabled atomically to `${CODEX_HOME}/config.toml` on every startup, preserving only App Server-owned credential/session files. Force `/data/proxy.sqlite` to `0600` after creation. Inspect the completed local config before spawning App Server and fail closed if required hardening differs; do not add `config/read` to the RPC allowlist. Create the empty working directory under `/tmp/work`; never point App Server at the application source.
 
 - [ ] **Step 4: Build a multi-stage image**
 

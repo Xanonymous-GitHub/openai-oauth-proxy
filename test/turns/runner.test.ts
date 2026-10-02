@@ -663,7 +663,6 @@ describe("TurnRunner", () => {
         model: "gpt-5.4",
         cwd: emptyWorkingDirectory,
         approvalPolicy: "never",
-        sandbox: "read-only",
         baseInstructions: "",
         developerInstructions: null,
         ephemeral: false,
@@ -673,6 +672,9 @@ describe("TurnRunner", () => {
         experimentalRawEvents: true,
       }),
       expect.any(AbortSignal),
+    );
+    expect(vi.mocked(host.threadStart).mock.calls[0]?.[0]).not.toHaveProperty(
+      "sandbox",
     );
     expect(host.threadInjectItems).toHaveBeenCalledWith(
       {

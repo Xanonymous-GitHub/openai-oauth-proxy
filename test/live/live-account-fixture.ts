@@ -21,7 +21,6 @@ export async function runLiveAccountContract(codexHome: string) {
       model,
       cwd,
       approvalPolicy: "never",
-      sandbox: "read-only",
       ephemeral: true,
     });
     const events = host.events()[Symbol.asyncIterator]();

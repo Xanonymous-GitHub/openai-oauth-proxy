@@ -489,10 +489,9 @@ Codex configuration disables:
 - memories;
 - web search;
 - MCP servers;
-- capability roots;
-- network access for sandboxed tools.
+- capability roots.
 
-No skill roots or skill items are installed or passed to App Server. Every thread uses read-only sandboxing and approval policy `never`. Each new or forked Responses operation uses a persisted unique empty working directory so startup recovery can correlate an otherwise unrecorded thread through recovery-only `thread/list`; zero or multiple exact matches are retained for retry and never guessed. Operation directories are removed after final completion or orphan cleanup. Tool capability configuration and the Codex Host RPC allowlist are verified at startup and by integration tests. Enabling `experimentalApi` for dynamic tools does not make any other experimental RPC reachable through the host interface.
+No skill roots or skill items are installed or passed to App Server. Codex sandboxing is explicitly disabled with `sandbox_mode = "danger-full-access"` because omitting the setting selects Codex's read-only default. Thread requests inherit that configuration and use approval policy `never`; client-side tools own their execution and sandbox policy. Each new or forked Responses operation uses a persisted unique empty working directory so startup recovery can correlate an otherwise unrecorded thread through recovery-only `thread/list`; zero or multiple exact matches are retained for retry and never guessed. Operation directories are removed after final completion or orphan cleanup. Tool capability configuration and the Codex Host RPC allowlist are verified at startup and by integration tests. Enabling `experimentalApi` for dynamic tools does not make any other experimental RPC reachable through the host interface.
 
 ## Container and Kubernetes Security
 
@@ -508,9 +507,9 @@ No skill roots or skill items are installed or passed to App Server. Every threa
 - Bounded writable temporary volume.
 - Bifrost shared bearer and metrics bearer come from Kubernetes Secrets.
 - NetworkPolicy allows data-plane ingress from Bifrost and metrics ingress from monitoring only.
-- Production requires either an FQDN-aware CNI policy or a controlled egress proxy for required OpenAI HTTPS destinations. Plain Kubernetes NetworkPolicy cannot enforce hostname allowlists; if neither facility exists, the documented fallback is broader TCP 443 egress plus the App Server sandbox and RPC allowlist.
+- Production requires either an FQDN-aware CNI policy or a controlled egress proxy for required OpenAI HTTPS destinations. Plain Kubernetes NetworkPolicy cannot enforce hostname allowlists; if neither facility exists, the documented fallback is broader TCP 443 egress plus container security and the RPC allowlist.
 
-Application sandboxing remains required even with NetworkPolicy because the App Server process itself needs OpenAI egress.
+Execution sandboxing belongs to clients and deployment infrastructure rather than the proxy. The App Server process itself needs OpenAI egress.
 
 ## Health and Recovery
 
