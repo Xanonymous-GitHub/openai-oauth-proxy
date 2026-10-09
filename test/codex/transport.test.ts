@@ -12,6 +12,7 @@ import {
   fakeThread,
   fakeThreadStartResponse,
   fakeToolCallRequest,
+  fakeTurn,
   fakeTurnStartResponse,
 } from "../../src/codex/fake.js";
 import type { CodexHost } from "../../src/codex/host.js";
@@ -628,12 +629,21 @@ describe("Codex fixture builders", () => {
     expect(fakeThreadStartResponse()).toMatchObject({
       thread: { id: "thread-1" },
     });
-    expect(fakeTurnStartResponse()).toMatchObject({ turn: { id: "turn-1" } });
+    expect(fakeTurnStartResponse()).toMatchObject({
+      turn: { id: "turn-1", rootTurnId: null },
+    });
     expect(fakeToolCallRequest()).toMatchObject({
       id: "tool-1",
       method: "item/tool/call",
       params: { threadId: "thread-1", turnId: "turn-1" },
     });
+  });
+
+  it("preserves explicit turn lineage overrides", () => {
+    expect(fakeTurn({ rootTurnId: "root-turn-1" }).rootTurnId).toBe(
+      "root-turn-1",
+    );
+    expect(fakeTurn({ rootTurnId: null }).rootTurnId).toBeNull();
   });
 });
 

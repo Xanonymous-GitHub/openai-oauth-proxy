@@ -118,6 +118,7 @@ export function fakeThreadStartResponse(
 export function fakeTurn(overrides: Partial<Turn> = {}): Turn {
   return {
     id: "turn-1",
+    rootTurnId: null,
     items: [],
     itemsView: "full",
     status: "inProgress",

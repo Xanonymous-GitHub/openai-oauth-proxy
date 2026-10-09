@@ -78,6 +78,15 @@ export async function runAgentSmoke(agent: "opencode" | "hermes") {
   if (!binary) {
     throw new Error(`${agent} binary not found`);
   }
+  // V2 needs a private server; V1 does not expose this flag.
+  const standalone =
+    agent === "opencode" &&
+    spawnSync(binary, ["run", "--help"], {
+      encoding: "utf8",
+      timeout: 5_000,
+    }).stdout.includes("--standalone");
+  const tool =
+    agent === "opencode" ? (standalone ? "shell" : "bash") : "terminal";
   const proxy = await startListeningProxyFixture();
   const port = await availablePort();
   const directory = mkdtempSync(join(tmpdir(), `${agent}-smoke-`));
@@ -144,7 +153,7 @@ export async function runAgentSmoke(agent: "opencode" | "hermes") {
     }
     if (!ready) throw new Error("Bifrost unavailable for agent smoke");
     proxy.armAgentToolRounds(
-      agent === "opencode" ? "bash" : "terminal",
+      tool,
       {
         command: "printf task15-agent-smoke",
         description: "Run deterministic smoke command",
@@ -187,8 +196,12 @@ export async function runAgentSmoke(agent: "opencode" | "hermes") {
           cwd: directory,
           env: {
             ...process.env,
+            PWD: directory,
             HOME: directory,
             XDG_CONFIG_HOME: join(directory, "xdg"),
+            XDG_DATA_HOME: join(directory, "data"),
+            XDG_CACHE_HOME: join(directory, "cache"),
+            XDG_STATE_HOME: join(directory, "state"),
           },
           timeoutMs: 60_000,
         };
@@ -196,13 +209,12 @@ export async function runAgentSmoke(agent: "opencode" | "hermes") {
           binary,
           [
             "run",
+            ...(standalone ? ["--standalone"] : []),
             "--format",
             "json",
             "--model",
             "fixture/fixture-model",
-            "--dir",
-            directory,
-            "Execute every requested bash tool call until the model says the multi-round smoke is complete.",
+            `Execute every requested ${tool} tool call until the model says the multi-round smoke is complete.`,
           ],
           options,
         );
@@ -210,13 +222,12 @@ export async function runAgentSmoke(agent: "opencode" | "hermes") {
           binary,
           [
             "run",
+            ...(standalone ? ["--standalone"] : []),
             "--continue",
             "--format",
             "json",
             "--model",
             "fixture/fixture-model",
-            "--dir",
-            directory,
             "Reply with a brief summary of the completed tool work without calling another tool.",
           ],
           options,
