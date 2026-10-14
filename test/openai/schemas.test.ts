@@ -552,11 +552,34 @@ describe("parseResponsesRequest", () => {
   it.each([
     ["default text", {}],
     ["explicit text", { format: { type: "text" } }],
+    ["legacy JSON object", { format: { type: "json_object" } }],
     ["ignored verbosity", { verbosity: "medium" }],
   ])("accepts %s output configuration", (_name, text) => {
     const request = { model: "gpt-5.4", input: "hello", text };
 
     expect(parseResponsesRequest(request)).toEqual(request);
+  });
+
+  it.each([
+    [{ type: "unknown_fixture_format" }, "invalid_request", "text.format.type"],
+    [
+      { type: "json_object", schema: {} },
+      "unsupported_field",
+      "text.format.schema",
+    ],
+    [
+      { type: "json_object", strict: true },
+      "unsupported_field",
+      "text.format.strict",
+    ],
+  ])("rejects invalid output format %j", (format, code, param) => {
+    expect(() =>
+      parseResponsesRequest({
+        model: "gpt-5.4",
+        input: "Return a JSON object.",
+        text: { format },
+      }),
+    ).toThrowError(expect.objectContaining({ status: 400, code, param }));
   });
 
   it.each([0, -1, 1.5])(

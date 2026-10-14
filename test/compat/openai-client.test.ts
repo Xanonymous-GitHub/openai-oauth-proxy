@@ -678,6 +678,19 @@ describe("official OpenAI JavaScript client compatibility", () => {
         expect(result.output_text).toBe('{"answer":"fixture"}');
       },
     },
+    {
+      concept: "JSON object mode",
+      run: async () => {
+        const result = await client.responses.create({
+          model: "gpt-5.4",
+          input: "Return a JSON object",
+          text: { format: { type: "json_object" } },
+        });
+
+        expect(result.output_text).toBe("fixture answer");
+        expect(fixture.commands.at(-1)).not.toHaveProperty("outputSchema");
+      },
+    },
   ])("accepts documented Responses concept: $concept", async ({ run }) =>
     run(),
   );

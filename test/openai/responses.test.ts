@@ -489,6 +489,24 @@ async function postJson(
   return (await response.json()) as Record<string, unknown>;
 }
 
+it.each([false, true])(
+  "accepts Bifrost-converted JSON object format with stream=%s",
+  async (stream) => {
+    const fixture = createFixture();
+    const response = await postResponse(fixture.app, {
+      model: "gpt-5.4",
+      input: "Return a JSON object.",
+      text: { format: { type: "json_object" } },
+      stream,
+    });
+
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(fixture.invocations).toHaveLength(1);
+    expect(fixture.invocations[0]?.command).not.toHaveProperty("outputSchema");
+  },
+);
+
 const resumedStreamTools = [
   { type: "function" as const, name: "lookup", parameters: {} },
 ];

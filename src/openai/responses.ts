@@ -1347,6 +1347,7 @@ export function createResponsesHandler(
       request.include?.includes("reasoning.encrypted_content") === true
         ? { includeEncryptedReasoning: true }
         : {}),
+      // Like Chat, legacy JSON object mode is accepted without a Codex output schema.
       ...(request.text?.format?.type !== "json_schema"
         ? {}
         : { outputSchema: request.text.format.schema }),

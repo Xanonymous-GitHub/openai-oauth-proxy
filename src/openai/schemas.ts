@@ -649,6 +649,7 @@ const responsesRequestSchema = z
         format: z
           .discriminatedUnion("type", [
             z.strictObject({ type: z.literal("text") }),
+            z.strictObject({ type: z.literal("json_object") }),
             z.strictObject({
               type: z.literal("json_schema"),
               name: nonEmptyString,
