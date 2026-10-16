@@ -62,7 +62,7 @@ The example Secret is intentionally invalid and excluded from Kustomize. Never c
 
 ## Verification
 
-The offline gate uses Node 26, the latest Bun release, Python 3.15.0, Codex 0.162.1, the official OpenAI JavaScript client, a real fixture-provider App Server, real pinned Bifrost when Docker is available, and representative OpenCode/Hermes clients. External agent tests are explicitly skipped only when the corresponding binary is absent; CI installs pinned OpenCode 2.0.29 with `bun i -g --trust @opencode/cli@2.0.29` and Hermes Agent 0.22.0 so both are required there. Hermes uses its separate installer-managed Python 3.14.7 environment.
+The offline gate uses Node 26, the latest Bun release, Python 3.15.0, Codex 0.163.0, the official OpenAI JavaScript client, a real fixture-provider App Server, real pinned Bifrost when Docker is available, and representative OpenCode/Hermes clients. External agent tests are explicitly skipped only when the corresponding binary is absent; CI installs pinned OpenCode 2.0.29 with `bun i -g --trust @opencode/cli@2.0.29` and Hermes Agent 0.22.0 so both are required there. Hermes uses its separate installer-managed Python 3.14.7 environment.
 
 Run `bun install --frozen-lockfile`, `bun run protocol:check`, `bun run deps:check`, and `bun run check`. Docker and Kubernetes release checks must be reported as passed or unavailable, never conflated.
 
@@ -72,7 +72,7 @@ Live ChatGPT tests are serial, consume subscription capacity, and run only when 
 
 ## Security And Support
 
-Codex sandboxing is disabled with `sandbox_mode = "danger-full-access"`; omitting it would enable Codex's read-only default. Thread requests inherit the managed configuration. Sandboxing client-side tools is the client's responsibility. Restart the proxy after upgrading to replace the previous baseline and apply the new policy to resumed or forked stored threads.
+Codex sandboxing is disabled with `sandbox_mode = "danger-full-access"`; omitting it would enable Codex's read-only default. New and forked threads inherit the managed configuration. Cold resumes explicitly reapply `sandbox: "danger-full-access"` because Codex 0.163.0 otherwise restores the stored thread's previous policy. Sandboxing client-side tools is the client's responsibility. Restart the proxy after upgrading to replace the previous baseline and apply the new policy to resumed or forked stored threads.
 
 Logs contain request metadata only: no prompts, images, tool payloads, authorization headers, raw App Server events, token fields, or credential paths. Keep the admin port loopback-only, maintain separate proxy/metrics tokens, preserve non-root/read-only/capability-free container settings, and report security issues privately to the repository owner rather than attaching credentials or backups to an issue.
 

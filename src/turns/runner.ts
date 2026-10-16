@@ -1033,7 +1033,11 @@ export class TurnRunner {
       }
       case "resume": {
         const response = await this.#host.threadResume(
-          { threadId: command.action.threadId },
+          {
+            threadId: command.action.threadId,
+            // Codex 0.163.0 restores saved policies on cold resume.
+            sandbox: "danger-full-access",
+          },
           signal,
         );
         return response.thread.id;

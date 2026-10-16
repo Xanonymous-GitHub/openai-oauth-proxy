@@ -50,6 +50,13 @@
         }
       ],
       "description": "Required skills supplied by this environment, checked before model inference."
+    },
+    "websocketRequestId": {
+      "description": "Optional X-Request-ID for the direct WebSocket upgrade, including reconnects. Requires a secure transport or a loopback destination.",
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "required": [

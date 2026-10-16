@@ -205,7 +205,11 @@ export async function runRecoveryContract(
     );
     const activeRequestFailed = await activeFailure;
     const recoveredWithinMs = await until(() => supervisor.ready(), 35_000);
-    const resumed = await host.threadResume({ threadId: first.thread.id });
+    // Match TurnRunner's cold-resume override for older stored threads.
+    const resumed = await host.threadResume({
+      threadId: first.thread.id,
+      sandbox: "danger-full-access",
+    });
 
     const toolThread = await host.threadStart({
       model: "gpt-5.4",

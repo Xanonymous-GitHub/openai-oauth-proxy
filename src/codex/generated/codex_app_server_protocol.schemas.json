@@ -1677,6 +1677,30 @@
             },
             "method": {
               "enum": [
+                "thread/readState/update"
+              ],
+              "title": "Thread/readState/updateRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadReadStateUpdateParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/readState/updateRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
                 "thread/turns/list"
               ],
               "title": "Thread/turns/listRequestMethod",
@@ -1716,6 +1740,30 @@
             "params"
           ],
           "title": "Thread/items/listRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "thread/items/read"
+              ],
+              "title": "Thread/items/readRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadItemsReadParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/items/readRequest",
           "type": "object"
         },
         {
@@ -6405,6 +6453,26 @@
             "params"
           ],
           "title": "Thread/status/changedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "thread/readState/changed"
+              ],
+              "title": "Thread/readState/changedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadReadStateChangedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Thread/readState/changedNotification",
           "type": "object"
         },
         {
@@ -12687,6 +12755,20 @@
           },
           {
             "properties": {
+              "annotations": {
+                "items": true,
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "logprobs": {
+                "items": true,
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
               "text": {
                 "type": "string"
               },
@@ -12994,6 +13076,13 @@
               }
             ],
             "description": "Required skills supplied by this environment, checked before model inference."
+          },
+          "websocketRequestId": {
+            "description": "Optional X-Request-ID for the direct WebSocket upgrade, including reconnects. Requires a secure transport or a loopback destination.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -21089,22 +21178,38 @@
           "alloy",
           "arbor",
           "ash",
+          "aube",
           "ballad",
           "breeze",
+          "bubbie",
           "cedar",
           "coral",
           "cove",
           "echo",
           "ember",
+          "haetsal",
+          "hanul",
+          "himari",
           "juniper",
+          "leher",
           "maple",
           "marin",
+          "miko",
+          "neer",
+          "porto",
+          "rindo",
+          "rio",
+          "rivage",
           "sage",
+          "selva",
           "shimmer",
           "sol",
+          "sonna",
           "spruce",
+          "tinta",
           "vale",
-          "verse"
+          "verse",
+          "viola"
         ],
         "type": "string"
       },
@@ -21123,6 +21228,13 @@
             "type": "array"
           },
           "v2": {
+            "items": {
+              "$ref": "#/definitions/v2/RealtimeVoice"
+            },
+            "type": "array"
+          },
+          "v3": {
+            "default": [],
             "items": {
               "$ref": "#/definitions/v2/RealtimeVoice"
             },
@@ -21912,6 +22024,12 @@
                 },
                 "type": "array"
               },
+              "encrypted_content": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "id": {
                 "type": [
                   "string",
@@ -21940,6 +22058,12 @@
               },
               "role": {
                 "type": "string"
+              },
+              "status": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "type": {
                 "enum": [
@@ -22071,6 +22195,12 @@
                   "null"
                 ]
               },
+              "encrypted_content": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "id": {
                 "description": "Legacy id field retained for compatibility with older payloads.",
                 "type": [
@@ -22115,6 +22245,12 @@
               "call_id": {
                 "type": "string"
               },
+              "encrypted_content": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "encrypted_function_args": {
                 "items": {
                   "type": "string"
@@ -22149,6 +22285,12 @@
                   "null"
                 ]
               },
+              "status": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "type": {
                 "enum": [
                   "function_call"
@@ -22170,6 +22312,12 @@
             "properties": {
               "arguments": true,
               "call_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "encrypted_content": {
                 "type": [
                   "string",
                   "null"
@@ -22274,6 +22422,12 @@
             "properties": {
               "call_id": {
                 "type": "string"
+              },
+              "encrypted_content": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "id": {
                 "type": [
@@ -22435,6 +22589,12 @@
                   }
                 ]
               },
+              "encrypted_content": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "id": {
                 "type": [
                   "string",
@@ -22473,6 +22633,12 @@
           },
           {
             "properties": {
+              "encrypted_content": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "id": {
                 "type": [
                   "string",
@@ -24957,6 +25123,10 @@
             "description": "When true, return only thread metadata and live fork state without populating `thread.turns`. This is useful when the client plans to call `thread/turns/list` immediately after forking. Full-history hydration is deprecated for paginated threads; use this with `thread/turns/list` and `thread/items/list` instead.",
             "type": "boolean"
           },
+          "experimentalPredictionMode": {
+            "description": "Start from the loaded parent's effective config, tools, environments, and persisted history to maximize prompt-cache reuse. Requires a loaded, persisted parent and `ephemeral: true`. Enables `features.reasoning_effort_override` on the fork. Cannot be combined with configuration overrides, `path`, `lastTurnId`, or `beforeTurnId`.",
+            "type": "boolean"
+          },
           "lastTurnId": {
             "description": "Optional last turn id to fork through, inclusive.\n\nWhen specified, turns after `last_turn_id` are omitted from the fork. The referenced turn cannot be in progress.",
             "type": [
@@ -26469,6 +26639,49 @@
         "title": "ThreadItemsListResponse",
         "type": "object"
       },
+      "ThreadItemsReadParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "EXPERIMENTAL - retrieve a bounded set of persisted items from one turn.",
+        "properties": {
+          "itemIds": {
+            "description": "Item IDs to retrieve. Supply 1 to 100 IDs.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "threadId": {
+            "type": "string"
+          },
+          "turnId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "itemIds",
+          "threadId",
+          "turnId"
+        ],
+        "title": "ThreadItemsReadParams",
+        "type": "object"
+      },
+      "ThreadItemsReadResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "EXPERIMENTAL - persisted items returned in canonical stored order.",
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/definitions/v2/ThreadItemEntry"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "ThreadItemsReadResponse",
+        "type": "object"
+      },
       "ThreadListCwdFilter": {
         "anyOf": [
           {
@@ -26516,6 +26729,16 @@
               }
             ],
             "description": "Optional cwd filter or filters; when set, only threads whose session cwd exactly matches one of these paths are returned."
+          },
+          "excludedThreadIds": {
+            "description": "Thread IDs to exclude before applying the result limit. Up to 100 entries; invalid IDs or a larger list are rejected, never truncated. Send the same exclusions on each page. Omitted, null, or empty means no exclusions.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "limit": {
             "description": "Optional page size; defaults to a reasonable server-side value.",
@@ -26634,6 +26857,16 @@
             "description": "Opaque cursor to pass to the next call to continue after the last item. if None, there are no more items to return.",
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "readStates": {
+            "additionalProperties": {
+              "$ref": "#/definitions/v2/ThreadReadState"
+            },
+            "description": "Local receipts for eligible threads on this page, keyed by thread ID. Null means durable read state is unavailable; an absent key means that row is ineligible.",
+            "type": [
+              "object",
               "null"
             ]
           }
@@ -27167,6 +27400,17 @@
       "ThreadReadResponse": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
+          "readState": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ThreadReadState"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Local receipt. Null means this thread's durable read state is unavailable."
+          },
           "thread": {
             "$ref": "#/definitions/v2/Thread"
           }
@@ -27175,6 +27419,116 @@
           "thread"
         ],
         "title": "ThreadReadResponse",
+        "type": "object"
+      },
+      "ThreadReadState": {
+        "description": "The first unread position in a durable local thread. A null position means read. The opaque revision guards edits against activity or marks the caller has not seen.",
+        "properties": {
+          "firstUnread": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ThreadUnreadPosition"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revision": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "revision"
+        ],
+        "type": "object"
+      },
+      "ThreadReadStateChangedNotification": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "readState": {
+            "$ref": "#/definitions/v2/ThreadReadState"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "readState",
+          "threadId"
+        ],
+        "title": "ThreadReadStateChangedNotification",
+        "type": "object"
+      },
+      "ThreadReadStateOperation": {
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "read"
+                ],
+                "title": "ReadThreadReadStateOperationType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "ReadThreadReadStateOperation",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "unread"
+                ],
+                "title": "UnreadThreadReadStateOperationType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "UnreadThreadReadStateOperation",
+            "type": "object"
+          }
+        ]
+      },
+      "ThreadReadStateUpdateParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "expectedRevision": {
+            "description": "Revision of the row or transcript actually seen. Conflicts require a fresh user action.",
+            "type": "string"
+          },
+          "operation": {
+            "$ref": "#/definitions/v2/ThreadReadStateOperation"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "expectedRevision",
+          "operation",
+          "threadId"
+        ],
+        "title": "ThreadReadStateUpdateParams",
+        "type": "object"
+      },
+      "ThreadReadStateUpdateResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "readState": {
+            "$ref": "#/definitions/v2/ThreadReadState"
+          }
+        },
+        "required": [
+          "readState"
+        ],
+        "title": "ThreadReadStateUpdateResponse",
         "type": "object"
       },
       "ThreadRealtimeAppendAudioParams": {
@@ -30013,6 +30367,48 @@
         "title": "ThreadUnarchiveResponse",
         "type": "object"
       },
+      "ThreadUnreadPosition": {
+        "oneOf": [
+          {
+            "description": "Explicitly marked unread, including when the thread has no turns.",
+            "properties": {
+              "type": {
+                "enum": [
+                  "threadStart"
+                ],
+                "title": "ThreadStartThreadUnreadPositionType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "ThreadStartThreadUnreadPosition",
+            "type": "object"
+          },
+          {
+            "description": "The earliest completed result needing attention.",
+            "properties": {
+              "turnId": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "turn"
+                ],
+                "title": "TurnThreadUnreadPositionType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "turnId",
+              "type"
+            ],
+            "title": "TurnThreadUnreadPosition",
+            "type": "object"
+          }
+        ]
+      },
       "ThreadUnsubscribeParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
@@ -31037,6 +31433,10 @@
           },
           "output": {
             "$ref": "#/definitions/v2/FunctionCallOutputBody"
+          },
+          "retain": {
+            "description": "Requests retention of this output in the thread's model history.",
+            "type": "boolean"
           }
         },
         "required": [

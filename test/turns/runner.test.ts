@@ -996,7 +996,7 @@ describe("TurnRunner", () => {
     expect(started).toHaveBeenCalledAfter(vi.mocked(host.turnStart));
   });
 
-  it("resumes and forks with the requested lineage", async () => {
+  it("reapplies the proxy sandbox on resume and preserves resume/fork lineage", async () => {
     const { events, host } = createHost();
     vi.mocked(host.turnStart).mockImplementation(async ({ threadId }) => {
       emitCompletedTurn(events, threadId, "turn-1", "final", false);
@@ -1018,7 +1018,7 @@ describe("TurnRunner", () => {
     );
 
     expect(host.threadResume).toHaveBeenCalledWith(
-      { threadId: "thread-existing" },
+      { threadId: "thread-existing", sandbox: "danger-full-access" },
       expect.any(AbortSignal),
     );
     expect(host.threadFork).toHaveBeenCalledWith(
