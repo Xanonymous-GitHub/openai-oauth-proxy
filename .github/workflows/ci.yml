@@ -13,7 +13,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       REQUIRE_EXTERNAL_AGENTS: "1"
-      HERMES_HOME: ${{ runner.temp }}/hermes-home
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -26,6 +25,8 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+      - name: Set Hermes home
+        run: printf 'HERMES_HOME=%s/hermes-home\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Install pinned external agent clients
         env:
           HERMES_COMMIT: e06df9c2eae6901f4c88f464e0ae6e753c0428b8
