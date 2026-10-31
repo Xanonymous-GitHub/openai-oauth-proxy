@@ -358,12 +358,20 @@ class JsonlTransport implements CodexTransport {
     this.#failed = true;
     this.#resolveFailure?.();
     this.#resolveFailure = undefined;
-    const error = new CodexProtocolError();
-    this.rejectPending(error);
     for (const tool of this.#pendingTools) tool.active = false;
     this.#pendingTools.clear();
-    this.#events.fail(error);
-    this.#toolCalls.fail(error);
+    // A supervisor reacts to `failure` by invalidating this generation, which
+    // rejects consumers with CodexGenerationChangedError. Codex 0.166 closes
+    // stdout before the child's `exit` event, so a synchronous rejection here
+    // would always win and surface the raw EOF as a protocol error instead.
+    // Queue the rejection behind the supervisor's reaction; queues keep the
+    // first error, so a standalone transport still reports the protocol error.
+    queueMicrotask(() => {
+      const error = new CodexProtocolError();
+      this.rejectPending(error);
+      this.#events.fail(error);
+      this.#toolCalls.fail(error);
+    });
   }
 
   private rejectPending(error: Error): void {
