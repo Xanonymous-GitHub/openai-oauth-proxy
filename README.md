@@ -62,7 +62,7 @@ The example Secret is intentionally invalid and excluded from Kustomize. Never c
 
 ## Verification
 
-The offline gate uses Node 26, the latest Bun release, Python 3.15.0, Codex 0.163.0, the official OpenAI JavaScript client, a real fixture-provider App Server, real pinned Bifrost when Docker is available, and representative OpenCode/Hermes clients. External agent tests are explicitly skipped only when the corresponding binary is absent; CI installs pinned OpenCode 2.0.29 with `bun i -g --trust @opencode/cli@2.0.29` and Hermes Agent 0.22.0 so both are required there. Hermes uses its separate installer-managed Python 3.14.7 environment.
+The offline gate uses Node 26, the latest Bun release, Python 3.15.x, Codex 0.166.0, the official OpenAI JavaScript client, a real fixture-provider App Server, real pinned Bifrost when Docker is available, and representative OpenCode/Hermes clients. External agent tests are explicitly skipped only when the corresponding binary is absent; CI installs pinned OpenCode 2.2.5 with `bun i -g --trust @opencode/cli@2.2.5` and Hermes Agent 0.22.5 so both are required there. Hermes uses its separate installer-managed Python 3.14.9 environment.
 
 Run `bun install --frozen-lockfile`, `bun run protocol:check`, `bun run deps:check`, and `bun run check`. Docker and Kubernetes release checks must be reported as passed or unavailable, never conflated.
 

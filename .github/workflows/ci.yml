@@ -21,7 +21,7 @@ jobs:
           cache: ""
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.15.0"
+          python-version: "3.15"
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
@@ -29,10 +29,10 @@ jobs:
         run: printf 'HERMES_HOME=%s/hermes-home\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Install pinned external agent clients
         env:
-          HERMES_COMMIT: e06df9c2eae6901f4c88f464e0ae6e753c0428b8
-          HERMES_INSTALLER_SHA256: f4cdb0e20f1aca2c3871a76b962fd4db61510f549cf973759c753ac13349beb5
+          HERMES_COMMIT: bf0203a794a07aac3ff764972ab9087baa4e4f4e
+          HERMES_INSTALLER_SHA256: 99cb3691d55019c6973a7acb775a915648666cc24e483ca827a1cdbb3531a674
         run: |
-          bun i -g --trust @opencode/cli@2.0.29
+          bun i -g --trust @opencode/cli@2.2.5
           HERMES_INSTALLER="$RUNNER_TEMP/hermes-install.sh"
           curl -fsSL \
             "https://raw.githubusercontent.com/NousResearch/hermes-agent/$HERMES_COMMIT/scripts/install.sh" \
@@ -48,12 +48,12 @@ jobs:
             --hermes-home "$HERMES_HOME" \
             --dir "$HERMES_HOME/hermes-agent"
           printf '%s\n' "$HOME/.local/bin" >> "$GITHUB_PATH"
-          python -c 'import sys; assert sys.version_info[:3] == (3, 15, 0), sys.version'
-          test "$(opencode --version)" = "opencode v2.0.29"
+          python -c 'import sys; assert sys.version_info[:2] == (3, 15), sys.version'
+          test "$(opencode --version)" = "opencode v2.2.5"
           test "$(git -C "$HERMES_HOME/hermes-agent" rev-parse HEAD)" = "$HERMES_COMMIT"
           HERMES_VERSION="$("$HOME/.local/bin/hermes" --version)"
-          printf '%s\n' "$HERMES_VERSION" | grep -E '^Hermes Agent v0\.22\.0( |$)'
-          printf '%s\n' "$HERMES_VERSION" | grep -Fx 'Python: 3.14.7'
+          printf '%s\n' "$HERMES_VERSION" | grep -E '^Hermes Agent v0\.22\.5( |$)'
+          printf '%s\n' "$HERMES_VERSION" | grep -Fx 'Python: 3.14.9'
       - run: bun install --frozen-lockfile
       - run: bun run protocol:check
       - run: bun run deps:check
