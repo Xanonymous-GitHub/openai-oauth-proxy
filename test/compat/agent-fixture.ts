@@ -282,6 +282,13 @@ export async function runAgentSmoke(agent: "opencode" | "hermes") {
     ]);
     if (container.exitCode === null) container.kill("SIGKILL");
     await proxy.close();
-    rmSync(directory, { recursive: true, force: true });
+    // The container and the agent can still be flushing files into this
+    // directory as they exit, which makes the first removal fail with ENOTEMPTY.
+    rmSync(directory, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 500,
+    });
   }
 }
