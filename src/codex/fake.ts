@@ -17,6 +17,7 @@ export function fakeAccountResponse(
       type: "chatgpt",
       email: "fixture@example.com",
       planType: "plus",
+      workspaceName: null,
     },
     requiresOpenaiAuth: true,
     workspaceRouting: null,

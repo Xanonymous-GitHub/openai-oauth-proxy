@@ -40,6 +40,7 @@ function fakeHost(
         type: "chatgpt",
         email: "person@example.com",
         planType: "plus",
+        workspaceName: "Fixture Workspace",
       },
     }),
 ) {
@@ -196,6 +197,7 @@ it("re-reads a new generation and ignores stale notifications and reads", async 
           type: "chatgpt",
           email: "new@example.com",
           planType: "pro",
+          workspaceName: null,
         },
       }),
     );
@@ -215,6 +217,7 @@ it("re-reads a new generation and ignores stale notifications and reads", async 
         type: "chatgpt",
         email: "stale@example.com",
         planType: "plus",
+        workspaceName: null,
       },
     }),
   );
@@ -276,6 +279,7 @@ it("prevents a pending account read from overwriting device login state", async 
             type: "chatgpt",
             email: "person@example.com",
             planType: "plus",
+            workspaceName: null,
           },
         }),
       )
@@ -333,6 +337,7 @@ it("does not let account updates start reads while logout is active", async () =
             type: "chatgpt",
             email: "person@example.com",
             planType: "plus",
+            workspaceName: null,
           },
         }),
       )
@@ -342,6 +347,7 @@ it("does not let account updates start reads while logout is active", async () =
             type: "chatgpt",
             email: "old-account@example.com",
             planType: "plus",
+            workspaceName: null,
           },
         }),
       ),
@@ -395,6 +401,7 @@ it("keeps successful logout authoritative over forced and notification reads", a
             type: "chatgpt",
             email: "person@example.com",
             planType: "plus",
+            workspaceName: null,
           },
         }),
       )
@@ -405,6 +412,7 @@ it("keeps successful logout authoritative over forced and notification reads", a
             type: "chatgpt",
             email: "old-account@example.com",
             planType: "plus",
+            workspaceName: null,
           },
         }),
       ),
@@ -434,6 +442,7 @@ it("keeps successful logout authoritative over forced and notification reads", a
         type: "chatgpt",
         email: "old-account@example.com",
         planType: "plus",
+        workspaceName: null,
       },
     }),
   );

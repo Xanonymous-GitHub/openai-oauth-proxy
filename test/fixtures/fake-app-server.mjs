@@ -151,6 +151,7 @@ function handleRequest({ id, method, params }) {
           type: "chatgpt",
           email: "fixture@example.com",
           planType: "plus",
+          workspaceName: null,
         },
         requiresOpenaiAuth: true,
       });

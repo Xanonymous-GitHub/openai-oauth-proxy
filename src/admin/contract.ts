@@ -1,26 +1,32 @@
 import type { AccountState } from "../codex/account.js";
 import type { PlanType } from "../codex/generated/PlanType.js";
 
-const PLAN_TYPES: ReadonlySet<string> = new Set<PlanType>([
-  "free",
-  "go",
-  "plus",
-  "pro",
-  "prolite",
-  "promax",
-  "team",
-  "self_serve_business_prolite",
-  "self_serve_business_usage_based",
-  "business",
-  "ent26",
-  "enterprise_cbp_automation",
-  "enterprise_cbp_usage_based",
-  "enterprise",
-  "edu",
-  "edu_plus",
-  "edu_pro",
-  "unknown",
-]);
+// `satisfies Record<PlanType, true>` makes tsc fail when Codex adds or removes
+// a plan, instead of the admin contract silently rejecting it at runtime.
+const PLAN_TYPE_KEYS = {
+  free: true,
+  go: true,
+  plus: true,
+  pro: true,
+  prolite: true,
+  promax: true,
+  team: true,
+  self_serve_business_prolite: true,
+  self_serve_business_usage_based: true,
+  business: true,
+  ent26: true,
+  enterprise_cbp_automation: true,
+  enterprise_cbp_usage_based: true,
+  enterprise: true,
+  edu: true,
+  edu_plus: true,
+  edu_pro: true,
+  sci: true,
+  sci_plus: true,
+  unknown: true,
+} satisfies Record<PlanType, true>;
+
+const PLAN_TYPES: ReadonlySet<string> = new Set(Object.keys(PLAN_TYPE_KEYS));
 
 export interface AdminResponse {
   state: AccountState;

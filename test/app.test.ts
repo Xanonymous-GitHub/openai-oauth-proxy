@@ -270,7 +270,12 @@ it("aborts an in-flight response sweep so service close reaches every owner", as
     generation: 1,
     accountRead: vi.fn(async () =>
       fakeAccountResponse({
-        account: { type: "chatgpt", email: null, planType: "plus" },
+        account: {
+          type: "chatgpt",
+          email: null,
+          planType: "plus",
+          workspaceName: null,
+        },
       }),
     ),
     events: vi.fn(() => events),
@@ -501,6 +506,7 @@ it("rejects model requests before the first host is ready without a generation-z
             type: "chatgpt",
             email: "person@example.com",
             planType: "plus",
+            workspaceName: null,
           },
         }),
     } as unknown as CodexHost);
@@ -544,6 +550,7 @@ it("serves Chat and Responses through the production listener after host readine
           type: "chatgpt",
           email: "person@example.com",
           planType: "plus",
+          workspaceName: null,
         },
       }),
     ),
@@ -710,6 +717,7 @@ it("aborts hung Responses cleanup at the drain deadline and retains reconciliati
           type: "chatgpt",
           email: "person@example.com",
           planType: "plus",
+          workspaceName: null,
         },
       }),
     ),
