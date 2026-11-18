@@ -31,7 +31,7 @@ Direnv loads the tokens while the repository directory is active; `compose.yml` 
 
 ## Bifrost
 
-Use pinned multiarch Bifrost `maximhq/bifrost:v1.6.3@sha256:95caedb1c368c6d88178c2b98b9238d8a6a62b51d9cb12b6661bf2671ed1aaa4`. Start from `deploy/bifrost/config.example.json`, replace the example `namespace` in its service FQDN, and keep `allow_private_network: true`.
+Use pinned multiarch Bifrost `maximhq/bifrost:v1.6.11@sha256:ef8e686b3588884066ec3d0e57f3fc15136b11047ad94678adefe5a9573539af`. Start from `deploy/bifrost/config.example.json`, replace the example `namespace` in its service FQDN, and keep `allow_private_network: true`.
 
 The Bifrost environment variable `OPENAI_PROXY_TOKEN` must equal the proxy Secret value `BIFROST_PROXY_TOKEN`. Clients send models as `openai/gpt-5.4`; Bifrost removes the provider prefix. The upstream `base_url` is the proxy origin without `/v1`, because Bifrost appends the incoming `/v1/*` path.
 
@@ -62,7 +62,7 @@ The example Secret is intentionally invalid and excluded from Kustomize. Never c
 
 ## Verification
 
-The offline gate uses Node 26, the latest Bun release, Python 3.15.x, Codex 0.166.0, the official OpenAI JavaScript client, a real fixture-provider App Server, real pinned Bifrost when Docker is available, and representative OpenCode/Hermes clients. External agent tests are explicitly skipped only when the corresponding binary is absent; CI installs pinned OpenCode 2.2.5 with `bun i -g --trust @opencode/cli@2.2.5` and Hermes Agent 0.22.5 so both are required there. Hermes uses its separate installer-managed Python 3.14.9 environment.
+The offline gate uses Node 26, the latest Bun release, Python 3.15.x, Codex 0.170.0, the official OpenAI JavaScript client, a real fixture-provider App Server, real pinned Bifrost when Docker is available, and representative OpenCode/Hermes clients. External agent tests are explicitly skipped only when the corresponding binary is absent; CI installs pinned OpenCode 2.3.2 with `bun i -g --trust @opencode/cli@2.3.2` and Hermes Agent 0.23.2 so both are required there. Hermes uses its separate installer-managed Python 3.14.9 environment.
 
 Run `bun install --frozen-lockfile`, `bun run protocol:check`, `bun run deps:check`, and `bun run check`. Docker and Kubernetes release checks must be reported as passed or unavailable, never conflated.
 

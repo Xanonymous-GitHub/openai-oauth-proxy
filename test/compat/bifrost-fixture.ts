@@ -18,7 +18,7 @@ import { join } from "node:path";
 import OpenAI from "openai";
 
 export const BIFROST_IMAGE =
-  "maximhq/bifrost:v1.6.3@sha256:95caedb1c368c6d88178c2b98b9238d8a6a62b51d9cb12b6661bf2671ed1aaa4";
+  "maximhq/bifrost:v1.6.11@sha256:ef8e686b3588884066ec3d0e57f3fc15136b11047ad94678adefe5a9573539af";
 export const BIFROST_READY_TIMEOUT_MS = 60_000;
 const BIFROST_CONFIG_PATH = "deploy/bifrost/config.example.json";
 

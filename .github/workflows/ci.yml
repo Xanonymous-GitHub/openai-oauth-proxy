@@ -29,10 +29,10 @@ jobs:
         run: printf 'HERMES_HOME=%s/hermes-home\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Install pinned external agent clients
         env:
-          HERMES_COMMIT: bf0203a794a07aac3ff764972ab9087baa4e4f4e
-          HERMES_INSTALLER_SHA256: 99cb3691d55019c6973a7acb775a915648666cc24e483ca827a1cdbb3531a674
+          HERMES_COMMIT: ae2a81ccc00e9b7c06301523e5bb09608397149c
+          HERMES_INSTALLER_SHA256: c73dad4dcf7c9ecadb98578e28cc763d23d7be3fa1b513545319038795493214
         run: |
-          bun i -g --trust @opencode/cli@2.2.5
+          bun i -g --trust @opencode/cli@2.3.2
           HERMES_INSTALLER="$RUNNER_TEMP/hermes-install.sh"
           curl -fsSL \
             "https://raw.githubusercontent.com/NousResearch/hermes-agent/$HERMES_COMMIT/scripts/install.sh" \
@@ -49,10 +49,10 @@ jobs:
             --dir "$HERMES_HOME/hermes-agent"
           printf '%s\n' "$HOME/.local/bin" >> "$GITHUB_PATH"
           python -c 'import sys; assert sys.version_info[:2] == (3, 15), sys.version'
-          test "$(opencode --version)" = "opencode v2.2.5"
+          test "$(opencode --version)" = "opencode v2.3.2"
           test "$(git -C "$HERMES_HOME/hermes-agent" rev-parse HEAD)" = "$HERMES_COMMIT"
           HERMES_VERSION="$("$HOME/.local/bin/hermes" --version)"
-          printf '%s\n' "$HERMES_VERSION" | grep -E '^Hermes Agent v0\.22\.5( |$)'
+          printf '%s\n' "$HERMES_VERSION" | grep -E '^Hermes Agent v0\.23\.2( |$)'
           printf '%s\n' "$HERMES_VERSION" | grep -Fx 'Python: 3.14.9'
       - run: bun install --frozen-lockfile
       - run: bun run protocol:check
