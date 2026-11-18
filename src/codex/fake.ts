@@ -20,6 +20,7 @@ export function fakeAccountResponse(
       workspaceName: null,
     },
     requiresOpenaiAuth: true,
+    userId: null,
     workspaceRouting: null,
     ...overrides,
   };
@@ -64,6 +65,7 @@ export function fakeThread(overrides: Partial<Thread> = {}): Thread {
     sessionId: "session-1",
     forkedFromId: null,
     parentThreadId: null,
+    attachedToThreadId: null,
     preview: "",
     ephemeral: false,
     section: null,

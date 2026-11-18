@@ -27,6 +27,7 @@ function thread(id, forkedFromId = null) {
     sessionId: "session-1",
     forkedFromId,
     parentThreadId: null,
+    attachedToThreadId: null,
     preview: "",
     ephemeral: false,
     section: null,
@@ -112,6 +113,7 @@ function emitCompletion(
         text,
         phase: null,
         memoryCitation: null,
+        moderation: null,
       },
     },
   });
@@ -154,6 +156,7 @@ function handleRequest({ id, method, params }) {
           workspaceName: null,
         },
         requiresOpenaiAuth: true,
+        userId: null,
       });
       break;
     case "account/login/start":
